@@ -1,17 +1,23 @@
+use crate::db::{bind_account, list_all};
+use crate::ranked::{try_create_ranked_from_account, RankedPlayer};
 use anyhow::Context as _;
-use reqwest::Url;
-use serde::Deserialize;
-use serenity::all::Timestamp;
+use poise::futures_util::stream;
+use poise::futures_util::StreamExt;
+use serenity::all::ChannelId;
+use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
 use sqlx::{Executor, PgPool};
-use crate::db::bind_account;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
+mod aoe4world;
 mod db;
+mod ranked;
+
+static RANK_CHANNEL_ID: ChannelId = ChannelId::new(1263079883937153105u64);
 
 struct Data {
     database: PgPool,
@@ -33,54 +39,40 @@ pub async fn bind(_: Context<'_>) -> Result<(), Error> {
 pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
     let user_id = ctx.author().id;
     ctx.say("bind!").await?;
-    let message = bind_account(&ctx.data().database, i32::try_from(u64::from(user_id)).unwrap(), aoe4_id).await?;
+    let message = bind_account(
+        &ctx.data().database,
+        i32::try_from(u64::from(user_id)).unwrap(),
+        aoe4_id,
+    )
+    .await?;
     ctx.say(message).await?;
     Ok(())
 }
 
-#[derive(Deserialize, Debug)]
-struct Profile {
-    name: String,
-    modes: Modes
-}
+#[poise::command(slash_command)]
+pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
+    let accounts = list_all(&ctx.data().database).await?;
+    let mut players = stream::iter(accounts)
+        .filter_map(|account| try_create_ranked_from_account(&ctx, account))
+        .collect::<Vec<RankedPlayer>>()
+        .await;
+    players.sort();
+    let sorted_players = players;
 
-#[derive(Deserialize, Debug)]
-struct Modes {
-    rm_solo: RankedData,
-    rm_1v1_elo: RankedEloData
-}
+    // clear all existing messages in the channel
+    let messages = ctx.http().get_messages(RANK_CHANNEL_ID, None, None).await?;
+    let message_ids = messages.iter().map(|message| message.id).collect::<Vec<_>>();
+    ctx.http()
+        .delete_messages(RANK_CHANNEL_ID, &json!(&message_ids), None)
+        .await?;
 
-#[derive(Deserialize, Debug)]
-struct RankedData {
-    rank_level: String,
-    games_count: i32,
-    civilizations: Vec<CivData>
-}
+    for (i, player) in sorted_players.iter().enumerate() {
+        let text = format!("第{}名  {}", i, player);
+        ctx.say(text).await?;
+    }
 
-#[derive(Deserialize, Debug)]
-struct CivData {
-    civilization: String,
-    pick_rate: f64,
-}
-
-#[derive(Deserialize, Debug)]
-struct RankedEloData {
-    rating: i32,
-    max_rating: i32,
-    max_rating_1m: i32,
-    rank: i32,
-    last_game_at: Timestamp
-}
-
-#[tokio::test]
-async fn get_profile() -> Result<(), Error>{
-    let id = "76561198086414555";
-    let url = Url::parse("https://aoe4world.com/api/v0/players/")?.join(id)?;
-    let profile = reqwest::get(url).await?.json::<Profile>().await?;
-    println!("In game name: {}, top civ: {}, max rating: {}, last played: {}", profile.name, profile.modes.rm_solo.civilizations[0].civilization, profile.modes.rm_1v1_elo.max_rating, profile.modes.rm_1v1_elo.last_game_at);
     Ok(())
 }
-
 
 #[shuttle_runtime::main]
 async fn serenity(
@@ -110,7 +102,7 @@ async fn serenity(
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![hello(), bind(), id()],
+            commands: vec![hello(), bind(), id(), refresh()],
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
