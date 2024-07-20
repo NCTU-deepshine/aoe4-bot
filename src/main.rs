@@ -3,12 +3,11 @@ use crate::ranked::{try_create_ranked_from_account, RankedPlayer};
 use anyhow::Context as _;
 use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
-use serenity::all::{ChannelId, ExecuteWebhook};
+use serenity::all::{ChannelId};
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
 use sqlx::{Executor, PgPool};
-use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -166,20 +165,6 @@ async fn serenity(
         .framework(framework)
         .await
         .expect("Err creating client");
-
-    let sched = JobScheduler::new().await.unwrap();
-    sched.add(
-        Job::new_async("0 * * * * *", move |_uuid, _l| Box::pin ({
-            let token_cloned = token.clone();
-            async move {
-                let http = serenity::http::Http::new(&token_cloned);
-                info!("refresh triggered by cron");
-                let webhook = serenity::model::webhook::Webhook::from_url(&http, "https://discord.com/api/webhooks/1264316263052738613/rEh_lKsHiCdTnYg6f52uUBt9y0WWBd2oghOURMUtTdbGkeP_4p4ckTWI-L5KTQ75QwOl").await.unwrap();
-                webhook.execute(&http, false, ExecuteWebhook::new().content("/refresh")).await.unwrap();
-            }
-        })).unwrap()
-    ).await.unwrap();
-    sched.start().await.unwrap();
-
+   
     Ok(client.into())
 }
