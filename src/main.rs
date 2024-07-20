@@ -70,6 +70,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         .await;
     players.sort();
     let sorted_players = players;
+    info!("collected and sorted {} players", sorted_players.len());
 
     info!("clearing all existing messages in the channel");
     let messages = ctx
@@ -111,6 +112,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 async fn send_rankings(ctx: &Context<'_>, content: &String) -> Result<(), Error> {
+    info!("attempt to write: {}", content);
     ctx.http()
         .get_channel(RANK_CHANNEL_ID)
         .await?
