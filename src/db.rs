@@ -1,4 +1,5 @@
 use sqlx::{FromRow, PgPool};
+use tracing::error;
 
 #[derive(FromRow)]
 pub(crate) struct Account {
@@ -11,7 +12,11 @@ pub(crate) async fn bind_account(pool: &PgPool, user_id: i32, aoe4_id: i32) -> R
         .bind(user_id)
         .bind(aoe4_id)
         .execute(pool)
-        .await.map_err(|err| panic!("database operation failed with error {}", err.to_string())).unwrap();
+        .await
+        .map_err(|err| {
+            error!("database operation failed with error {}", err.to_string());
+            err
+        })?;
 
     Ok(format!(
         "Bound discord user `{}` to aoe4 world profile `{}` ",
@@ -22,6 +27,10 @@ pub(crate) async fn bind_account(pool: &PgPool, user_id: i32, aoe4_id: i32) -> R
 pub(crate) async fn list_all(pool: &PgPool) -> Result<Vec<Account>, sqlx::Error> {
     let accounts: Vec<Account> = sqlx::query_as("select user_id, aoe4_id from accounts")
         .fetch_all(pool)
-        .await.map_err(|err| panic!("database operation failed with error {}", err.to_string())).unwrap();
+        .await
+        .map_err(|err| {
+            error!("database operation failed with error {}", err.to_string());
+            err
+        })?;
     Ok(accounts)
 }
