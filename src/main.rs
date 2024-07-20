@@ -18,7 +18,7 @@ mod aoe4world;
 mod db;
 mod ranked;
 
-static RANK_CHANNEL_ID: ChannelId = ChannelId::new(1263079883937153105u64);
+static RANK_CHANNEL_ID: ChannelId = ChannelId::new(1263079883937153105);
 
 struct Data {
     database: PgPool,
@@ -97,18 +97,27 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         buffer = buffer + &text;
 
         if i % 10 == 9 {
-            ctx.http()
-                .get_channel(RANK_CHANNEL_ID)
-                .await?
-                .guild()
-                .unwrap()
-                .say(ctx.http(), buffer)
-                .await?;
+            send_rankings(&ctx, &buffer).await?;
             buffer = String::new();
         }
     }
 
+    if !buffer.is_empty() {
+        send_rankings(&ctx, &buffer).await?;
+    }
+
     ctx.say("refresh done").await?;
+    Ok(())
+}
+
+async fn send_rankings(ctx: &Context<'_>, content: &String) -> Result<(), Error> {
+    ctx.http()
+        .get_channel(RANK_CHANNEL_ID)
+        .await?
+        .guild()
+        .unwrap()
+        .say(ctx.http(), content)
+        .await?;
     Ok(())
 }
 
