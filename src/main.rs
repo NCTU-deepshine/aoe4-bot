@@ -58,6 +58,8 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
 #[poise::command(slash_command)]
 pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     info!("attempting to refresh");
+    ctx.say("refresh triggered").await?;
+
     let accounts = list_all(&ctx.data().database).await.map_err(|error| {
         error!("database query failed");
         error
@@ -69,7 +71,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     players.sort();
     let sorted_players = players;
 
-    // clear all existing messages in the channel
+    info!("clearing all existing messages in the channel");
     let messages = ctx
         .http()
         .get_messages(RANK_CHANNEL_ID, None, None)
@@ -89,11 +91,24 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
             })?;
     }
 
+    let mut buffer = String::new();
     for (i, player) in sorted_players.iter().enumerate() {
-        let text = format!("第{}名  {}", i, player);
-        ctx.say(text).await?;
+        let text = format!("第{}名  {}\n", i + 1, player);
+        buffer = buffer + &text;
+
+        if i % 10 == 9 {
+            ctx.http()
+                .get_channel(RANK_CHANNEL_ID)
+                .await?
+                .guild()
+                .unwrap()
+                .say(ctx.http(), buffer)
+                .await?;
+            buffer = String::new();
+        }
     }
 
+    ctx.say("refresh done").await?;
     Ok(())
 }
 
