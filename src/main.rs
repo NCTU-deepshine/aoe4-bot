@@ -37,21 +37,23 @@ pub async fn bind(_: Context<'_>) -> Result<(), Error> {
 
 #[poise::command(slash_command)]
 pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
+    println!("attempting to bind {}", aoe4_id);
     let user_id = ctx.author().id;
-    ctx.say("bind!").await?;
+    println!("binding discord user {} with aoe4 player {}", user_id, aoe4_id);
     let message = bind_account(
         &ctx.data().database,
         i32::try_from(u64::from(user_id)).unwrap(),
         aoe4_id,
     )
-    .await?;
+    .await.expect("database insert failed");
     ctx.say(message).await?;
     Ok(())
 }
 
 #[poise::command(slash_command)]
 pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
-    let accounts = list_all(&ctx.data().database).await?;
+    println!("attempting to refresh");
+    let accounts = list_all(&ctx.data().database).await.expect("database query failed");
     let mut players = stream::iter(accounts)
         .filter_map(|account| try_create_ranked_from_account(&ctx, account))
         .collect::<Vec<RankedPlayer>>()
@@ -60,11 +62,13 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     let sorted_players = players;
 
     // clear all existing messages in the channel
-    let messages = ctx.http().get_messages(RANK_CHANNEL_ID, None, None).await?;
+    let messages = ctx.http().get_messages(RANK_CHANNEL_ID, None, None).await.expect("getting message from discord channel failed");
     let message_ids = messages.iter().map(|message| message.id).collect::<Vec<_>>();
-    ctx.http()
-        .delete_messages(RANK_CHANNEL_ID, &json!(&message_ids), None)
-        .await?;
+    if !message_ids.is_empty() {
+        ctx.http()
+            .delete_messages(RANK_CHANNEL_ID, &json!(&message_ids), None)
+            .await.expect("deleting existing messages from discord failed");
+    }
 
     for (i, player) in sorted_players.iter().enumerate() {
         let text = format!("第{}名  {}", i, player);
