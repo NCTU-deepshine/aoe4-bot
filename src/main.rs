@@ -3,11 +3,12 @@ use crate::ranked::{try_create_ranked_from_account, RankedPlayer};
 use anyhow::Context as _;
 use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
-use serenity::all::{ChannelId};
+use serenity::all::{ChannelId, Http};
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
 use sqlx::{Executor, PgPool};
+use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -56,15 +57,21 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
 
 #[poise::command(slash_command, guild_cooldown = 600)]
 pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
-    info!("attempting to refresh");
     ctx.say("refresh triggered").await?;
+    do_refresh(ctx.http(), ctx.data()).await?;
+    ctx.say("refresh done").await?;
+    Ok(())
+}
 
-    let accounts = list_all(&ctx.data().database).await.map_err(|error| {
+async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
+    info!("attempting to refresh");
+
+    let accounts = list_all(&data.database).await.map_err(|error| {
         error!("database query failed");
         error
     })?;
     let mut players = stream::iter(accounts)
-        .filter_map(|account| try_create_ranked_from_account(&ctx, account))
+        .filter_map(|account| try_create_ranked_from_account(http, data, account))
         .collect::<Vec<RankedPlayer>>()
         .await;
     players.sort();
@@ -72,18 +79,13 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     info!("collected and sorted {} players", sorted_players.len());
 
     info!("clearing all existing messages in the channel");
-    let messages = ctx
-        .http()
-        .get_messages(RANK_CHANNEL_ID, None, None)
-        .await
-        .map_err(|error| {
-            error!("getting message from discord channel failed");
-            error
-        })?;
+    let messages = http.get_messages(RANK_CHANNEL_ID, None, None).await.map_err(|error| {
+        error!("getting message from discord channel failed");
+        error
+    })?;
 
     for message_id in messages.iter().map(|message| message.id) {
-        ctx.http()
-            .delete_message(RANK_CHANNEL_ID, message_id, None)
+        http.delete_message(RANK_CHANNEL_ID, message_id, None)
             .await
             .map_err(|error| {
                 error!("deleting existing messages from discord failed");
@@ -97,27 +99,24 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         buffer = buffer + &text;
 
         if i % 10 == 9 {
-            send_rankings(&ctx, &buffer).await?;
+            send_rankings(http, &buffer).await?;
             buffer = String::new();
         }
     }
 
     if !buffer.is_empty() {
-        send_rankings(&ctx, &buffer).await?;
+        send_rankings(http, &buffer).await?;
     }
 
-    ctx.say("refresh done").await?;
     Ok(())
 }
-
-async fn send_rankings(ctx: &Context<'_>, content: &String) -> Result<(), Error> {
+async fn send_rankings(http: &Http, content: &String) -> Result<(), Error> {
     info!("attempt to write: {}", content);
-    ctx.http()
-        .get_channel(RANK_CHANNEL_ID)
+    http.get_channel(RANK_CHANNEL_ID)
         .await?
         .guild()
         .unwrap()
-        .say(ctx.http(), content)
+        .say(http, content)
         .await?;
     Ok(())
 }
@@ -143,11 +142,7 @@ async fn serenity(
         .await
         .context("failed to run migrations")?;
 
-    let data = Data {
-        database: pool,
-        guild_id,
-    };
-
+    let pool_cloned = pool.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![hello(), bind(), id(), refresh()],
@@ -156,7 +151,10 @@ async fn serenity(
         .setup(move |ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id.clone()).await?;
-                Ok(data)
+                Ok(Data {
+                    database: pool_cloned,
+                    guild_id,
+                })
             })
         })
         .build();
@@ -165,6 +163,30 @@ async fn serenity(
         .framework(framework)
         .await
         .expect("Err creating client");
-   
+
+    let sched = JobScheduler::new().await.unwrap();
+    sched
+        .add(
+            Job::new_async("0 0 * * * *", move |_uuid, _l| {
+                Box::pin({
+                    let token_cloned = token.clone();
+                    let pool_cloned = pool.clone();
+                    async move {
+                        let http = Http::new(&token_cloned);
+                        let data = Data {
+                            database: pool_cloned,
+                            guild_id,
+                        };
+                        info!("refresh triggered by cron");
+                        do_refresh(&http, &data).await.unwrap();
+                    }
+                })
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    sched.start().await.unwrap();
+
     Ok(client.into())
 }

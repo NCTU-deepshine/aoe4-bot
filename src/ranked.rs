@@ -1,9 +1,9 @@
 use crate::aoe4world::{CivData, Profile};
 use crate::db::Account;
-use crate::Context;
+use crate::Data;
 use chrono::{DateTime, Utc};
 use reqwest::Url;
-use serenity::all::UserId;
+use serenity::all::{Http, UserId};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use tracing::info;
@@ -103,16 +103,15 @@ impl Display for RankedPlayer {
     }
 }
 
-pub(crate) async fn try_create_ranked_from_account(ctx: &Context<'_>, account: Account) -> Option<RankedPlayer> {
-    let user = ctx.http().get_user(UserId::new(account.user_id as u64)).await.ok()?;
+pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, account: Account) -> Option<RankedPlayer> {
+    let user = http.get_user(UserId::new(account.user_id as u64)).await.ok()?;
     let discord_username = user.name.clone();
     let discord_global_name = user.global_name.clone();
-    let discord_nickname = ctx
-        .http()
-        .get_guild(ctx.data().guild_id)
+    let discord_nickname = http
+        .get_guild(data.guild_id)
         .await
         .ok()?
-        .member(ctx.http(), UserId::new(account.user_id as u64))
+        .member(http, UserId::new(account.user_id as u64))
         .await
         .ok()
         .and_then(|member| member.nick.clone());
