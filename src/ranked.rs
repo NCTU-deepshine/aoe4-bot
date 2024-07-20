@@ -1,6 +1,7 @@
 use crate::aoe4world::{CivData, Profile};
 use crate::db::Account;
 use crate::Context;
+use chrono::{DateTime, Utc};
 use reqwest::Url;
 use serenity::all::UserId;
 use std::cmp::Ordering;
@@ -18,26 +19,61 @@ pub(crate) struct RankedPlayer {
     elo: i32,
     favorite_civ: CivData,
     games_played: i32,
-    last_played: String,
+    last_played: DateTime<Utc>,
+}
+
+impl RankedPlayer {
+    pub(crate) fn last_played(&self) -> String {
+        let days = Utc::now().signed_duration_since(self.last_played).num_days();
+        if days == 0 {
+            "最近".to_string()
+        } else {
+            format!("{}天前", days)
+        }
+    }
+
+    pub(crate) fn rank_level(&self) -> String {
+        match self.rank_level.as_str() {
+            "conqueror_3" => "征服者3".to_string(),
+            "conqueror_2" => "征服者2".to_string(),
+            "conqueror_1" => "征服者1".to_string(),
+            "diamond_3" => "鑽石3".to_string(),
+            "diamond_2" => "鑽石2".to_string(),
+            "diamond_1" => "鑽石1".to_string(),
+            "platinum_3" => "白金3".to_string(),
+            "platinum_2" => "白金2".to_string(),
+            "platinum_1" => "白金1".to_string(),
+            "gold_3" => "黃金3".to_string(),
+            "gold_2" => "黃金2".to_string(),
+            "gold_1" => "黃金1".to_string(),
+            "silver_3" => "白銀3".to_string(),
+            "silver_2" => "白銀2".to_string(),
+            "silver_1" => "白銀1".to_string(),
+            "bronze_3" => "青銅3".to_string(),
+            "bronze_2" => "青銅2".to_string(),
+            "bronze_1" => "青銅1".to_string(),
+            _ => self.rank_level.clone(),
+        }
+    }
 }
 
 impl Eq for RankedPlayer {}
 
 impl PartialEq<Self> for RankedPlayer {
     fn eq(&self, other: &Self) -> bool {
-        self.rating == other.rating
+        self.global_rank == other.global_rank
     }
 }
 
 impl PartialOrd<Self> for RankedPlayer {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.rating.partial_cmp(&other.rating)
+        self.global_rank.partial_cmp(&other.global_rank)
     }
 }
 
 impl Ord for RankedPlayer {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.rating.cmp(&other.rating)
+        self.global_rank.cmp(&other.global_rank)
     }
 }
 
@@ -45,18 +81,21 @@ impl Display for RankedPlayer {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} ({})  遊戲ID： {}\n\
-        階級：{}, 全球排名：{}, 遊戲場次：{}, 愛用文明：{} (出場率 {}), 上次遊玩：{}\n\
-        排名積分：{}, 近期最高積分：{}, ELO：{}",
+            "{} ({})\n\
+            遊戲ID: {}\n\
+            階級: {}\n\
+            全球排名: {}, 遊戲場次：{}\n\
+            愛用文明: {} (出場率 {}), 上次遊玩: {}\n\
+            排名積分: {}, 近期最高積分: {}, ELO: {}",
             self.discord_display,
             self.discord_username,
             self.aoe4_name,
-            self.rank_level,
+            self.rank_level(),
             self.global_rank,
             self.games_played,
-            self.favorite_civ.civilization,
-            self.favorite_civ.pick_rate * 100.0_f64.round(),
-            self.last_played,
+            self.favorite_civ.civilization(),
+            self.favorite_civ.pick_rate.round(),
+            self.last_played(),
             self.rating,
             self.recent_max_rating,
             self.elo
@@ -98,6 +137,20 @@ pub(crate) async fn try_create_ranked_from_account(ctx: &Context<'_>, account: A
         elo: profile.modes.rm_1v1_elo.rating,
         favorite_civ: profile.modes.rm_solo.civilizations[0].clone(),
         games_played: profile.modes.rm_solo.games_count,
-        last_played: profile.modes.rm_solo.last_game_at.to_rfc3339().unwrap(),
+        last_played: profile.modes.rm_solo.last_game_at,
     })
+}
+
+#[tokio::test]
+async fn test() {
+    let account = Account {
+        user_id: 720955323183267840,
+        aoe4_id: 13753974,
+    };
+    let url = Url::parse("https://aoe4world.com/api/v0/players/")
+        .unwrap()
+        .join(&account.aoe4_id.to_string())
+        .unwrap();
+    let profile = reqwest::get(url).await.unwrap().json::<Profile>().await.unwrap();
+    info!("got aoe4 world profile for {}", profile.name);
 }
