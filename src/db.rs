@@ -7,7 +7,7 @@ pub(crate) struct Account {
 }
 
 pub(crate) async fn bind_account(pool: &PgPool, user_id: i32, aoe4_id: i32) -> Result<String, sqlx::Error> {
-    sqlx::query("INSERT INTO accounts (user_id, aoe4_id) VALUES ($1, $2)")
+    sqlx::query("insert into accounts (user_id, aoe4_id) values ($1, $2)")
         .bind(user_id)
         .bind(aoe4_id)
         .execute(pool)
