@@ -5,6 +5,7 @@ use reqwest::Url;
 use serenity::all::UserId;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
+use tracing::info;
 
 pub(crate) struct RankedPlayer {
     aoe4_name: String,
@@ -77,12 +78,14 @@ pub(crate) async fn try_create_ranked_from_account(ctx: &Context<'_>, account: A
         .get(&UserId::new(account.user_id as u64))
         .and_then(|member| member.nick.clone());
     let discord_display = discord_nickname.unwrap_or(discord_global_name.unwrap_or(discord_username.clone()));
+    info!("got discord profile for {}", discord_display);
 
     let url = Url::parse("https://aoe4world.com/api/v0/players/")
         .unwrap()
         .join(&account.aoe4_id.to_string())
         .unwrap();
     let profile = reqwest::get(url).await.ok()?.json::<Profile>().await.ok()?;
+    info!("got aoe4 world profile for {}", profile.name);
 
     Some(RankedPlayer {
         aoe4_name: profile.name.clone(),
