@@ -4,7 +4,6 @@ use anyhow::Context as _;
 use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
 use serenity::all::ChannelId;
-use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
@@ -81,10 +80,10 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
             error!("getting message from discord channel failed");
             error
         })?;
-    let message_ids = messages.iter().map(|message| message.id).collect::<Vec<_>>();
-    if !message_ids.is_empty() {
+
+    for message_id in messages.iter().map(|message| message.id) {
         ctx.http()
-            .delete_messages(RANK_CHANNEL_ID, &json!(&message_ids), None)
+            .delete_message(RANK_CHANNEL_ID, message_id, None)
             .await
             .map_err(|error| {
                 error!("deleting existing messages from discord failed");
@@ -94,7 +93,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
 
     let mut buffer = String::new();
     for (i, player) in sorted_players.iter().enumerate() {
-        let text = format!("第{}名  {}\n", i + 1, player);
+        let text = format!("第{}名  {}\n\n", i + 1, player);
         buffer = buffer + &text;
 
         if i % 10 == 9 {
