@@ -65,17 +65,17 @@ impl Display for RankedPlayer {
 }
 
 pub(crate) async fn try_create_ranked_from_account(ctx: &Context<'_>, account: Account) -> Option<RankedPlayer> {
-    let discord_username = ctx.cache().user(UserId::new(account.user_id as u64))?.name.clone();
-    let discord_global_name = ctx
-        .cache()
-        .user(UserId::new(account.user_id as u64))?
-        .global_name
-        .clone();
+    let user = ctx.http().get_user(UserId::new(account.user_id as u64)).await.ok()?;
+    let discord_username = user.name.clone();
+    let discord_global_name = user.global_name.clone();
     let discord_nickname = ctx
-        .cache()
-        .guild(ctx.data().guild_id)?
-        .members
-        .get(&UserId::new(account.user_id as u64))
+        .http()
+        .get_guild(ctx.data().guild_id)
+        .await
+        .ok()?
+        .member(ctx.http(), UserId::new(account.user_id as u64))
+        .await
+        .ok()
         .and_then(|member| member.nick.clone());
     let discord_display = discord_nickname.unwrap_or(discord_global_name.unwrap_or(discord_username.clone()));
     info!("got discord profile for {}", discord_display);
