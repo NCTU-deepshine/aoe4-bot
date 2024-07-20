@@ -85,7 +85,7 @@ impl Display for RankedPlayer {
             遊戲ID: {}\n\
             階級: {}\n\
             全球排名: {}, 遊戲場次：{}\n\
-            愛用文明: {} (出場率 {}), 上次遊玩: {}\n\
+            愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
             排名積分: {}, 近期最高積分: {}, ELO: {}",
             self.discord_display,
             self.discord_username,
