@@ -43,8 +43,8 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
     info!("binding discord user {} with aoe4 player {}", user_id, aoe4_id);
     let message = bind_account(
         &ctx.data().database,
-        i32::try_from(u64::from(user_id)).unwrap(),
-        aoe4_id,
+        i64::try_from(u64::from(user_id)).unwrap(),
+        i64::try_from(aoe4_id).unwrap(),
     )
     .await
     .map_err(|error| {
