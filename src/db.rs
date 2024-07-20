@@ -3,11 +3,11 @@ use tracing::error;
 
 #[derive(FromRow)]
 pub(crate) struct Account {
-    pub user_id: i32,
-    pub aoe4_id: i32,
+    pub user_id: i64,
+    pub aoe4_id: i64,
 }
 
-pub(crate) async fn bind_account(pool: &PgPool, user_id: i32, aoe4_id: i32) -> Result<String, sqlx::Error> {
+pub(crate) async fn bind_account(pool: &PgPool, user_id: i64, aoe4_id: i64) -> Result<String, sqlx::Error> {
     sqlx::query("insert into accounts (user_id, aoe4_id) values ($1, $2)")
         .bind(user_id)
         .bind(aoe4_id)
