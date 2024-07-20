@@ -9,6 +9,7 @@ use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
 use sqlx::{Executor, PgPool};
+use tracing::{error, info};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
@@ -37,23 +38,30 @@ pub async fn bind(_: Context<'_>) -> Result<(), Error> {
 
 #[poise::command(slash_command)]
 pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
-    println!("attempting to bind {}", aoe4_id);
+    info!("attempting to bind {}", aoe4_id);
     let user_id = ctx.author().id;
-    println!("binding discord user {} with aoe4 player {}", user_id, aoe4_id);
+    info!("binding discord user {} with aoe4 player {}", user_id, aoe4_id);
     let message = bind_account(
         &ctx.data().database,
         i32::try_from(u64::from(user_id)).unwrap(),
         aoe4_id,
     )
-    .await.expect("database insert failed");
+    .await
+    .map_err(|error| {
+        error!("database insert failed");
+        error
+    })?;
     ctx.say(message).await?;
     Ok(())
 }
 
 #[poise::command(slash_command)]
 pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
-    println!("attempting to refresh");
-    let accounts = list_all(&ctx.data().database).await.expect("database query failed");
+    info!("attempting to refresh");
+    let accounts = list_all(&ctx.data().database).await.map_err(|error| {
+        error!("database query failed");
+        error
+    })?;
     let mut players = stream::iter(accounts)
         .filter_map(|account| try_create_ranked_from_account(&ctx, account))
         .collect::<Vec<RankedPlayer>>()
@@ -62,12 +70,23 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     let sorted_players = players;
 
     // clear all existing messages in the channel
-    let messages = ctx.http().get_messages(RANK_CHANNEL_ID, None, None).await.expect("getting message from discord channel failed");
+    let messages = ctx
+        .http()
+        .get_messages(RANK_CHANNEL_ID, None, None)
+        .await
+        .map_err(|error| {
+            error!("getting message from discord channel failed");
+            error
+        })?;
     let message_ids = messages.iter().map(|message| message.id).collect::<Vec<_>>();
     if !message_ids.is_empty() {
         ctx.http()
             .delete_messages(RANK_CHANNEL_ID, &json!(&message_ids), None)
-            .await.expect("deleting existing messages from discord failed");
+            .await
+            .map_err(|error| {
+                error!("deleting existing messages from discord failed");
+                error
+            })?;
     }
 
     for (i, player) in sorted_players.iter().enumerate() {
