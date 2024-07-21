@@ -55,9 +55,9 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, guild_cooldown = 600)]
+#[poise::command(slash_command)]
 pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say("refresh triggered").await?;
+    ctx.defer().await?;
     do_refresh(ctx.http(), ctx.data()).await?;
     ctx.say("refresh done").await?;
     Ok(())
