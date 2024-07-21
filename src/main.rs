@@ -111,7 +111,6 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
     Ok(())
 }
 async fn send_rankings(http: &Http, content: &String) -> Result<(), Error> {
-    info!("attempt to write: {}", content);
     http.get_channel(RANK_CHANNEL_ID)
         .await?
         .guild()
