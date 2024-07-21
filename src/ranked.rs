@@ -135,7 +135,7 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
         rating: profile.modes.rm_solo.rating,
         recent_max_rating: profile.modes.rm_solo.max_rating_1m,
         elo: profile.modes.rm_1v1_elo.rating,
-        favorite_civ: profile.modes.rm_solo.civilizations[0].clone(),
+        favorite_civ: profile.modes.rm_solo.civilizations.first().unwrap_or(&CivData{ civilization: "未知".to_string(), pick_rate: 0.0 }).clone(),
         games_played: profile.modes.rm_solo.games_count,
         last_played: profile.modes.rm_solo.last_game_at,
     })
