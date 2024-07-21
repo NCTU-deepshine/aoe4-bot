@@ -74,6 +74,7 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
         .filter_map(|account| try_create_ranked_from_account(http, data, account))
         .collect::<Vec<RankedPlayer>>()
         .await;
+    info!("finish ranked player collection");
     players.sort();
     let sorted_players = players;
     info!("collected and sorted {} players", sorted_players.len());

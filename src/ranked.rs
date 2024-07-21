@@ -104,6 +104,7 @@ impl Display for RankedPlayer {
 }
 
 pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, account: Account) -> Option<RankedPlayer> {
+    info!("try create ranked from account, discord {}, aoe4 {}", account.user_id, account.aoe4_id);
     let user = http.get_user(UserId::new(account.user_id as u64)).await.ok()?;
     let discord_username = user.name.clone();
     let discord_global_name = user.global_name.clone();
