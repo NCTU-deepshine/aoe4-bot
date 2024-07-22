@@ -9,8 +9,8 @@ pub(crate) struct Profile {
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct Modes {
-    pub rm_solo: RankedData,
-    pub rm_1v1_elo: RankedEloData,
+    pub rm_solo: Option<RankedData>,
+    pub rm_1v1_elo: Option<RankedEloData>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -57,4 +57,53 @@ impl CivData {
 #[derive(Deserialize, Debug)]
 pub(crate) struct RankedEloData {
     pub rating: i32,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct SearchResult {
+    pub players: Vec<SearchedPlayer>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct SearchedPlayer {
+    pub name: String,
+    pub profile_id: i32,
+    pub leaderboards: LeaderBoards,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct LeaderBoards {
+    pub rm_solo: Option<SearchedRankedData>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct SearchedRankedData {
+    pub rank_level: String,
+    pub rating: i32,
+}
+
+impl SearchedRankedData {
+    pub(crate) fn rank_level(&self) -> String {
+        match self.rank_level.as_str() {
+            "conqueror_3" => "征服者3".to_string(),
+            "conqueror_2" => "征服者2".to_string(),
+            "conqueror_1" => "征服者1".to_string(),
+            "diamond_3" => "鑽石3".to_string(),
+            "diamond_2" => "鑽石2".to_string(),
+            "diamond_1" => "鑽石1".to_string(),
+            "platinum_3" => "白金3".to_string(),
+            "platinum_2" => "白金2".to_string(),
+            "platinum_1" => "白金1".to_string(),
+            "gold_3" => "黃金3".to_string(),
+            "gold_2" => "黃金2".to_string(),
+            "gold_1" => "黃金1".to_string(),
+            "silver_3" => "白銀3".to_string(),
+            "silver_2" => "白銀2".to_string(),
+            "silver_1" => "白銀1".to_string(),
+            "bronze_3" => "青銅3".to_string(),
+            "bronze_2" => "青銅2".to_string(),
+            "bronze_1" => "青銅1".to_string(),
+            _ => self.rank_level.clone(),
+        }
+    }
 }
