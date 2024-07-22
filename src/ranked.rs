@@ -129,18 +129,19 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
     let profile = reqwest::get(url).await.ok()?.json::<Profile>().await.ok()?;
     info!("got aoe4 world profile for {}", profile.name);
 
+    let rm_solo = profile.modes.rm_solo?;
+    let rm_1v1_elo = profile.modes.rm_1v1_elo?;
+
     Some(RankedPlayer {
         aoe4_name: profile.name.clone(),
         discord_display,
         discord_username,
-        rank_level: profile.modes.rm_solo.rank_level,
-        global_rank: profile.modes.rm_solo.rank,
-        rating: profile.modes.rm_solo.rating,
-        recent_max_rating: profile.modes.rm_solo.max_rating_1m,
-        elo: profile.modes.rm_1v1_elo.rating,
-        favorite_civ: profile
-            .modes
-            .rm_solo
+        rank_level: rm_solo.rank_level,
+        global_rank: rm_solo.rank,
+        rating: rm_solo.rating,
+        recent_max_rating: rm_solo.max_rating_1m,
+        elo: rm_1v1_elo.rating,
+        favorite_civ: rm_solo
             .civilizations
             .first()
             .unwrap_or(&CivData {
@@ -148,8 +149,8 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
                 pick_rate: 0.0,
             })
             .clone(),
-        games_played: profile.modes.rm_solo.games_count,
-        last_played: profile.modes.rm_solo.last_game_at,
+        games_played: rm_solo.games_count,
+        last_played: rm_solo.last_game_at,
     })
 }
 

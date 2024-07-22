@@ -18,10 +18,7 @@ pub(crate) async fn bind_account(pool: &PgPool, user_id: i64, aoe4_id: i64) -> R
             err
         })?;
 
-    Ok(format!(
-        "Bound discord user `{}` to aoe4 world profile `{}` ",
-        user_id, aoe4_id
-    ))
+    Ok(format!("綁定discord帳號 `{}` 與世紀帝國四帳號 `{}` ", user_id, aoe4_id))
 }
 
 pub(crate) async fn list_all(pool: &PgPool) -> Result<Vec<Account>, sqlx::Error> {

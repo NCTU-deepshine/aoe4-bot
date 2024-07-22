@@ -1,9 +1,12 @@
+use crate::aoe4world::SearchResult;
 use crate::db::{bind_account, list_all};
 use crate::ranked::{try_create_ranked_from_account, RankedPlayer};
 use anyhow::Context as _;
 use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
-use serenity::all::{ChannelId, Http};
+use reqwest::Url;
+use serenity::all::{AutocompleteChoice, ChannelId, Http};
+use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
@@ -31,14 +34,60 @@ async fn hello(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, subcommands("id"), subcommand_required, aliases("綁定"))]
+#[poise::command(slash_command, subcommands("id", "name"), subcommand_required, aliases("綁定"))]
 pub async fn bind(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
 #[poise::command(slash_command)]
 pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
-    info!("attempting to bind {}", aoe4_id);
+    info!("attempting to bind id {}", aoe4_id);
+    let user_id = ctx.author().id;
+    info!("binding discord user {} with aoe4 player {}", user_id, aoe4_id);
+    let message = bind_account(
+        &ctx.data().database,
+        i64::try_from(u64::from(user_id)).unwrap(),
+        i64::try_from(aoe4_id).unwrap(),
+    )
+    .await
+    .map_err(|error| {
+        error!("database insert failed");
+        error
+    })?;
+    ctx.say(message).await?;
+    Ok(())
+}
+
+async fn auto_complete_id<'a>(_ctx: Context<'_>, username: &'a str) -> impl Iterator<Item = AutocompleteChoice> {
+    info!("search aoe4 world profiles with username {}", username);
+    let players = match get_profiles(username).await {
+        None => vec![],
+        Some(profiles) => profiles.players,
+    };
+    players.into_iter().filter_map(|player| {
+        let data = player.leaderboards.rm_solo?;
+        Some(AutocompleteChoice::new(
+            format!("{} - 階級: {}, 積分: {}", player.name, data.rank_level(), data.rating),
+            json!(player.profile_id),
+        ))
+    })
+}
+
+async fn get_profiles(username: &str) -> Option<SearchResult> {
+    let mut url = Url::parse("https://aoe4world.com/api/v0/players/search").unwrap();
+    url.query_pairs_mut().append_pair("query", username);
+    let profiles = reqwest::get(url).await.ok()?.json::<SearchResult>().await.ok()?;
+    Some(profiles)
+}
+
+#[poise::command(slash_command)]
+pub async fn name(
+    ctx: Context<'_>,
+    #[description = "遊戲ID"]
+    #[autocomplete = "auto_complete_id"]
+    aoe4_id: i32,
+) -> Result<(), Error> {
+    info!("attempting to bind id {}", aoe4_id);
     let user_id = ctx.author().id;
     info!("binding discord user {} with aoe4 player {}", user_id, aoe4_id);
     let message = bind_account(
@@ -59,7 +108,7 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
 pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
     do_refresh(ctx.http(), ctx.data()).await?;
-    ctx.say("refresh done").await?;
+    ctx.say("刷新完成").await?;
     Ok(())
 }
 
@@ -145,7 +194,7 @@ async fn serenity(
     let pool_cloned = pool.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![hello(), bind(), id(), refresh()],
+            commands: vec![hello(), bind(), id(), name(), refresh()],
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
