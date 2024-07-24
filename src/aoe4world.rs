@@ -20,6 +20,7 @@ pub(crate) struct RankedData {
     pub rating: i32,
     pub max_rating_1m: i32,
     pub games_count: i32,
+    pub win_rate: f64,
     pub civilizations: Vec<CivData>,
     pub last_game_at: DateTime<Utc>,
 }
