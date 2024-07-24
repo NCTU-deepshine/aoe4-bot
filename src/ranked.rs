@@ -19,6 +19,7 @@ pub(crate) struct RankedPlayer {
     elo: i32,
     favorite_civ: CivData,
     games_played: i32,
+    win_rate: f64,
     last_played: DateTime<Utc>,
 }
 
@@ -84,15 +85,16 @@ impl Display for RankedPlayer {
             "{} ({})\n\
             遊戲ID: {}\n\
             階級: {}\n\
-            全球排名: {}, 遊戲場次：{}\n\
+            全球排名: {}, 遊戲場次：{} (勝率: {}%)\n\
             愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
-            排名積分: {}, 近期最高積分: {}, ELO: {}",
+            排名積分: {}, 近期最高積分: {}, Elo: {}",
             self.discord_display,
             self.discord_username,
             self.aoe4_name,
             self.rank_level(),
             self.global_rank,
             self.games_played,
+            self.win_rate.round(),
             self.favorite_civ.civilization(),
             self.favorite_civ.pick_rate.round(),
             self.last_played(),
@@ -150,6 +152,7 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
             })
             .clone(),
         games_played: rm_solo.games_count,
+        win_rate: rm_solo.win_rate,
         last_played: rm_solo.last_game_at,
     })
 }
