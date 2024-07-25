@@ -216,7 +216,7 @@ async fn serenity(
     let sched = JobScheduler::new().await.unwrap();
     sched
         .add(
-            Job::new_async("0 0 * * * *", move |_uuid, _l| {
+            Job::new_async("0 0 0,12 * * *", move |_uuid, _l| {
                 Box::pin({
                     let token_cloned = token.clone();
                     let pool_cloned = pool.clone();
