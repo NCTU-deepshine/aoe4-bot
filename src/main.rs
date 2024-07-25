@@ -144,15 +144,13 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
     }
 
     let mut buffer = String::new();
-    buffer = buffer + "_ _";
     for (i, player) in sorted_players.iter().enumerate() {
-        let text = format!("第{}名  {}\n\n", i + 1, player);
+        let text = format!("第{}名  {}\n　\n", i + 1, player);
         buffer = buffer + &text;
 
         if i % 10 == 9 {
             send_rankings(http, &buffer).await?;
             buffer = String::new();
-            buffer = buffer + "_ _";
         }
     }
 
