@@ -28,6 +28,17 @@ pub(crate) async fn bind_account(pool: &PgPool, user_id: i64, aoe4_id: i64) -> R
     Ok(format!("綁定discord帳號 `{}` 與世紀帝國四帳號 `{}` ", user_id, aoe4_id))
 }
 
+pub(crate) async fn select_account(pool: &PgPool, user_id: i64) -> Option<Account> {
+    sqlx::query_as("select user_id, aoe4_id from accounts where user_id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .inspect_err(|err| {
+            error!("database operation failed with error {}", err.to_string());
+        })
+        .unwrap()
+}
+
 pub(crate) async fn list_all(pool: &PgPool) -> Result<Vec<Account>, sqlx::Error> {
     let accounts: Vec<Account> = sqlx::query_as("select user_id, aoe4_id from accounts")
         .fetch_all(pool)
