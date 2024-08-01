@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::cmp::Ordering;
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct Profile {
@@ -72,6 +73,12 @@ pub(crate) struct SearchedPlayer {
     pub leaderboards: LeaderBoards,
 }
 
+impl SearchedPlayer {
+    pub fn rating(&self) -> i32 {
+        self.leaderboards.rm_solo.as_ref().map(|x| x.rating).unwrap_or(0)
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub(crate) struct LeaderBoards {
     pub rm_solo: Option<SearchedRankedData>,
@@ -106,5 +113,25 @@ impl SearchedRankedData {
             "bronze_1" => "青銅1".to_string(),
             _ => self.rank_level.clone(),
         }
+    }
+}
+
+impl Eq for SearchedPlayer {}
+
+impl PartialEq<Self> for SearchedPlayer {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile_id == other.profile_id
+    }
+}
+
+impl PartialOrd<Self> for SearchedPlayer {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        other.rating().partial_cmp(&self.rating())
+    }
+}
+
+impl Ord for SearchedPlayer {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.rating().cmp(&self.rating())
     }
 }
