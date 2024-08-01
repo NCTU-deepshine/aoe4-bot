@@ -75,7 +75,7 @@ pub(crate) struct SearchedPlayer {
 
 impl SearchedPlayer {
     pub fn rating(&self) -> i32 {
-        self.leaderboards.rm_solo.as_ref().map(|x| x.rating).unwrap_or(0)
+        self.leaderboards.rm_solo.as_ref().map(|x| x.rating()).unwrap_or(0)
     }
 }
 
@@ -87,10 +87,14 @@ pub(crate) struct LeaderBoards {
 #[derive(Deserialize, Debug)]
 pub(crate) struct SearchedRankedData {
     pub rank_level: String,
-    pub rating: i32,
+    pub rating: Option<i32>,
 }
 
 impl SearchedRankedData {
+    pub(crate) fn rating(&self) -> i32 {
+        self.rating.unwrap_or(0)
+    }
+
     pub(crate) fn rank_level(&self) -> String {
         match self.rank_level.as_str() {
             "conqueror_3" => "征服者3".to_string(),
