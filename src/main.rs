@@ -137,7 +137,7 @@ pub async fn check(
 }
 
 #[poise::command(slash_command, rename = "提醒")]
-pub async fn reminder(ctx: Context<'_>, #[description = "警告天數"] days: i32) -> Result<(), Error> {
+pub async fn remind(ctx: Context<'_>, #[description = "警告天數"] days: i32) -> Result<(), Error> {
     info!(
         "attempting to set {} days reminder for {}",
         days,
@@ -280,7 +280,7 @@ async fn serenity(
     let pool_cloned = pool.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![hello(), bind(), id(), name(), refresh(), check()],
+            commands: vec![hello(), bind(), id(), name(), refresh(), check(), remind()],
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
