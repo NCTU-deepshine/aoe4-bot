@@ -220,6 +220,7 @@ pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<Ra
 mod tests {
     use crate::aoe4world::{Profile, SearchResult};
     use crate::db::Account;
+    use crate::ranked::try_create_ranked_without_account;
     use reqwest::Url;
     use tracing::info;
 
@@ -254,5 +255,12 @@ mod tests {
                 ))
             })
             .for_each(|x| info!(x));
+    }
+
+    #[tokio::test]
+    async fn search_profile_test() {
+        let aoe4_id = 12127438;
+        let player = try_create_ranked_without_account(aoe4_id).await.unwrap();
+        info!("{}", player.info());
     }
 }
