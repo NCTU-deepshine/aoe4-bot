@@ -1,6 +1,7 @@
 use crate::aoe4world::SearchResult;
 use crate::db::{
     add_reminder, bind_account, delete_reminder, list_all, list_reminder_needed, reminder_update_last_reminded,
+    select_account,
 };
 use crate::ranked::{try_create_ranked_from_account, try_create_ranked_without_account, RankedPlayer};
 use anyhow::Context as _;
@@ -25,6 +26,7 @@ mod db;
 mod ranked;
 
 static RANK_CHANNEL_ID: ChannelId = ChannelId::new(1263079883937153105);
+static INTERACTION_CHANNEL_ID: ChannelId = ChannelId::new(1263524546582020254);
 
 struct Data {
     database: PgPool,
@@ -123,8 +125,14 @@ pub async fn check(
         .await
         .expect("unexpected missing ranked player");
     let info = player.info();
-    info!("printing info {}", info);
-    ctx.say(info).await?;
+    ctx.say("查分成功").await?;
+    ctx.http()
+        .get_channel(INTERACTION_CHANNEL_ID)
+        .await?
+        .guild()
+        .unwrap()
+        .say(ctx.http(), info)
+        .await?;
     Ok(())
 }
 
@@ -135,24 +143,30 @@ pub async fn reminder(ctx: Context<'_>, #[description = "警告天數"] days: i3
         days,
         ctx.cache().current_user().name
     );
-    let user_id = ctx.author().id;
-    let message = if days > 0 {
-        add_reminder(&ctx.data().database, i64::try_from(u64::from(user_id)).unwrap(), days)
-            .await
-            .map_err(|error| {
-                error!("setting reminder failed");
-                error
-            })?
-    } else {
-        delete_reminder(&ctx.data().database, i64::try_from(u64::from(user_id)).unwrap())
-            .await
-            .map_err(|error| {
-                error!("deleting reminder failed");
-                error
-            })?
-    };
-    ctx.say(message).await?;
-    Ok(())
+    let user_id = i64::try_from(u64::from(ctx.author().id)).unwrap();
+    match select_account(&ctx.data().database, user_id).await {
+        None => {
+            ctx.say("需要先綁定天梯榜才能夠使用提醒功能！").await?;
+            Ok(())
+        },
+        Some(_) => {
+            let message = if days > 0 {
+                add_reminder(&ctx.data().database, user_id, days)
+                    .await
+                    .map_err(|error| {
+                        error!("setting reminder failed");
+                        error
+                    })?
+            } else {
+                delete_reminder(&ctx.data().database, user_id).await.map_err(|error| {
+                    error!("deleting reminder failed");
+                    error
+                })?
+            };
+            ctx.say(message).await?;
+            Ok(())
+        },
+    }
 }
 
 #[poise::command(slash_command)]
