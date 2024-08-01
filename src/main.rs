@@ -119,8 +119,12 @@ pub async fn check(
     aoe4_id: i32,
 ) -> Result<(), Error> {
     info!("attempting to check id {}", aoe4_id);
-    let player = try_create_ranked_without_account(aoe4_id).await.unwrap();
-    ctx.say(player.info()).await?;
+    let player = try_create_ranked_without_account(aoe4_id)
+        .await
+        .expect("unexpected missing ranked player");
+    let info = player.info();
+    info!("printing info {}", info);
+    ctx.say(info).await?;
     Ok(())
 }
 
