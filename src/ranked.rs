@@ -1,5 +1,5 @@
 use crate::aoe4world::{CivData, Profile};
-use crate::db::Account;
+use crate::db::{reminder_update_last_played, Account};
 use crate::Data;
 use chrono::{DateTime, Utc};
 use reqwest::Url;
@@ -24,6 +24,27 @@ pub(crate) struct RankedPlayer {
 }
 
 impl RankedPlayer {
+    pub(crate) fn info(&self) -> String {
+        format!(
+            "遊戲ID: {}\n\
+            階級: {}\n\
+            全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
+            愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
+            排名積分: {}, 近期最高積分: {}, Elo: {}",
+            self.aoe4_name,
+            self.rank_level(),
+            self.global_rank,
+            self.games_played,
+            self.win_rate.round(),
+            self.favorite_civ.civilization(),
+            self.favorite_civ.pick_rate.round(),
+            self.last_played(),
+            self.rating,
+            self.recent_max_rating,
+            self.elo
+        )
+    }
+
     pub(crate) fn last_played(&self) -> String {
         let days = Utc::now().signed_duration_since(self.last_played).num_days();
         if days == 0 {
@@ -85,7 +106,7 @@ impl Display for RankedPlayer {
             "{} ({})\n\
             遊戲ID: {}\n\
             階級: {}\n\
-            全球排名: {}, 遊戲場次：{} (勝率: {}%)\n\
+            全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
             愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
             排名積分: {}, 近期最高積分: {}, Elo: {}",
             self.discord_display,
@@ -134,10 +155,48 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
     let rm_solo = profile.modes.rm_solo?;
     let rm_1v1_elo = profile.modes.rm_1v1_elo?;
 
+    let _ = reminder_update_last_played(&data.database, account.user_id, rm_solo.last_game_at).await;
+
     Some(RankedPlayer {
         aoe4_name: profile.name.clone(),
         discord_display,
         discord_username,
+        rank_level: rm_solo.rank_level,
+        global_rank: rm_solo.rank,
+        rating: rm_solo.rating,
+        recent_max_rating: rm_solo.max_rating_1m,
+        elo: rm_1v1_elo.rating,
+        favorite_civ: rm_solo
+            .civilizations
+            .first()
+            .unwrap_or(&CivData {
+                civilization: "未知".to_string(),
+                pick_rate: 0.0,
+            })
+            .clone(),
+        games_played: rm_solo.games_count,
+        win_rate: rm_solo.win_rate,
+        last_played: rm_solo.last_game_at,
+    })
+}
+
+pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<RankedPlayer> {
+    info!("try create ranked without account");
+
+    let url = Url::parse("https://aoe4world.com/api/v0/players/")
+        .unwrap()
+        .join(&aoe4_id.to_string())
+        .unwrap();
+    let profile = reqwest::get(url).await.ok()?.json::<Profile>().await.ok()?;
+    info!("got aoe4 world profile for {}", profile.name);
+
+    let rm_solo = profile.modes.rm_solo?;
+    let rm_1v1_elo = profile.modes.rm_1v1_elo?;
+
+    Some(RankedPlayer {
+        aoe4_name: profile.name.clone(),
+        discord_display: "".to_string(),
+        discord_username: "".to_string(),
         rank_level: rm_solo.rank_level,
         global_rank: rm_solo.rank,
         rating: rm_solo.rating,

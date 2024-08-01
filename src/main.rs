@@ -1,11 +1,14 @@
 use crate::aoe4world::SearchResult;
-use crate::db::{bind_account, list_all};
-use crate::ranked::{try_create_ranked_from_account, RankedPlayer};
+use crate::db::{
+    add_reminder, bind_account, delete_reminder, list_all, list_reminder_needed, reminder_update_last_reminded,
+};
+use crate::ranked::{try_create_ranked_from_account, try_create_ranked_without_account, RankedPlayer};
 use anyhow::Context as _;
+use chrono::Utc;
 use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
 use reqwest::Url;
-use serenity::all::{AutocompleteChoice, ChannelId, Http};
+use serenity::all::{AutocompleteChoice, ChannelId, CreateMessage, Http, UserId};
 use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
@@ -34,7 +37,7 @@ async fn hello(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, subcommands("id", "name"), subcommand_required, aliases("綁定"))]
+#[poise::command(slash_command, subcommands("id", "name"), subcommand_required)]
 pub async fn bind(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
@@ -60,17 +63,21 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
 
 async fn auto_complete_id<'a>(_ctx: Context<'_>, username: &'a str) -> impl Iterator<Item = AutocompleteChoice> {
     info!("search aoe4 world profiles with username {}", username);
-    let players = match get_profiles(username).await {
+    let mut players = match get_profiles(username).await {
         None => vec![],
         Some(profiles) => profiles.players,
     };
-    players.into_iter().filter_map(|player| {
-        let data = player.leaderboards.rm_solo?;
-        Some(AutocompleteChoice::new(
-            format!("{} - 階級: {}, 積分: {}", player.name, data.rank_level(), data.rating),
-            json!(player.profile_id),
-        ))
-    })
+    players.sort();
+    players
+        .into_iter()
+        .filter_map(|player| {
+            let data = player.leaderboards.rm_solo?;
+            Some(AutocompleteChoice::new(
+                format!("{} - 階級: {}, 積分: {}", player.name, data.rank_level(), data.rating),
+                json!(player.profile_id),
+            ))
+        })
+        .take(10)
 }
 
 async fn get_profiles(username: &str) -> Option<SearchResult> {
@@ -100,6 +107,46 @@ pub async fn name(
         error!("database insert failed");
         error
     })?;
+    ctx.say(message).await?;
+    Ok(())
+}
+
+#[poise::command(slash_command, rename = "查分")]
+pub async fn check(
+    ctx: Context<'_>,
+    #[description = "遊戲ID"]
+    #[autocomplete = "auto_complete_id"]
+    aoe4_id: i32,
+) -> Result<(), Error> {
+    info!("attempting to check id {}", aoe4_id);
+    let player = try_create_ranked_without_account(aoe4_id).await.unwrap();
+    ctx.say(player.info()).await?;
+    Ok(())
+}
+
+#[poise::command(slash_command, rename = "提醒")]
+pub async fn reminder(ctx: Context<'_>, #[description = "警告天數"] days: i32) -> Result<(), Error> {
+    info!(
+        "attempting to set {} days reminder for {}",
+        days,
+        ctx.cache().current_user().name
+    );
+    let user_id = ctx.author().id;
+    let message = if days > 0 {
+        add_reminder(&ctx.data().database, i64::try_from(u64::from(user_id)).unwrap(), days)
+            .await
+            .map_err(|error| {
+                error!("setting reminder failed");
+                error
+            })?
+    } else {
+        delete_reminder(&ctx.data().database, i64::try_from(u64::from(user_id)).unwrap())
+            .await
+            .map_err(|error| {
+                error!("deleting reminder failed");
+                error
+            })?
+    };
     ctx.say(message).await?;
     Ok(())
 }
@@ -170,6 +217,27 @@ async fn send_rankings(http: &Http, content: &String) -> Result<(), Error> {
     Ok(())
 }
 
+async fn send_reminders(http: &Http, data: &Data) -> Result<(), Error> {
+    info!("starting to send reminders");
+    let reminders = list_reminder_needed(&data.database).await;
+    for reminder in reminders.iter() {
+        let user = http.get_user(UserId::new(reminder.user_id as u64)).await?;
+        let days = Utc::now().signed_duration_since(reminder.last_played).num_days();
+        match user
+            .direct_message(
+                &http,
+                CreateMessage::new().content(format!("溫馨提醒：已經耍廢{}天囉 該爬天梯了！", days)),
+            )
+            .await
+        {
+            Ok(_) => reminder_update_last_reminded(&data.database, reminder.user_id).await,
+            Err(_) => {},
+        }
+    }
+
+    Ok(())
+}
+
 #[shuttle_runtime::main]
 async fn serenity(
     #[shuttle_shared_db::Postgres] pool: PgPool,
@@ -194,7 +262,7 @@ async fn serenity(
     let pool_cloned = pool.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![hello(), bind(), id(), name(), refresh()],
+            commands: vec![hello(), bind(), id(), name(), refresh(), check()],
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
@@ -228,6 +296,7 @@ async fn serenity(
                         };
                         info!("refresh triggered by cron");
                         do_refresh(&http, &data).await.unwrap();
+                        send_reminders(&http, &data).await.unwrap();
                     }
                 })
             })
