@@ -216,16 +216,43 @@ pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<Ra
     })
 }
 
-#[tokio::test]
-async fn test() {
-    let account = Account {
-        user_id: 720955323183267840,
-        aoe4_id: 13753974,
-    };
-    let url = Url::parse("https://aoe4world.com/api/v0/players/")
-        .unwrap()
-        .join(&account.aoe4_id.to_string())
-        .unwrap();
-    let profile = reqwest::get(url).await.unwrap().json::<Profile>().await.unwrap();
-    info!("got aoe4 world profile for {}", profile.name);
+#[cfg(test)]
+mod tests {
+    use crate::aoe4world::{Profile, SearchResult};
+    use crate::db::Account;
+    use reqwest::Url;
+    use tracing::info;
+
+    #[tokio::test]
+    async fn profile_test() {
+        let account = Account {
+            user_id: 720955323183267840,
+            aoe4_id: 13753974,
+        };
+        let url = Url::parse("https://aoe4world.com/api/v0/players/")
+            .unwrap()
+            .join(&account.aoe4_id.to_string())
+            .unwrap();
+        let profile = reqwest::get(url).await.unwrap().json::<Profile>().await.unwrap();
+        info!("got aoe4 world profile for {}", profile.name);
+    }
+    #[tokio::test]
+    async fn search_test() {
+        let mut url = Url::parse("https://aoe4world.com/api/v0/players/search").unwrap();
+        url.query_pairs_mut().append_pair("query", "Jump__");
+        let profiles = reqwest::get(url).await.unwrap().json::<SearchResult>().await.unwrap();
+        profiles
+            .players
+            .into_iter()
+            .filter_map(|player| {
+                let data = player.leaderboards.rm_solo?;
+                Some(format!(
+                    "{} - 階級: {}, 積分: {}",
+                    player.name,
+                    data.rank_level(),
+                    data.rating()
+                ))
+            })
+            .for_each(|x| info!(x));
+    }
 }

@@ -73,7 +73,7 @@ async fn auto_complete_id<'a>(_ctx: Context<'_>, username: &'a str) -> impl Iter
         .filter_map(|player| {
             let data = player.leaderboards.rm_solo?;
             Some(AutocompleteChoice::new(
-                format!("{} - 階級: {}, 積分: {}", player.name, data.rank_level(), data.rating),
+                format!("{} - 階級: {}, 積分: {}", player.name, data.rank_level(), data.rating()),
                 json!(player.profile_id),
             ))
         })
