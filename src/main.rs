@@ -121,11 +121,11 @@ pub async fn check(
     aoe4_id: i32,
 ) -> Result<(), Error> {
     info!("attempting to check id {}", aoe4_id);
+    ctx.defer().await?;
     let player = try_create_ranked_without_account(aoe4_id)
         .await
         .expect("unexpected missing ranked player");
     let info = player.info();
-    ctx.say("查分成功").await?;
     ctx.http()
         .get_channel(INTERACTION_CHANNEL_ID)
         .await?
@@ -133,6 +133,7 @@ pub async fn check(
         .unwrap()
         .say(ctx.http(), info)
         .await?;
+    ctx.say("查分成功").await?;
     Ok(())
 }
 
