@@ -87,7 +87,7 @@ pub(crate) async fn list_reminder_needed(pool: &PgPool) -> Vec<Reminder> {
             from reminders
             where
                 extract(day from now() - last_played) > days
-                and extract(day from now() - last_reminded) > 5",
+                and extract(day from now() - coalesce(last_reminded, now() - interval '6 days')) > 5",
     )
     .fetch_all(pool)
     .await
