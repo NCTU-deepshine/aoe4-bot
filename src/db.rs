@@ -109,7 +109,7 @@ pub(crate) async fn reminder_update_last_played(pool: &PgPool, user_id: i64, las
 }
 
 pub(crate) async fn reminder_update_last_reminded(pool: &PgPool, user_id: i64) {
-    let _ = sqlx::query("update reminders set last_reminded = now() where user_id = $2")
+    let _ = sqlx::query("update reminders set last_reminded = now() where user_id = $1")
         .bind(user_id)
         .execute(pool)
         .await
