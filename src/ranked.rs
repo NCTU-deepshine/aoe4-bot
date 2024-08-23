@@ -30,7 +30,7 @@ impl RankedPlayer {
     }
 
     pub(crate) fn info(&self) -> String {
-        let mut info = format!(
+        format!(
             "遊戲ID: {}\n\
             階級: {}\n\
             全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
@@ -47,14 +47,7 @@ impl RankedPlayer {
             self.rating,
             self.recent_max_rating,
             self.elo
-        );
-        if !self.alts.is_empty() {
-            info = format!("{}\n其他小號: ", info);
-        }
-        for alt in &self.alts {
-            info = format!("{}\n\t - {}: {}", info, alt.aoe4_name, alt.rating);
-        }
-        info
+        )
     }
 
     pub(crate) fn last_played(&self) -> String {
@@ -117,6 +110,14 @@ impl Ord for RankedPlayer {
 
 impl Display for RankedPlayer {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut alt_info = String::new();
+        if !self.alts.is_empty() {
+            alt_info = format!("{}其他小號: \n", alt_info);
+        }
+        for alt in &self.alts {
+            alt_info = format!("{}\t - {}: {}\n", alt_info, alt.aoe4_name, alt.rating);
+        }
+
         write!(
             f,
             "{} ({})\n\
@@ -124,7 +125,8 @@ impl Display for RankedPlayer {
             階級: {}\n\
             全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
             愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
-            排名積分: {}, 近期最高積分: {}, Elo: {}",
+            排名積分: {}, 近期最高積分: {}, Elo: {}\n\
+            {}\n",
             self.discord_display,
             self.discord_username,
             self.aoe4_name,
@@ -137,7 +139,8 @@ impl Display for RankedPlayer {
             self.last_played(),
             self.rating,
             self.recent_max_rating,
-            self.elo
+            self.elo,
+            alt_info
         )
     }
 }
