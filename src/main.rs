@@ -15,6 +15,7 @@ use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
 use sqlx::{Executor, PgPool};
+use std::collections::HashMap;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
 
@@ -185,13 +186,32 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
         error!("database query failed");
         error
     })?;
-    let mut players = stream::iter(accounts)
+    let players = stream::iter(accounts)
         .filter_map(|account| try_create_ranked_from_account(http, data, account))
         .collect::<Vec<RankedPlayer>>()
         .await;
+    let mut unique_players = players
+        .into_iter()
+        .fold(HashMap::new(), |mut acc, player| {
+            acc.entry(String::from(player.discord_username()))
+                .or_insert_with(|| Vec::new())
+                .push(player);
+            acc
+        })
+        .into_values()
+        .filter_map(|mut list| {
+            list.sort();
+            let sorted = list;
+            sorted.into_iter().reduce(|mut acc, player| {
+                acc.append_alt(player);
+                acc
+            })
+        })
+        .collect::<Vec<RankedPlayer>>();
     info!("finish ranked player collection");
-    players.sort();
-    let sorted_players = players;
+
+    unique_players.sort();
+    let sorted_players = unique_players;
     info!("collected and sorted {} players", sorted_players.len());
 
     info!("clearing all existing messages in the channel");
