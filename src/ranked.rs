@@ -112,10 +112,10 @@ impl Display for RankedPlayer {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut alt_info = String::new();
         if !self.alts.is_empty() {
-            alt_info = format!("{}\n其他小號:", alt_info);
+            alt_info.push_str("\n其他小號:");
         }
         for alt in &self.alts {
-            alt_info = format!("{}\n - {}: {}", alt_info, alt.aoe4_name, alt.rating);
+            alt_info.push_str(format!("\n  {}: {}", alt.aoe4_name, alt.rating).as_str());
         }
 
         write!(
@@ -125,7 +125,7 @@ impl Display for RankedPlayer {
             階級: {}\n\
             全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
             愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
-            排名積分: {}, 近期最高積分: {}, Elo: {}\n\
+            排名積分: {}, 近期最高積分: {}, Elo: {}\
             {}",
             self.discord_display,
             self.discord_username,
