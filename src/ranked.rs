@@ -21,11 +21,16 @@ pub(crate) struct RankedPlayer {
     games_played: i32,
     win_rate: f64,
     last_played: DateTime<Utc>,
+    alts: Vec<RankedPlayer>,
 }
 
 impl RankedPlayer {
+    pub(crate) fn append_alt(&mut self, alt: RankedPlayer) {
+        self.alts.push(alt);
+    }
+
     pub(crate) fn info(&self) -> String {
-        format!(
+        let mut info = format!(
             "遊戲ID: {}\n\
             階級: {}\n\
             全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
@@ -42,7 +47,14 @@ impl RankedPlayer {
             self.rating,
             self.recent_max_rating,
             self.elo
-        )
+        );
+        if !self.alts.is_empty() {
+            info = format!("{}\n其他小號: ", info);
+        }
+        for alt in &self.alts {
+            info = format!("{}\n\t - {}: {}", info, alt.aoe4_name, alt.rating);
+        }
+        info
     }
 
     pub(crate) fn last_played(&self) -> String {
@@ -76,6 +88,10 @@ impl RankedPlayer {
             "bronze_1" => "青銅1".to_string(),
             _ => self.rank_level.clone(),
         }
+    }
+
+    pub fn discord_username(&self) -> &str {
+        &self.discord_username
     }
 }
 
@@ -177,6 +193,7 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
         games_played: rm_solo.games_count,
         win_rate: rm_solo.win_rate,
         last_played: rm_solo.last_game_at,
+        alts: Vec::new(),
     })
 }
 
@@ -213,6 +230,7 @@ pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<Ra
         games_played: rm_solo.games_count,
         win_rate: rm_solo.win_rate,
         last_played: rm_solo.last_game_at,
+        alts: Vec::new(),
     })
 }
 
