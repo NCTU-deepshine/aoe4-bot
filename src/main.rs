@@ -284,8 +284,10 @@ struct Emperor;
 #[async_trait]
 impl EventHandler for Emperor {
     async fn message(&self, ctx: poise::serenity_prelude::Context, new_message: Message) {
-        if new_message.author.id == UserId::new(453010726311821322) {
-            // 天子
+        let emperor = UserId::new(453010726311821322);
+        info!("Received message from {}", new_message.author.name);
+        if new_message.author.id == emperor {
+            info!("Received message from the emperor");
             new_message
                 .react(ctx.http, ReactionType::from(EmojiId::new(1299285258457448522)))
                 .await
