@@ -9,7 +9,10 @@ use chrono::Utc;
 use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
 use reqwest::Url;
-use serenity::all::{AutocompleteChoice, ChannelId, CreateMessage, Http, UserId};
+use serenity::all::{
+    AutocompleteChoice, ChannelId, CreateMessage, EmojiId, Http, Message, ReactionType, Ready, UserId,
+};
+use serenity::async_trait;
 use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
@@ -277,6 +280,24 @@ async fn send_reminders(http: &Http, data: &Data) -> Result<(), Error> {
     Ok(())
 }
 
+struct Emperor;
+#[async_trait]
+impl EventHandler for Emperor {
+    async fn message(&self, ctx: poise::serenity_prelude::Context, new_message: Message) {
+        if new_message.author.id == UserId::new(453010726311821322) {
+            // 天子
+            new_message
+                .react(ctx.http, ReactionType::from(EmojiId::new(1299285258457448522)))
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn ready(&self, _: poise::serenity_prelude::Context, ready: Ready) {
+        info!("{} emperor bot is connected!", ready.user.name);
+    }
+}
+
 #[shuttle_runtime::main]
 async fn serenity(
     #[shuttle_shared_db::Postgres] pool: PgPool,
@@ -317,6 +338,7 @@ async fn serenity(
 
     let client = Client::builder(&token, GatewayIntents::empty())
         .framework(framework)
+        .event_handler(Emperor)
         .await
         .expect("Err creating client");
 
