@@ -280,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_profile_test() {
-        let aoe4_id = 12127438;
+        let aoe4_id = 7008236;
         let player = try_create_ranked_without_account(aoe4_id).await.unwrap();
         info!("{}", player.info());
     }
