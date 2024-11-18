@@ -338,7 +338,7 @@ async fn serenity(
         })
         .build();
 
-    let client = Client::builder(&token, GatewayIntents::empty())
+    let client = Client::builder(&token, GatewayIntents::non_privileged())
         .framework(framework)
         .event_handler(Emperor)
         .await
@@ -370,4 +370,16 @@ async fn serenity(
     sched.start().await.unwrap();
 
     Ok(client.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use serenity::all::GatewayIntents;
+    #[test]
+    fn test_intents() {
+        let intents = GatewayIntents::non_privileged();
+        assert!(intents.guild_emojis_and_stickers());
+        assert!(intents.guild_message_reactions());
+        assert!(intents.guild_message_typing());
+    }
 }
