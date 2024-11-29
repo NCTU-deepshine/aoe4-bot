@@ -189,6 +189,11 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
         error!("database query failed");
         error
     })?;
+
+    for account in &accounts {
+        info!("insert into accounts (user_id, aoe4_id) values ({}, {});", account.user_id, account.aoe4_id);
+    }
+
     let players = stream::iter(accounts)
         .filter_map(|account| try_create_ranked_from_account(http, data, account))
         .collect::<Vec<RankedPlayer>>()
