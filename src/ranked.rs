@@ -10,6 +10,7 @@ use tracing::info;
 
 pub(crate) struct RankedPlayer {
     aoe4_name: String,
+    aoe4_id: i64,
     discord_display: String,
     discord_username: String,
     rank_level: String,
@@ -115,13 +116,13 @@ impl Display for RankedPlayer {
             alt_info.push_str("\n其他小號:");
         }
         for alt in &self.alts {
-            alt_info.push_str(format!("\n  {}: {}", alt.aoe4_name, alt.rating).as_str());
+            alt_info.push_str(format!("\n  [{}](https://aoe4world.com/players/{}): {}", alt.aoe4_name, alt.aoe4_id, alt.rating).as_str());
         }
 
         write!(
             f,
             "{} ({})\n\
-            遊戲ID: {}\n\
+            遊戲ID: [{}](https://aoe4world.com/players/{})\n\
             階級: {}\n\
             全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
             愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
@@ -130,6 +131,7 @@ impl Display for RankedPlayer {
             self.discord_display,
             self.discord_username,
             self.aoe4_name,
+            self.aoe4_id,
             self.rank_level(),
             self.global_rank,
             self.games_played,
@@ -178,6 +180,7 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
 
     Some(RankedPlayer {
         aoe4_name: profile.name.clone(),
+        aoe4_id: account.aoe4_id,
         discord_display,
         discord_username,
         rank_level: rm_solo.rank_level,
@@ -215,6 +218,7 @@ pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<Ra
 
     Some(RankedPlayer {
         aoe4_name: profile.name.clone(),
+        aoe4_id: aoe4_id.into(),
         discord_display: "".to_string(),
         discord_username: "".to_string(),
         rank_level: rm_solo.rank_level,
