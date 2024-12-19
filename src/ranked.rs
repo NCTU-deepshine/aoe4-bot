@@ -116,7 +116,7 @@ impl Display for RankedPlayer {
             alt_info.push_str("\n其他小號:");
         }
         for alt in &self.alts {
-            alt_info.push_str(format!("\n  [{}](https://aoe4world.com/players/{}): {}", alt.aoe4_name, alt.aoe4_id, alt.rating).as_str());
+            alt_info.push_str(format!("\n  {}: {}", alt.aoe4_name, alt.rating).as_str());
         }
 
         write!(
