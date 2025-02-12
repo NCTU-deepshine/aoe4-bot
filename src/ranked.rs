@@ -129,7 +129,7 @@ impl Display for RankedPlayer {
             排名積分: {}, 近期最高積分: {}, Elo: {}\
             {}",
             self.discord_display,
-            self.discord_username,
+            escape(&self.discord_username),
             self.aoe4_name,
             self.aoe4_id,
             self.rank_level(),
@@ -145,6 +145,10 @@ impl Display for RankedPlayer {
             alt_info
         )
     }
+}
+
+fn escape(input: &str) -> String {
+    str::replace(input, "_", "\\_")
 }
 
 pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, account: Account) -> Option<RankedPlayer> {
