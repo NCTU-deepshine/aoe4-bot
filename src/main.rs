@@ -234,7 +234,7 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
 
     let mut buffer = String::new();
     for (i, player) in sorted_players.iter().enumerate() {
-        let text = format!("第{}名  {}\n` `  \n", i + 1, player);
+        let text = format!("第{}名  {}\n_ _\n", i + 1, player);
         buffer = buffer + &text;
 
         if i % 5 == 4 {
