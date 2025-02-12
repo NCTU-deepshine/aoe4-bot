@@ -237,7 +237,7 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
         let text = format!("第{}名  {}\n　\n", i + 1, player);
         buffer = buffer + &text;
 
-        if i % 10 == 9 {
+        if i % 5 == 4 {
             send_rankings(http, &buffer).await?;
             buffer = String::new();
         }
