@@ -19,6 +19,7 @@ use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
 use sqlx::{Executor, PgPool};
 use std::collections::HashMap;
+use rand::Rng;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
 
@@ -281,13 +282,25 @@ async fn send_reminders(http: &Http, data: &Data) -> Result<(), Error> {
 }
 
 struct Emperor;
+
+impl Emperor {
+    fn select_emoji() -> ReactionType {
+        let num = rand::thread_rng().gen_range(0..10);
+        if num == 0 {
+            ReactionType::from('🐷')
+        } else {
+            ReactionType::from(EmojiId::new(1299285258457448522))
+        }
+    }
+}
+
 #[async_trait]
 impl EventHandler for Emperor {
     async fn message(&self, ctx: poise::serenity_prelude::Context, new_message: Message) {
         let emperor = UserId::new(453010726311821322);
         if new_message.author.id == emperor {
             new_message
-                .react(ctx.http, ReactionType::from(EmojiId::new(1299285258457448522)))
+                .react(ctx.http, Emperor::select_emoji())
                 .await
                 .unwrap();
         }
