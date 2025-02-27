@@ -285,7 +285,7 @@ struct Emperor;
 
 impl Emperor {
     fn select_emoji() -> ReactionType {
-        let num = rand::thread_rng().gen_range(0..10);
+        let num = rand::rng().random_range(0..10);
         if num == 0 {
             ReactionType::from('🐷')
         } else {
