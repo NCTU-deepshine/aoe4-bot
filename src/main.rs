@@ -8,6 +8,7 @@ use anyhow::Context as _;
 use chrono::Utc;
 use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
+use rand::Rng;
 use reqwest::Url;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CreateMessage, EmojiId, Http, Message, ReactionType, Ready, UserId,
@@ -19,7 +20,6 @@ use serenity::prelude::*;
 use shuttle_runtime::SecretStore;
 use sqlx::{Executor, PgPool};
 use std::collections::HashMap;
-use rand::Rng;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
 
@@ -298,11 +298,28 @@ impl Emperor {
 impl EventHandler for Emperor {
     async fn message(&self, ctx: poise::serenity_prelude::Context, new_message: Message) {
         let emperor = UserId::new(453010726311821322);
+        let knockgod = UserId::new(364796522396647424);
         if new_message.author.id == emperor {
-            new_message
-                .react(ctx.http, Emperor::select_emoji())
-                .await
-                .unwrap();
+            new_message.react(ctx.http, Emperor::select_emoji()).await.unwrap();
+        } else {
+            let content = &new_message.content;
+            if content.contains("天子") || new_message.mentions_user_id(emperor) {
+                new_message
+                    .react(ctx.http, ReactionType::from(EmojiId::new(1299285258457448522)))
+                    .await
+                    .unwrap();
+            } else if content.contains("那可") || content.contains("納可") || new_message.mentions_user_id(knockgod)
+            {
+                new_message
+                    .react(ctx.http, ReactionType::from(EmojiId::new(1264746593366839431)))
+                    .await
+                    .unwrap();
+            } else if content.contains("平等院") {
+                new_message
+                    .react(ctx.http, ReactionType::from(EmojiId::new(1338936646615306250)))
+                    .await
+                    .unwrap();
+            }
         }
     }
 
