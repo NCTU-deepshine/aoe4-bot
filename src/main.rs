@@ -303,6 +303,7 @@ impl EventHandler for Emperor {
             new_message.react(ctx.http, Emperor::select_emoji()).await.unwrap();
         } else {
             let content = &new_message.content;
+            info!("content: {}", content);
             if content.contains("天子") || new_message.mentions_user_id(emperor) {
                 new_message
                     .react(ctx.http, ReactionType::from(EmojiId::new(1299285258457448522)))
@@ -366,11 +367,14 @@ async fn serenity(
         })
         .build();
 
-    let client = Client::builder(&token, GatewayIntents::non_privileged())
-        .framework(framework)
-        .event_handler(Emperor)
-        .await
-        .expect("Err creating client");
+    let client = Client::builder(
+        &token,
+        GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT,
+    )
+    .framework(framework)
+    .event_handler(Emperor)
+    .await
+    .expect("Err creating client");
 
     let sched = JobScheduler::new().await.unwrap();
     sched
@@ -409,5 +413,10 @@ mod tests {
         assert!(intents.guild_emojis_and_stickers());
         assert!(intents.guild_message_reactions());
         assert!(intents.guild_message_typing());
+    }
+
+    #[test]
+    fn test_contains() {
+        assert!(String::from("比那明居天子").contains("天子"))
     }
 }
