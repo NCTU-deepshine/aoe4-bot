@@ -299,6 +299,7 @@ impl EventHandler for Emperor {
     async fn message(&self, ctx: poise::serenity_prelude::Context, new_message: Message) {
         let emperor = UserId::new(453010726311821322);
         let knockgod = UserId::new(364796522396647424);
+        let baltune = UserId::new(202510973519527937);
         if new_message.author.id == emperor {
             new_message.react(ctx.http, Emperor::select_emoji()).await.unwrap();
         } else {
@@ -318,6 +319,15 @@ impl EventHandler for Emperor {
             } else if content.contains("平等院") {
                 new_message
                     .react(ctx.http, ReactionType::from(EmojiId::new(1338936646615306250)))
+                    .await
+                    .unwrap();
+            } else if content.contains("balt")
+                || content.contains("Balt")
+                || content.contains("包吞")
+                || new_message.mentions_user_id(baltune)
+            {
+                new_message
+                    .react(ctx.http, ReactionType::from(EmojiId::new(1264326708962525225)))
                     .await
                     .unwrap();
             }
