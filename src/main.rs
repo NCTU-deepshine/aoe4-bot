@@ -285,8 +285,10 @@ struct Emperor;
 
 impl Emperor {
     fn select_emoji() -> ReactionType {
-        let num = rand::rng().random_range(0..10);
+        let num = rand::rng().random_range(0..100);
         if num == 0 {
+            ReactionType::from('🍄')
+        } else if num <= 10 {
             ReactionType::from('🐷')
         } else {
             ReactionType::from(EmojiId::new(1299285258457448522))
@@ -306,10 +308,7 @@ impl EventHandler for Emperor {
             new_message.react(&ctx.http, Emperor::select_emoji()).await.unwrap();
         }
         if content.contains("天子") || new_message.mentions_user_id(emperor) {
-            new_message
-                .react(&ctx.http, ReactionType::from(EmojiId::new(1299285258457448522)))
-                .await
-                .unwrap();
+            new_message.react(&ctx.http, Emperor::select_emoji()).await.unwrap();
         }
         if content.contains("那可") || content.contains("納可") || new_message.mentions_user_id(knockgod) {
             new_message
