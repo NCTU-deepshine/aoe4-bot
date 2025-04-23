@@ -332,6 +332,14 @@ impl EventHandler for Emperor {
                 .await
                 .unwrap();
         }
+        if content.contains("城主")
+            || content.contains("成主")
+            || (content.contains("all") && content.contains("in"))
+            || content.contains("快攻")
+            || content.contains("喝水")
+        {
+            new_message.react(&ctx.http, ReactionType::from('🦧')).await.unwrap();
+        }
     }
 
     async fn ready(&self, _: poise::serenity_prelude::Context, ready: Ready) {
