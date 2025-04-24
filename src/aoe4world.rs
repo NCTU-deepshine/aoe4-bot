@@ -53,7 +53,7 @@ impl CivData {
             "zhu_xis_legacy" => "朱熹".to_string(),
             "knights_templar" => "聖殿騎士團".to_string(),
             "house_of_lancaster" => "蘭卡斯特家族".to_string(),
-            _ => self.civilization.clone(),
+            _ => self.civilization.replace("_", " "),
         }
     }
 }
