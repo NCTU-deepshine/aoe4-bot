@@ -35,7 +35,7 @@ pub(crate) struct CivData {
 impl CivData {
     pub fn civilization(&self) -> String {
         match self.civilization.as_str() {
-            "byzantines" => "拜占庭".to_string(),
+            "byzantines" => "東羅馬帝國".to_string(),
             "holy_roman_empire" => "神聖羅馬帝國".to_string(),
             "delhi_sultanate" => "德里蘇丹國".to_string(),
             "french" => "法蘭西".to_string(),

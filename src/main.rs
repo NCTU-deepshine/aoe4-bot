@@ -337,12 +337,14 @@ impl EventHandler for Emperor {
             || content.contains("成主")
             || (content.contains("all") && content.contains("in"))
             || content.contains("快攻")
+            || content.contains("試煉")
             || content.contains("喝水")
             || content.contains("諸葛弩")
             || content.contains("議會廳")
             || content.contains("競技場")
             || content.contains("勝利塔")
             || content.contains("衝車")
+            || content.contains("搓車")
         {
             new_message.react(&ctx.http, ReactionType::from('🦧')).await.unwrap();
         }
