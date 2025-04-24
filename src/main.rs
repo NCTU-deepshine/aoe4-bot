@@ -307,7 +307,11 @@ impl EventHandler for Emperor {
         if author == emperor || content.contains("天子") || new_message.mentions_user_id(emperor) {
             new_message.react(&ctx.http, Emperor::select_emoji()).await.unwrap();
         }
-        if content.contains("那可") || content.contains("納可") || content.contains("knock") || new_message.mentions_user_id(knockgod) {
+        if content.contains("那可")
+            || content.contains("納可")
+            || content.contains("knock")
+            || new_message.mentions_user_id(knockgod)
+        {
             new_message
                 .react(&ctx.http, ReactionType::from(EmojiId::new(1264746593366839431)))
                 .await
@@ -334,6 +338,11 @@ impl EventHandler for Emperor {
             || (content.contains("all") && content.contains("in"))
             || content.contains("快攻")
             || content.contains("喝水")
+            || content.contains("諸葛弩")
+            || content.contains("議會廳")
+            || content.contains("競技場")
+            || content.contains("勝利塔")
+            || content.contains("衝車")
         {
             new_message.react(&ctx.http, ReactionType::from('🦧')).await.unwrap();
         }
