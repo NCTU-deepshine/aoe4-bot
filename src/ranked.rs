@@ -125,8 +125,8 @@ impl Display for RankedPlayer {
             遊戲ID: [{}](https://aoe4world.com/players/{})\n\
             階級: {}\n\
             全球排名: {}, 遊戲場次: {} (勝率: {}%)\n\
-            愛用文明: {} (出場率 {}%), 上次遊玩: {}\n\
-            排名積分: {}, 近期最高積分: {}, Elo: {}\
+            愛用文明: {} ,出場率 {}%\n\
+            排名積分: {}, 近期最高積分: {}, Elo: {}, 上次遊玩: {}\
             {}",
             self.discord_display,
             escape(&self.discord_username),
