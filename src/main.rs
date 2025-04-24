@@ -317,7 +317,7 @@ impl EventHandler for Emperor {
                 .await
                 .unwrap();
         }
-        if content.contains("平等院") {
+        if content.contains("平等院") || content.contains("海門城堡") {
             new_message
                 .react(&ctx.http, ReactionType::from(EmojiId::new(1338936646615306250)))
                 .await
