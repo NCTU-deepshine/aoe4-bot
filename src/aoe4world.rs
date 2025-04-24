@@ -47,7 +47,7 @@ impl CivData {
             "ayyubids" => "阿育布(ئەیووبی)".to_string(),
             "ottomans" => "鄂圖曼(دولت علیهٔ عثمانیه)".to_string(),
             "rus" => "羅斯(Русь)".to_string(),
-            "jeanne_darc(Jehanne Darc)" => "聖女貞德".to_string(),
+            "jeanne_darc" => "聖女貞德(Jehanne Darc)".to_string(),
             "japanese" => "日本国".to_string(),
             "chinese" => "中國".to_string(),
             "zhu_xis_legacy" => "朱熹".to_string(),
