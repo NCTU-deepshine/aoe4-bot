@@ -138,10 +138,10 @@ impl Display for RankedPlayer {
             self.win_rate.round(),
             self.favorite_civ.civilization(),
             self.favorite_civ.pick_rate.round(),
-            self.last_played(),
             self.rating,
             self.recent_max_rating,
             self.elo,
+            self.last_played(),
             alt_info
         )
     }
