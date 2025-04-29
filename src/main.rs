@@ -304,7 +304,11 @@ impl EventHandler for Emperor {
         let baltune = UserId::new(202510973519527937);
         let author = new_message.author.id;
         let content = &new_message.content;
-        if author == emperor || content.contains("天子") || new_message.mentions_user_id(emperor) {
+        if author == emperor
+            || content.contains("天子")
+            || content.contains("唱歌")
+            || new_message.mentions_user_id(emperor)
+        {
             new_message.react(&ctx.http, Emperor::select_emoji()).await.unwrap();
         }
         if content.contains("那可")
