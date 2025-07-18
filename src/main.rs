@@ -302,6 +302,7 @@ impl EventHandler for Emperor {
         let emperor = UserId::new(453010726311821322);
         let knockgod = UserId::new(364796522396647424);
         let baltune = UserId::new(202510973519527937);
+        let racoon = UserId::new(302663000463114242);
         let author = new_message.author.id;
         let content = &new_message.content;
         if author == emperor
@@ -351,6 +352,9 @@ impl EventHandler for Emperor {
             || content.contains("搓車")
         {
             new_message.react(&ctx.http, ReactionType::from('🦧')).await.unwrap();
+        }
+        if author == racoon {
+            new_message.react(&ctx.http, ReactionType::from('🦝')).await.unwrap();
         }
     }
 
