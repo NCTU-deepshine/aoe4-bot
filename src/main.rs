@@ -11,7 +11,7 @@ use poise::futures_util::StreamExt;
 use rand::Rng;
 use reqwest::Url;
 use serenity::all::{
-    AutocompleteChoice, ChannelId, CreateMessage, EmojiId, Http, Message, ReactionType, Ready, UserId,
+    AutocompleteChoice, ChannelId, CreateMessage, EmojiId, Http, Message, Reaction, ReactionType, Ready, UserId,
 };
 use serenity::async_trait;
 use serenity::json::json;
@@ -305,38 +305,42 @@ impl EventHandler for Emperor {
         let racoon = UserId::new(302663000463114242);
         let author = new_message.author.id;
         let content = &new_message.content;
+        let mut blocked = false;
         if author == emperor
             || content.contains("天子")
             || content.contains("唱歌")
             || new_message.mentions_user_id(emperor)
         {
-            new_message.react(&ctx.http, Emperor::select_emoji()).await.unwrap();
+            blocked = Self::detect_blocked(new_message.react(&ctx.http, Emperor::select_emoji()).await);
         }
         if content.contains("那可")
             || content.contains("納可")
             || content.contains("knock")
             || new_message.mentions_user_id(knockgod)
         {
-            new_message
-                .react(&ctx.http, ReactionType::from(EmojiId::new(1264746593366839431)))
-                .await
-                .unwrap();
+            blocked = Self::detect_blocked(
+                new_message
+                    .react(&ctx.http, ReactionType::from(EmojiId::new(1264746593366839431)))
+                    .await,
+            );
         }
         if content.contains("平等院") || content.contains("海門城堡") {
-            new_message
-                .react(&ctx.http, ReactionType::from(EmojiId::new(1338936646615306250)))
-                .await
-                .unwrap();
+            blocked = Self::detect_blocked(
+                new_message
+                    .react(&ctx.http, ReactionType::from(EmojiId::new(1338936646615306250)))
+                    .await,
+            );
         }
         if content.contains("balt")
             || content.contains("Balt")
             || content.contains("包吞")
             || new_message.mentions_user_id(baltune)
         {
-            new_message
-                .react(&ctx.http, ReactionType::from(EmojiId::new(1264326708962525225)))
-                .await
-                .unwrap();
+            blocked = Self::detect_blocked(
+                new_message
+                    .react(&ctx.http, ReactionType::from(EmojiId::new(1264326708962525225)))
+                    .await,
+            );
         }
         if content.contains("城主")
             || content.contains("成主")
@@ -351,15 +355,49 @@ impl EventHandler for Emperor {
             || content.contains("衝車")
             || content.contains("搓車")
         {
-            new_message.react(&ctx.http, ReactionType::from('🦧')).await.unwrap();
+            blocked = Self::detect_blocked(new_message.react(&ctx.http, ReactionType::from('🦧')).await);
         }
         if author == racoon {
-            new_message.react(&ctx.http, ReactionType::from('🦝')).await.unwrap();
+            blocked = Self::detect_blocked(new_message.react(&ctx.http, ReactionType::from('🦝')).await);
+        }
+
+        if blocked {
+            let channel = ctx
+                .http
+                .get_channel(new_message.channel_id)
+                .await
+                .unwrap()
+                .guild()
+                .unwrap();
+            channel
+                .say(
+                    ctx.http,
+                    format!("[{}]好的不學學天子 任意封鎖久留美", new_message.author.display_name()),
+                )
+                .await
+                .unwrap();
         }
     }
 
     async fn ready(&self, _: poise::serenity_prelude::Context, ready: Ready) {
         info!("{} emperor bot is connected!", ready.user.name);
+    }
+}
+
+impl Emperor {
+    fn detect_blocked(result: serenity::Result<Reaction>) -> bool {
+        match result {
+            Ok(_) => false,
+            Err(error) => {
+                if let serenity::Error::Http(HttpError::UnsuccessfulRequest(error_response)) = error {
+                    if error_response.error.message == "Reaction blocked" {
+                        // handle blocked reaction
+                        return true;
+                    }
+                }
+                false
+            },
+        }
     }
 }
 
