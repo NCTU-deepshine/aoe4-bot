@@ -361,23 +361,16 @@ impl EventHandler for Emperor {
             blocked = Self::detect_blocked(new_message.react(&ctx.http, ReactionType::from('🦝')).await);
         }
 
-        // if blocked {
-        //     let channel = ctx
-        //         .http
-        //         .get_channel(new_message.channel_id)
-        //         .await
-        //         .unwrap()
-        //         .guild()
-        //         .unwrap();
-        //     // channel
-            //     .say(
-            //         ctx.http,
-            //         format!("[{}]好的不學學天子 任意封鎖久留美", new_message.author.display_name()),
-            //     )
-            //     .await
-            //     .unwrap();
-
-        // }
+        if blocked {
+            let channel = ctx
+                .http
+                .get_channel(new_message.channel_id)
+                .await
+                .unwrap()
+                .guild()
+                .unwrap();
+            channel.say(ctx.http, "<:emoji_93:1299285258457448522>").await.unwrap();
+        }
     }
 
     async fn ready(&self, _: poise::serenity_prelude::Context, ready: Ready) {
