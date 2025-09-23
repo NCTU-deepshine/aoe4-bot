@@ -362,14 +362,17 @@ impl EventHandler for Emperor {
         }
 
         if blocked {
-            let channel = ctx
-                .http
-                .get_channel(new_message.channel_id)
-                .await
-                .unwrap()
-                .guild()
-                .unwrap();
-            channel.say(ctx.http, "<:emoji_93:1299285258457448522>").await.unwrap();
+            let num = rand::rng().random_range(0..10);
+            if num == 0 {
+                let channel = ctx
+                    .http
+                    .get_channel(new_message.channel_id)
+                    .await
+                    .unwrap()
+                    .guild()
+                    .unwrap();
+                channel.say(ctx.http, "<:emoji_93:1299285258457448522>").await.unwrap();
+            }
         }
     }
 
