@@ -357,6 +357,9 @@ impl EventHandler for Emperor {
         {
             blocked = Self::detect_blocked(new_message.react(&ctx.http, ReactionType::from('🦧')).await);
         }
+        if content.contains("象") {
+            blocked = Self::detect_blocked(new_message.react(&ctx.http, ReactionType::from('🐘')).await);
+        }
         if author == racoon {
             blocked = Self::detect_blocked(new_message.react(&ctx.http, ReactionType::from('🦝')).await);
         }
