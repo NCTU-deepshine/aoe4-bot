@@ -53,6 +53,10 @@ impl CivData {
             "zhu_xis_legacy" => "朱熹".to_string(),
             "knights_templar" => "聖殿騎士團(Les Chevaliers Templiers)".to_string(),
             "house_of_lancaster" => "蘭卡斯特家族(House of Lancaster)".to_string(),
+            "macedonian_dynasty" => "馬其頓王朝(Μακεδονική Δυναστεία)".to_string(),
+            "golden_horde" => "欽察汗國(Алтан Орд)".to_string(),
+            "tughlaq_dynasty" => "圖格魯克王朝(تغلق شاهیان)".to_string(),
+            "sengoku_daimyo" => "戦国大名".to_string(),
             _ => self.civilization.replace("_", " "),
         }
     }
