@@ -15,7 +15,7 @@ pub(crate) struct Reminder {
 }
 
 pub(crate) async fn bind_account(pool: &PgPool, user_id: i64, aoe4_id: i64) -> Result<String, sqlx::Error> {
-    sqlx::query("insert into accounts (user_id, aoe4_id) values ($1, $2)")
+    sqlx::query("insert into accounts (user_id, aoe4_id) values ($1, $2) on conflict (aoe4_id) do nothing")
         .bind(user_id)
         .bind(aoe4_id)
         .execute(pool)
