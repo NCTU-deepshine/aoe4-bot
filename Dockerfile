@@ -18,4 +18,6 @@ FROM debian:trixie-slim AS runtime
 WORKDIR /app
 RUN apt-get update && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/aoe4-bot /usr/local/bin
+ENV DISCORD_TOKEN=$DISCORD_TOKEN
+ENV GUILD_ID=$GUILD_ID
 ENTRYPOINT ["/usr/local/bin/aoe4-bot"]

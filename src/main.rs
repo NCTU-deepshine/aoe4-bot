@@ -67,7 +67,8 @@ pub async fn rebuild(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
     let channel = ctx.guild_channel().await.unwrap();
 
-    let regex = Regex::new(r"綁定discord帳號 `(?<user_id>[0-9]+)` 與世紀帝國四帳號 `(?<aoe4_id>[0-9]+)`").unwrap();
+    let regex1 = Regex::new(r"綁定discord帳號 `(?<user_id>[0-9]+)` 與世紀帝國四帳號 `(?<aoe4_id>[0-9]+)`").unwrap();
+    let regex2 = Regex::new(r"Bound discord user `(?<user_id>[0-9]+)` to aoe4 world profile `(?<aoe4_id>[0-9]+)`").unwrap();
 
     let mut latest_message = channel.last_message_id.unwrap();
     let limit = 50;
@@ -79,7 +80,13 @@ pub async fn rebuild(ctx: Context<'_>) -> Result<(), Error> {
         for message in messages.iter() {
             let content = &message.content;
             latest_message = message.id;
-            if let Some(cap) = regex.captures(content) {
+            if let Some(cap) = regex1.captures(content) {
+                let user_id = cap["user_id"].parse::<i64>().unwrap();
+                let aoe4_id = cap["aoe4_id"].parse::<i64>().unwrap();
+                let msg = bind_account(&ctx.data().database, user_id, aoe4_id).await?;
+                info!(msg);
+            }
+            if let Some(cap) = regex2.captures(content) {
                 let user_id = cap["user_id"].parse::<i64>().unwrap();
                 let aoe4_id = cap["aoe4_id"].parse::<i64>().unwrap();
                 let msg = bind_account(&ctx.data().database, user_id, aoe4_id).await?;
@@ -539,5 +546,16 @@ mod tests {
         let cap = result.unwrap();
         assert_eq!("182108123174010880", &cap["user_id"]);
         assert_eq!("199837", &cap["aoe4_id"]);
+    }
+
+    #[test]
+    fn test_regex2() {
+        let regex = Regex::new(r"Bound discord user `(?<user_id>[0-9]+)` to aoe4 world profile `(?<aoe4_id>[0-9]+)`").unwrap();
+        let hay = "Bound discord user `380688858729414658` to aoe4 world profile `3763401`";
+        let result = regex.captures(hay);
+        assert!(result.is_some());
+        let cap = result.unwrap();
+        assert_eq!("380688858729414658", &cap["user_id"]);
+        assert_eq!("3763401", &cap["aoe4_id"]);
     }
 }
