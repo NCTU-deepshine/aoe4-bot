@@ -1,21 +1,18 @@
 [package]
 name = "aoe4-bot"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-anyhow = "1.0.100"
 serde = "1.0.226"
 serenity = { version = "0.12.4", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
-shuttle-runtime = "0.52.0"
-shuttle-serenity = "0.52.0"
-shuttle-shared-db = { version = "0.52.0", features = ["postgres", "sqlx"] }
-sqlx = { version ="0.8.6", features = ["chrono"]}
-tokio = "1.47.1"
+sqlx = { version ="0.8.6", features = ["runtime-tokio", "tls-native-tls", "postgres", "chrono"]}
+tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.41"
 poise = "0.6.1"
-reqwest = { version = "0.12.23", features = ["json"] }
+reqwest = { version = "0.13.1", features = ["json"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 tokio-cron-scheduler = "*"
 rand = "0.9.2"
-log = "0.4.28"
+tracing-subscriber = "0.3.22"
+regex = "1.12.2"

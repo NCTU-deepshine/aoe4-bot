@@ -20,9 +20,8 @@ pub(crate) async fn bind_account(pool: &PgPool, user_id: i64, aoe4_id: i64) -> R
         .bind(aoe4_id)
         .execute(pool)
         .await
-        .map_err(|err| {
+        .inspect_err(|err| {
             error!("database operation failed with error {}", err.to_string());
-            err
         })?;
 
     Ok(format!("綁定discord帳號 `{}` 與世紀帝國四帳號 `{}` ", user_id, aoe4_id))
@@ -43,9 +42,8 @@ pub(crate) async fn list_all(pool: &PgPool) -> Result<Vec<Account>, sqlx::Error>
     let accounts: Vec<Account> = sqlx::query_as("select user_id, aoe4_id from accounts")
         .fetch_all(pool)
         .await
-        .map_err(|err| {
+        .inspect_err(|err| {
             error!("database operation failed with error {}", err.to_string());
-            err
         })?;
     Ok(accounts)
 }
@@ -56,9 +54,8 @@ pub(crate) async fn add_reminder(pool: &PgPool, user_id: i64, days: i32) -> Resu
         .bind(days)
         .execute(pool)
         .await
-        .map_err(|err| {
+        .inspect_err(|err| {
             error!("database operation failed with error {}", err.to_string());
-            err
         })?;
 
     Ok(format!(
@@ -72,9 +69,8 @@ pub(crate) async fn delete_reminder(pool: &PgPool, user_id: i64) -> Result<Strin
         .bind(user_id)
         .execute(pool)
         .await
-        .map_err(|err| {
+        .inspect_err(|err| {
             error!("database operation failed with error {}", err.to_string());
-            err
         })?;
 
     Ok("已解除天梯提醒".to_string())

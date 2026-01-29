@@ -3,21 +3,22 @@ use crate::db::{
     add_reminder, bind_account, delete_reminder, list_all, list_reminder_needed, reminder_update_last_reminded,
     select_account,
 };
-use crate::ranked::{try_create_ranked_from_account, try_create_ranked_without_account, RankedPlayer};
-use anyhow::Context as _;
+use crate::ranked::{RankedPlayer, try_create_ranked_from_account, try_create_ranked_without_account};
 use chrono::Utc;
-use poise::futures_util::stream;
 use poise::futures_util::StreamExt;
+use poise::futures_util::stream;
 use rand::Rng;
+use regex::Regex;
 use reqwest::Url;
 use serenity::all::{
-    AutocompleteChoice, ChannelId, CreateMessage, EmojiId, Http, Message, Reaction, ReactionType, Ready, UserId,
+    AutocompleteChoice, ChannelId, CreateMessage, EmojiId, GetMessages, Http, Message, Reaction, ReactionType, Ready,
+    UserId,
 };
 use serenity::async_trait;
 use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
-use shuttle_runtime::SecretStore;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool};
 use std::collections::HashMap;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -38,12 +39,6 @@ struct Data {
     guild_id: GuildId,
 }
 
-#[poise::command(slash_command)]
-async fn hello(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say("world!").await?;
-    Ok(())
-}
-
 #[poise::command(slash_command, subcommands("id", "name"), subcommand_required)]
 pub async fn bind(_: Context<'_>) -> Result<(), Error> {
     Ok(())
@@ -57,18 +52,53 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
     let message = bind_account(
         &ctx.data().database,
         i64::try_from(u64::from(user_id)).unwrap(),
-        i64::try_from(aoe4_id).unwrap(),
+        i64::from(aoe4_id),
     )
     .await
-    .map_err(|error| {
+    .inspect_err(|_error| {
         error!("database insert failed");
-        error
     })?;
     ctx.say(message).await?;
     Ok(())
 }
 
-async fn auto_complete_id<'a>(_ctx: Context<'_>, username: &'a str) -> impl Iterator<Item = AutocompleteChoice> {
+#[poise::command(slash_command)]
+pub async fn rebuild(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
+    let channel = ctx.guild_channel().await.unwrap();
+
+    let regex = Regex::new(r"綁定discord帳號 `(?<user_id>[0-9]+)` 與世紀帝國四帳號 `(?<aoe4_id>[0-9]+)`").unwrap();
+
+    let mut latest_message = channel.last_message_id.unwrap();
+    let limit = 50;
+    let mut messages = channel
+        .messages(ctx.http(), GetMessages::new().before(latest_message).limit(limit))
+        .await?;
+    loop {
+        info!("loading first batch, size {}", messages.len());
+        for message in messages.iter() {
+            let content = &message.content;
+            latest_message = message.id;
+            if let Some(cap) = regex.captures(content) {
+                let user_id = cap["user_id"].parse::<i64>().unwrap();
+                let aoe4_id = cap["aoe4_id"].parse::<i64>().unwrap();
+                let msg = bind_account(&ctx.data().database, user_id, aoe4_id).await?;
+                info!(msg);
+            }
+        }
+        if messages.len() < limit as usize {
+            break;
+        }
+        messages = channel
+            .messages(ctx.http(), GetMessages::new().before(latest_message).limit(limit))
+            .await?;
+    }
+
+    ctx.say("重建完成").await?;
+    Ok(())
+}
+
+async fn auto_complete_id(_ctx: Context<'_>, username: &str) -> impl Iterator<Item = AutocompleteChoice> {
     info!("search aoe4 world profiles with username {}", username);
     let mut players = match get_profiles(username).await {
         None => vec![],
@@ -107,12 +137,11 @@ pub async fn name(
     let message = bind_account(
         &ctx.data().database,
         i64::try_from(u64::from(user_id)).unwrap(),
-        i64::try_from(aoe4_id).unwrap(),
+        i64::from(aoe4_id),
     )
     .await
-    .map_err(|error| {
+    .inspect_err(|_error| {
         error!("database insert failed");
-        error
     })?;
     ctx.say(message).await?;
     Ok(())
@@ -159,15 +188,15 @@ pub async fn remind(ctx: Context<'_>, #[description = "警告天數"] days: i32)
             let message = if days > 0 {
                 add_reminder(&ctx.data().database, user_id, days)
                     .await
-                    .map_err(|error| {
+                    .inspect_err(|_error| {
                         error!("setting reminder failed");
-                        error
                     })?
             } else {
-                delete_reminder(&ctx.data().database, user_id).await.map_err(|error| {
-                    error!("deleting reminder failed");
-                    error
-                })?
+                delete_reminder(&ctx.data().database, user_id)
+                    .await
+                    .inspect_err(|_error| {
+                        error!("deleting reminder failed");
+                    })?
             };
             ctx.say(message).await?;
             Ok(())
@@ -186,9 +215,8 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
 async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
     info!("attempting to refresh");
 
-    let accounts = list_all(&data.database).await.map_err(|error| {
+    let accounts = list_all(&data.database).await.inspect_err(|_error| {
         error!("database query failed");
-        error
     })?;
     let players = stream::iter(accounts)
         .filter_map(|account| try_create_ranked_from_account(http, data, account))
@@ -198,7 +226,7 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
         .into_iter()
         .fold(HashMap::new(), |mut acc, player| {
             acc.entry(String::from(player.discord_username()))
-                .or_insert_with(|| Vec::new())
+                .or_insert_with(Vec::new)
                 .push(player);
             acc
         })
@@ -219,17 +247,18 @@ async fn do_refresh(http: &Http, data: &Data) -> Result<(), Error> {
     info!("collected and sorted {} players", sorted_players.len());
 
     info!("clearing all existing messages in the channel");
-    let messages = http.get_messages(RANK_CHANNEL_ID, None, None).await.map_err(|error| {
-        error!("getting message from discord channel failed");
-        error
-    })?;
+    let messages = http
+        .get_messages(RANK_CHANNEL_ID, None, None)
+        .await
+        .inspect_err(|_error| {
+            error!("getting message from discord channel failed");
+        })?;
 
     for message_id in messages.iter().map(|message| message.id) {
         http.delete_message(RANK_CHANNEL_ID, message_id, None)
             .await
-            .map_err(|error| {
+            .inspect_err(|_error| {
                 error!("deleting existing messages from discord failed");
-                error
             })?;
     }
 
@@ -266,15 +295,15 @@ async fn send_reminders(http: &Http, data: &Data) -> Result<(), Error> {
     for reminder in reminders.iter() {
         let user = http.get_user(UserId::new(reminder.user_id as u64)).await?;
         let days = Utc::now().signed_duration_since(reminder.last_played).num_days();
-        match user
+        if user
             .direct_message(
                 &http,
                 CreateMessage::new().content(format!("溫馨提醒：已經耍廢{}天囉 該爬天梯了！", days)),
             )
             .await
+            .is_ok()
         {
-            Ok(_) => reminder_update_last_reminded(&data.database, reminder.user_id).await,
-            Err(_) => {},
+            reminder_update_last_reminded(&data.database, reminder.user_id).await
         }
     }
 
@@ -389,11 +418,11 @@ impl Emperor {
         match result {
             Ok(_) => false,
             Err(error) => {
-                if let serenity::Error::Http(HttpError::UnsuccessfulRequest(error_response)) = error {
-                    if error_response.error.message == "Reaction blocked" {
-                        // handle blocked reaction
-                        return true;
-                    }
+                if let serenity::Error::Http(HttpError::UnsuccessfulRequest(error_response)) = error
+                    && error_response.error.message == "Reaction blocked"
+                {
+                    // handle blocked reaction
+                    return true;
                 }
                 false
             },
@@ -401,36 +430,40 @@ impl Emperor {
     }
 }
 
-#[shuttle_runtime::main]
-async fn serenity(
-    #[shuttle_shared_db::Postgres] pool: PgPool,
-    #[shuttle_runtime::Secrets] secret_store: SecretStore,
-) -> shuttle_serenity::ShuttleSerenity {
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
+    info!("starting app");
+
     // Get the discord token set in `Secrets.toml`
-    let token = secret_store
-        .get("DISCORD_TOKEN")
-        .context("'DISCORD_TOKEN' was not found")?;
+    let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
     // Get the guild_id set in `Secrets.toml`
-    let guild_id: GuildId = secret_store
-        .get("GUILD_ID")
-        .context("'GUILD_ID' was not found")?
+    let guild_id: GuildId = std::env::var("GUILD_ID")
+        .expect("GUILD_ID must be set")
         .parse()
-        .unwrap();
+        .expect("GUILD_ID must be a valid integer");
+
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = PgPoolOptions::new()
+        .max_connections(20)
+        .connect(&db_url)
+        .await
+        .expect("failed to connect to DATABASE_URL");
 
     // Run the schema migration
     pool.execute(include_str!("../schema.sql"))
         .await
-        .context("failed to run migrations")?;
+        .expect("failed to run migrations");
 
     let pool_cloned = pool.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![hello(), bind(), id(), name(), refresh(), check(), remind()],
+            commands: vec![rebuild(), bind(), id(), name(), refresh(), check(), remind()],
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
             Box::pin(async move {
-                poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id.clone()).await?;
+                poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id).await?;
                 Ok(Data {
                     database: pool_cloned,
                     guild_id,
@@ -439,7 +472,9 @@ async fn serenity(
         })
         .build();
 
-    let client = Client::builder(
+    info!("prepared frameworks");
+
+    let mut client = Client::builder(
         &token,
         GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT,
     )
@@ -447,6 +482,7 @@ async fn serenity(
     .event_handler(Emperor)
     .await
     .expect("Err creating client");
+    info!("prepared client");
 
     let sched = JobScheduler::new().await.unwrap();
     sched
@@ -473,11 +509,13 @@ async fn serenity(
         .unwrap();
     sched.start().await.unwrap();
 
-    Ok(client.into())
+    info!("starting serenity client");
+    client.start().await.unwrap();
 }
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
     use serenity::all::GatewayIntents;
     #[test]
     fn test_intents() {
@@ -490,5 +528,16 @@ mod tests {
     #[test]
     fn test_contains() {
         assert!(String::from("比那明居天子").contains("天子"))
+    }
+
+    #[test]
+    fn test_regex() {
+        let regex = Regex::new(r"綁定discord帳號 `(?<user_id>[0-9]+)` 與世紀帝國四帳號 `(?<aoe4_id>[0-9]+)`").unwrap();
+        let hay = "綁定discord帳號 `182108123174010880` 與世紀帝國四帳號 `199837`";
+        let result = regex.captures(hay);
+        assert!(result.is_some());
+        let cap = result.unwrap();
+        assert_eq!("182108123174010880", &cap["user_id"]);
+        assert_eq!("199837", &cap["aoe4_id"]);
     }
 }
