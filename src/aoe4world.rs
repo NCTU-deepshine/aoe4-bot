@@ -136,7 +136,7 @@ impl PartialEq<Self> for SearchedPlayer {
 
 impl PartialOrd<Self> for SearchedPlayer {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.rating().partial_cmp(&self.rating())
+        Some(self.cmp(other))
     }
 }
 

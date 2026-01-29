@@ -1,6 +1,6 @@
-use crate::aoe4world::{CivData, Profile};
-use crate::db::{reminder_update_last_played, Account};
 use crate::Data;
+use crate::aoe4world::{CivData, Profile};
+use crate::db::{Account, reminder_update_last_played};
 use chrono::{DateTime, Utc};
 use reqwest::Url;
 use serenity::all::{Http, UserId};
@@ -99,7 +99,7 @@ impl PartialEq<Self> for RankedPlayer {
 
 impl PartialOrd<Self> for RankedPlayer {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.global_rank.partial_cmp(&other.global_rank)
+        Some(self.cmp(other))
     }
 }
 
