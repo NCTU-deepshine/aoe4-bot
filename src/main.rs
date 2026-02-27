@@ -450,7 +450,7 @@ async fn main() {
         .parse()
         .expect("GUILD_ID must be a valid integer");
 
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let db_url = "sqlite:///data/bot_prod.db";
     let pool = SqlitePoolOptions::new()
         .max_connections(20)
         .connect(&db_url)
