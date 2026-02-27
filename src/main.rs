@@ -18,8 +18,8 @@ use serenity::async_trait;
 use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Executor, PgPool};
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{Executor, SqlitePool};
 use std::collections::HashMap;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
@@ -35,7 +35,7 @@ static RANK_CHANNEL_ID: ChannelId = ChannelId::new(1263079883937153105);
 static INTERACTION_CHANNEL_ID: ChannelId = ChannelId::new(1263524546582020254);
 
 struct Data {
-    database: PgPool,
+    database: SqlitePool,
     guild_id: GuildId,
 }
 
@@ -451,7 +451,7 @@ async fn main() {
         .expect("GUILD_ID must be a valid integer");
 
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = PgPoolOptions::new()
+    let pool = SqlitePoolOptions::new()
         .max_connections(20)
         .connect(&db_url)
         .await

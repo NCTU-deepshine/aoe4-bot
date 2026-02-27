@@ -11,4 +11,5 @@ target/
 Secrets.toml/target
 Secrets*.toml
 
-dump.sql
+*.sql
+*.db
