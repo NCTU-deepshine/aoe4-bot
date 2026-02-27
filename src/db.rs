@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, SqlitePool};
 use tracing::error;
 
 #[derive(FromRow)]
@@ -14,8 +14,8 @@ pub(crate) struct Reminder {
     pub last_played: DateTime<Utc>,
 }
 
-pub(crate) async fn bind_account(pool: &PgPool, user_id: i64, aoe4_id: i64) -> Result<String, sqlx::Error> {
-    sqlx::query("insert into accounts (user_id, aoe4_id) values ($1, $2) on conflict (aoe4_id) do nothing")
+pub(crate) async fn bind_account(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<String, sqlx::Error> {
+    sqlx::query("insert into accounts (user_id, aoe4_id) values (?1, ?2) on conflict (aoe4_id) do nothing")
         .bind(user_id)
         .bind(aoe4_id)
         .execute(pool)
@@ -27,8 +27,8 @@ pub(crate) async fn bind_account(pool: &PgPool, user_id: i64, aoe4_id: i64) -> R
     Ok(format!("綁定discord帳號 `{}` 與世紀帝國四帳號 `{}` ", user_id, aoe4_id))
 }
 
-pub(crate) async fn select_account(pool: &PgPool, user_id: i64) -> Option<Account> {
-    sqlx::query_as("select user_id, aoe4_id from accounts where user_id = $1")
+pub(crate) async fn select_account(pool: &SqlitePool, user_id: i64) -> Option<Account> {
+    sqlx::query_as("select user_id, aoe4_id from accounts where user_id = ?1")
         .bind(user_id)
         .fetch_optional(pool)
         .await
@@ -38,7 +38,7 @@ pub(crate) async fn select_account(pool: &PgPool, user_id: i64) -> Option<Accoun
         .unwrap()
 }
 
-pub(crate) async fn list_all(pool: &PgPool) -> Result<Vec<Account>, sqlx::Error> {
+pub(crate) async fn list_all(pool: &SqlitePool) -> Result<Vec<Account>, sqlx::Error> {
     let accounts: Vec<Account> = sqlx::query_as("select user_id, aoe4_id from accounts")
         .fetch_all(pool)
         .await
@@ -48,8 +48,8 @@ pub(crate) async fn list_all(pool: &PgPool) -> Result<Vec<Account>, sqlx::Error>
     Ok(accounts)
 }
 
-pub(crate) async fn add_reminder(pool: &PgPool, user_id: i64, days: i32) -> Result<String, sqlx::Error> {
-    sqlx::query("insert into reminders (user_id, days) values ($1, $2)")
+pub(crate) async fn add_reminder(pool: &SqlitePool, user_id: i64, days: i32) -> Result<String, sqlx::Error> {
+    sqlx::query("insert into reminders (user_id, days) values (?1, ?2)")
         .bind(user_id)
         .bind(days)
         .execute(pool)
@@ -64,8 +64,8 @@ pub(crate) async fn add_reminder(pool: &PgPool, user_id: i64, days: i32) -> Resu
     ))
 }
 
-pub(crate) async fn delete_reminder(pool: &PgPool, user_id: i64) -> Result<String, sqlx::Error> {
-    sqlx::query("delete from reminders where user_id = $1")
+pub(crate) async fn delete_reminder(pool: &SqlitePool, user_id: i64) -> Result<String, sqlx::Error> {
+    sqlx::query("delete from reminders where user_id = ?1")
         .bind(user_id)
         .execute(pool)
         .await
@@ -76,14 +76,14 @@ pub(crate) async fn delete_reminder(pool: &PgPool, user_id: i64) -> Result<Strin
     Ok("已解除天梯提醒".to_string())
 }
 
-pub(crate) async fn list_reminder_needed(pool: &PgPool) -> Vec<Reminder> {
+pub(crate) async fn list_reminder_needed(pool: &SqlitePool) -> Vec<Reminder> {
     sqlx::query_as(
         "select
                 user_id, last_played
             from reminders
             where
-                extract(day from now() - last_played) > days
-                and extract(day from now() - coalesce(last_reminded, now() - interval '6 days')) > 5",
+                unixepoch('now') - unixepoch(last_played) > days * 86400
+                and unixepoch('now') - unixepoch(coalesce(last_reminded, datetime(last_played, '-6 days'))) > 5 * 86400",
     )
     .fetch_all(pool)
     .await
@@ -93,8 +93,8 @@ pub(crate) async fn list_reminder_needed(pool: &PgPool) -> Vec<Reminder> {
     .unwrap_or_else(|_| Vec::new())
 }
 
-pub(crate) async fn reminder_update_last_played(pool: &PgPool, user_id: i64, last_played: DateTime<Utc>) {
-    let _ = sqlx::query("update reminders set last_played = greatest(last_played, $1) where user_id = $2")
+pub(crate) async fn reminder_update_last_played(pool: &SqlitePool, user_id: i64, last_played: DateTime<Utc>) {
+    let _ = sqlx::query("update reminders set last_played = max(last_played, ?1) where user_id = ?2")
         .bind(last_played)
         .bind(user_id)
         .execute(pool)
@@ -104,8 +104,8 @@ pub(crate) async fn reminder_update_last_played(pool: &PgPool, user_id: i64, las
         });
 }
 
-pub(crate) async fn reminder_update_last_reminded(pool: &PgPool, user_id: i64) {
-    let _ = sqlx::query("update reminders set last_reminded = now() where user_id = $1")
+pub(crate) async fn reminder_update_last_reminded(pool: &SqlitePool, user_id: i64) {
+    let _ = sqlx::query("update reminders set last_reminded = datetime('now') where user_id = ?1")
         .bind(user_id)
         .execute(pool)
         .await
