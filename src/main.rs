@@ -18,9 +18,10 @@ use serenity::async_trait;
 use serenity::json::json;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
 use std::collections::HashMap;
+use std::str::FromStr;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
 
@@ -450,12 +451,15 @@ async fn main() {
         .parse()
         .expect("GUILD_ID must be a valid integer");
 
-    let db_url = "sqlite:///data/bot_prod.db";
+    let conn_opts = SqliteConnectOptions::from_str("sqlite:///data/bot.db")
+        .expect("failed to parse database url")
+        .create_if_missing(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(20)
-        .connect(&db_url)
+        .connect_with(conn_opts)
         .await
-        .expect("failed to connect to DATABASE_URL");
+        .expect("failed to connect to database");
 
     // Run the schema migration
     pool.execute(include_str!("../schema.sql"))
@@ -550,7 +554,8 @@ mod tests {
 
     #[test]
     fn test_regex2() {
-        let regex = Regex::new(r"Bound discord user `(?<user_id>[0-9]+)` to aoe4 world profile `(?<aoe4_id>[0-9]+)`").unwrap();
+        let regex =
+            Regex::new(r"Bound discord user `(?<user_id>[0-9]+)` to aoe4 world profile `(?<aoe4_id>[0-9]+)`").unwrap();
         let hay = "Bound discord user `380688858729414658` to aoe4 world profile `3763401`";
         let result = regex.captures(hay);
         assert!(result.is_some());
