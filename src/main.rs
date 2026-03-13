@@ -1,7 +1,7 @@
 use crate::aoe4world::SearchResult;
 use crate::db::{
     add_reminder, bind_account, delete_reminder, list_all, list_reminder_needed, reminder_update_last_reminded,
-    select_account,
+    select_accounts,
 };
 use crate::ranked::{RankedPlayer, try_create_ranked_from_account, try_create_ranked_without_account};
 use chrono::Utc;
@@ -30,6 +30,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 
 mod aoe4world;
 mod db;
+mod integration_tests;
 mod ranked;
 
 static RANK_CHANNEL_ID: ChannelId = ChannelId::new(1263079883937153105);
@@ -187,12 +188,12 @@ pub async fn remind(ctx: Context<'_>, #[description = "警告天數"] days: i32)
         ctx.cache().current_user().name
     );
     let user_id = i64::try_from(u64::from(ctx.author().id)).unwrap();
-    match select_account(&ctx.data().database, user_id).await {
-        None => {
+    match select_accounts(&ctx.data().database, user_id).await {
+        accounts if accounts.is_empty() => {
             ctx.say("需要先綁定天梯榜才能夠使用提醒功能！").await?;
             Ok(())
         },
-        Some(_) => {
+        _ => {
             let message = if days > 0 {
                 add_reminder(&ctx.data().database, user_id, days)
                     .await

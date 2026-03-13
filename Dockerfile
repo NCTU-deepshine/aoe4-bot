@@ -16,7 +16,7 @@ RUN cargo build --release --bin aoe4-bot
 # We do not need the Rust toolchain to run the binary!
 FROM debian:trixie-slim AS runtime
 WORKDIR /app
-RUN apt-get update && apt-get install -y openssl ca-certificates libsqlite3-0 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y openssl ca-certificates libsqlite3-0 sqlite3 && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /data
 COPY --from=builder /app/target/release/aoe4-bot /usr/local/bin
 ENV DISCORD_TOKEN=$DISCORD_TOKEN
