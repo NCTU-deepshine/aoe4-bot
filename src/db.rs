@@ -15,7 +15,7 @@ pub(crate) struct Reminder {
 }
 
 pub(crate) async fn bind_account(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<String, sqlx::Error> {
-    sqlx::query("insert into accounts (user_id, aoe4_id) values (?1, ?2) on conflict (aoe4_id) do nothing")
+    sqlx::query("insert into accounts (user_id, aoe4_id) values (?1, ?2) on conflict (aoe4_id) do update set user_id = excluded.user_id")
         .bind(user_id)
         .bind(aoe4_id)
         .execute(pool)
@@ -27,15 +27,15 @@ pub(crate) async fn bind_account(pool: &SqlitePool, user_id: i64, aoe4_id: i64) 
     Ok(format!("綁定discord帳號 `{}` 與世紀帝國四帳號 `{}` ", user_id, aoe4_id))
 }
 
-pub(crate) async fn select_account(pool: &SqlitePool, user_id: i64) -> Option<Account> {
+pub(crate) async fn select_accounts(pool: &SqlitePool, user_id: i64) -> Vec<Account> {
     sqlx::query_as("select user_id, aoe4_id from accounts where user_id = ?1")
         .bind(user_id)
-        .fetch_optional(pool)
+        .fetch_all(pool)
         .await
         .inspect_err(|err| {
             error!("database operation failed with error {}", err.to_string());
         })
-        .unwrap()
+        .unwrap_or_default()
 }
 
 pub(crate) async fn list_all(pool: &SqlitePool) -> Result<Vec<Account>, sqlx::Error> {
@@ -113,3 +113,4 @@ pub(crate) async fn reminder_update_last_reminded(pool: &SqlitePool, user_id: i6
             error!("database operation failed with error {}", err.to_string());
         });
 }
+
