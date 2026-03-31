@@ -116,7 +116,7 @@ impl Display for RankedPlayer {
             alt_info.push_str("\n其他小號:");
         }
         for alt in &self.alts {
-            alt_info.push_str(format!("\n  {}: {}", alt.aoe4_name, alt.rating).as_str());
+            alt_info.push_str(format!("\n  {}: {}", escape(&alt.aoe4_name), alt.rating).as_str());
         }
 
         write!(
@@ -128,9 +128,9 @@ impl Display for RankedPlayer {
             愛用文明: {} ,出場率 {}%\n\
             排名積分: {}, 近期最高積分: {}, Elo: {}, 上次遊玩: {}\
             {}",
-            self.discord_display,
+            escape(&self.discord_display),
             escape(&self.discord_username),
-            self.aoe4_name,
+            escape(&self.aoe4_name),
             self.aoe4_id,
             self.rank_level(),
             self.global_rank,
@@ -148,7 +148,16 @@ impl Display for RankedPlayer {
 }
 
 fn escape(input: &str) -> String {
-    str::replace(input, "_", "\\_")
+    input
+        .replace('\\', "\\\\")
+        .replace('*', "\\*")
+        .replace('_', "\\_")
+        .replace('~', "\\~")
+        .replace('|', "\\|")
+        .replace('`', "\\`")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('>', "\\>")
 }
 
 pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, account: Account) -> Option<RankedPlayer> {
