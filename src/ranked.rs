@@ -132,11 +132,11 @@ impl Display for RankedPlayer {
             escape(&self.discord_username),
             escape(&self.aoe4_name),
             self.aoe4_id,
-            self.rank_level(),
+            escape(&self.rank_level()),
             self.global_rank,
             self.games_played,
             self.win_rate.round(),
-            self.favorite_civ.civilization(),
+            escape(&self.favorite_civ.civilization()),
             self.favorite_civ.pick_rate.round(),
             self.rating,
             self.recent_max_rating,
@@ -157,7 +157,14 @@ fn escape(input: &str) -> String {
         .replace('`', "\\`")
         .replace('[', "\\[")
         .replace(']', "\\]")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
         .replace('>', "\\>")
+        .replace('#', "\\#")
+        .replace('+', "\\+")
+        .replace('-', "\\-")
+        .replace('.', "\\.")
+        .replace('!', "\\!")
 }
 
 pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, account: Account) -> Option<RankedPlayer> {
