@@ -157,14 +157,6 @@ fn escape(input: &str) -> String {
         .replace('`', "\\`")
         .replace('[', "\\[")
         .replace(']', "\\]")
-        .replace('(', "\\(")
-        .replace(')', "\\)")
-        .replace('>', "\\>")
-        .replace('#', "\\#")
-        .replace('+', "\\+")
-        .replace('-', "\\-")
-        .replace('.', "\\.")
-        .replace('!', "\\!")
 }
 
 pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, account: Account) -> Option<RankedPlayer> {
