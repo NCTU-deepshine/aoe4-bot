@@ -70,7 +70,8 @@ pub async fn rebuild(ctx: Context<'_>) -> Result<(), Error> {
     let channel = ctx.guild_channel().await.unwrap();
 
     let regex1 = Regex::new(r"綁定discord帳號 `(?<user_id>[0-9]+)` 與世紀帝國四帳號 `(?<aoe4_id>[0-9]+)`").unwrap();
-    let regex2 = Regex::new(r"Bound discord user `(?<user_id>[0-9]+)` to aoe4 world profile `(?<aoe4_id>[0-9]+)`").unwrap();
+    let regex2 =
+        Regex::new(r"Bound discord user `(?<user_id>[0-9]+)` to aoe4 world profile `(?<aoe4_id>[0-9]+)`").unwrap();
 
     let mut latest_message = channel.last_message_id.unwrap();
     let limit = 50;
@@ -338,6 +339,7 @@ impl Emperor {
 impl EventHandler for Emperor {
     async fn message(&self, ctx: poise::serenity_prelude::Context, new_message: Message) {
         let emperor = UserId::new(453010726311821322);
+        let emperor2 = UserId::new(1511740443132428328);
         let knockgod = UserId::new(364796522396647424);
         let baltune = UserId::new(202510973519527937);
         let racoon = UserId::new(302663000463114242);

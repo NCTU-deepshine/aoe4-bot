@@ -57,6 +57,7 @@ impl CivData {
             "golden_horde" => "欽察汗國(Алтан Орд)".to_string(),
             "tughlaq_dynasty" => "圖格魯克王朝(تغلق شاهیان)".to_string(),
             "sengoku_daimyo" => "戦国大名".to_string(),
+            "jin_dynasty" => "金朝".to_string(),
             _ => self.civilization.replace("_", " "),
         }
     }

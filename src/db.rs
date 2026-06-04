@@ -113,4 +113,3 @@ pub(crate) async fn reminder_update_last_reminded(pool: &SqlitePool, user_id: i6
             error!("database operation failed with error {}", err.to_string());
         });
 }
-
