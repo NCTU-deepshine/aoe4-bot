@@ -351,6 +351,7 @@ impl EventHandler for Emperor {
             || content.contains("天子")
             || content.contains("唱歌")
             || new_message.mentions_user_id(emperor)
+            || new_message.mentions_user_id(emperor2)
         {
             blocked = Self::detect_blocked(new_message.react(&ctx.http, Emperor::select_emoji()).await);
         }
