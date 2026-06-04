@@ -347,6 +347,7 @@ impl EventHandler for Emperor {
         let content = &new_message.content;
         let mut blocked = false;
         if author == emperor
+            || author == emperor2
             || content.contains("天子")
             || content.contains("唱歌")
             || new_message.mentions_user_id(emperor)
