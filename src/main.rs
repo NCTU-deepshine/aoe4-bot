@@ -1,4 +1,4 @@
-use crate::aoe4world::SearchResult;
+use crate::aoe4world::search_players;
 use crate::db::{
     add_reminder, bind_account, delete_reminder, list_all, list_reminder_needed, reminder_update_last_reminded,
     select_accounts,
@@ -9,7 +9,6 @@ use poise::futures_util::StreamExt;
 use poise::futures_util::stream;
 use rand::Rng;
 use regex::Regex;
-use reqwest::Url;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CreateMessage, EmojiId, GetMessages, Http, Message, Reaction, ReactionType, Ready,
     UserId,
@@ -110,7 +109,7 @@ pub async fn rebuild(ctx: Context<'_>) -> Result<(), Error> {
 
 async fn auto_complete_id(_ctx: Context<'_>, username: &str) -> impl Iterator<Item = AutocompleteChoice> {
     info!("search aoe4 world profiles with username {}", username);
-    let mut players = match get_profiles(username).await {
+    let mut players = match search_players(username).await {
         None => vec![],
         Some(profiles) => profiles.players,
     };
@@ -125,13 +124,6 @@ async fn auto_complete_id(_ctx: Context<'_>, username: &str) -> impl Iterator<It
             ))
         })
         .take(10)
-}
-
-async fn get_profiles(username: &str) -> Option<SearchResult> {
-    let mut url = Url::parse("https://aoe4world.com/api/v0/players/search").unwrap();
-    url.query_pairs_mut().append_pair("query", username);
-    let profiles = reqwest::get(url).await.ok()?.json::<SearchResult>().await.ok()?;
-    Some(profiles)
 }
 
 #[poise::command(slash_command)]
@@ -166,9 +158,11 @@ pub async fn check(
 ) -> Result<(), Error> {
     info!("attempting to check id {}", aoe4_id);
     ctx.defer().await?;
-    let player = try_create_ranked_without_account(aoe4_id)
-        .await
-        .expect("unexpected missing ranked player");
+    let Some(player) = try_create_ranked_without_account(aoe4_id).await else {
+        info!("no ranked data for aoe4 id {}", aoe4_id);
+        ctx.say("查不到這位玩家的單挑積分資料").await?;
+        return Ok(());
+    };
     let info = player.info();
     ctx.http()
         .get_channel(INTERACTION_CHANNEL_ID)

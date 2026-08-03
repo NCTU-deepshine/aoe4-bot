@@ -1,8 +1,7 @@
 use crate::Data;
-use crate::aoe4world::{CivData, Profile};
+use crate::aoe4world::{CivData, fetch_profile};
 use crate::db::{Account, reminder_update_last_played};
 use chrono::{DateTime, Utc};
-use reqwest::Url;
 use serenity::all::{Http, UserId};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
@@ -178,17 +177,16 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
     let discord_display = discord_nickname.unwrap_or(discord_global_name.unwrap_or(discord_username.clone()));
     info!("got discord profile for {}", discord_display);
 
-    let url = Url::parse("https://aoe4world.com/api/v0/players/")
-        .unwrap()
-        .join(&account.aoe4_id.to_string())
-        .unwrap();
-    let profile = reqwest::get(url).await.ok()?.json::<Profile>().await.ok()?;
+    let profile = fetch_profile(account.aoe4_id).await?;
     info!("got aoe4 world profile for {}", profile.name);
 
     let rm_solo = profile.modes.rm_solo?;
     let rm_1v1_elo = profile.modes.rm_1v1_elo?;
 
-    let _ = reminder_update_last_played(&data.database, account.user_id, rm_solo.last_game_at).await;
+    // unranked or never played: nothing to rank them by
+    let last_played = rm_solo.last_game_at?;
+
+    let _ = reminder_update_last_played(&data.database, account.user_id, last_played).await;
 
     Some(RankedPlayer {
         aoe4_name: profile.name.clone(),
@@ -196,9 +194,9 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
         discord_display,
         discord_username,
         rank_level: rm_solo.rank_level,
-        global_rank: rm_solo.rank,
-        rating: rm_solo.rating,
-        recent_max_rating: rm_solo.max_rating_1m,
+        global_rank: rm_solo.rank?,
+        rating: rm_solo.rating?,
+        recent_max_rating: rm_solo.max_rating_1m?,
         elo: rm_1v1_elo.rating,
         favorite_civ: rm_solo
             .civilizations
@@ -209,8 +207,8 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
             })
             .clone(),
         games_played: rm_solo.games_count,
-        win_rate: rm_solo.win_rate,
-        last_played: rm_solo.last_game_at,
+        win_rate: rm_solo.win_rate.unwrap_or(0.0),
+        last_played,
         alts: Vec::new(),
     })
 }
@@ -218,11 +216,7 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
 pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<RankedPlayer> {
     info!("try create ranked without account");
 
-    let url = Url::parse("https://aoe4world.com/api/v0/players/")
-        .unwrap()
-        .join(&aoe4_id.to_string())
-        .unwrap();
-    let profile = reqwest::get(url).await.ok()?.json::<Profile>().await.ok()?;
+    let profile = fetch_profile(aoe4_id.into()).await?;
     info!("got aoe4 world profile for {}", profile.name);
 
     let rm_solo = profile.modes.rm_solo?;
@@ -234,9 +228,9 @@ pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<Ra
         discord_display: "".to_string(),
         discord_username: "".to_string(),
         rank_level: rm_solo.rank_level,
-        global_rank: rm_solo.rank,
-        rating: rm_solo.rating,
-        recent_max_rating: rm_solo.max_rating_1m,
+        global_rank: rm_solo.rank?,
+        rating: rm_solo.rating?,
+        recent_max_rating: rm_solo.max_rating_1m?,
         elo: rm_1v1_elo.rating,
         favorite_civ: rm_solo
             .civilizations
@@ -247,38 +241,36 @@ pub(crate) async fn try_create_ranked_without_account(aoe4_id: i32) -> Option<Ra
             })
             .clone(),
         games_played: rm_solo.games_count,
-        win_rate: rm_solo.win_rate,
-        last_played: rm_solo.last_game_at,
+        win_rate: rm_solo.win_rate.unwrap_or(0.0),
+        last_played: rm_solo.last_game_at?,
         alts: Vec::new(),
     })
 }
 
+// Live-API tests, ignored by default because they need network and third-party
+// data that shifts. Run with `cargo test -- --ignored`.
 #[cfg(test)]
 mod tests {
-    use crate::aoe4world::{Profile, SearchResult};
+    use crate::aoe4world::{fetch_profile, search_players};
     use crate::db::Account;
     use crate::ranked::try_create_ranked_without_account;
-    use reqwest::Url;
     use tracing::info;
 
     #[tokio::test]
+    #[ignore = "hits the live aoe4world API"]
     async fn profile_test() {
         let account = Account {
             user_id: 720955323183267840,
             aoe4_id: 13753974,
         };
-        let url = Url::parse("https://aoe4world.com/api/v0/players/")
-            .unwrap()
-            .join(&account.aoe4_id.to_string())
-            .unwrap();
-        let profile = reqwest::get(url).await.unwrap().json::<Profile>().await.unwrap();
+        let profile = fetch_profile(account.aoe4_id).await.unwrap();
         info!("got aoe4 world profile for {}", profile.name);
     }
+
     #[tokio::test]
+    #[ignore = "hits the live aoe4world API"]
     async fn search_test() {
-        let mut url = Url::parse("https://aoe4world.com/api/v0/players/search").unwrap();
-        url.query_pairs_mut().append_pair("query", "Jump__");
-        let profiles = reqwest::get(url).await.unwrap().json::<SearchResult>().await.unwrap();
+        let profiles = search_players("Jump__").await.unwrap();
         profiles
             .players
             .into_iter()
@@ -295,6 +287,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "hits the live aoe4world API"]
     async fn search_profile_test() {
         let aoe4_id = 7008236;
         let player = try_create_ranked_without_account(aoe4_id).await.unwrap();

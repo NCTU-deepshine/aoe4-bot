@@ -1,6 +1,59 @@
 use chrono::{DateTime, Utc};
+use reqwest::{Client, Url};
 use serde::Deserialize;
 use std::cmp::Ordering;
+use std::sync::OnceLock;
+use tracing::error;
+
+// aoe4world requires a UA identifying the app with contact info: https://aoe4world.com/api
+const USER_AGENT: &str = concat!(
+    "aoe4-bot/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/NCTU-deepshine/aoe4-bot; discord: deepshine)"
+);
+
+const API_BASE: &str = "https://aoe4world.com/api/v0/";
+
+fn client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .expect("failed to build aoe4world http client")
+    })
+}
+
+fn api_url(path: &str) -> Url {
+    Url::parse(API_BASE)
+        .expect("API_BASE is a valid url")
+        .join(path)
+        .expect("path joins onto API_BASE")
+}
+
+pub(crate) async fn fetch_profile(aoe4_id: i64) -> Option<Profile> {
+    let url = api_url(&format!("players/{}", aoe4_id));
+    fetch_json(url, "profile").await
+}
+
+pub(crate) async fn search_players(username: &str) -> Option<SearchResult> {
+    let mut url = api_url("players/search");
+    url.query_pairs_mut().append_pair("query", username);
+    fetch_json(url, "player search").await
+}
+
+async fn fetch_json<T: serde::de::DeserializeOwned>(url: Url, what: &str) -> Option<T> {
+    client()
+        .get(url)
+        .send()
+        .await
+        .inspect_err(|err| error!("aoe4world {} request failed: {}", what, err))
+        .ok()?
+        .json::<T>()
+        .await
+        .inspect_err(|err| error!("aoe4world {} decode failed: {}", what, err))
+        .ok()
+}
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct Profile {
@@ -14,16 +67,24 @@ pub(crate) struct Modes {
     pub rm_1v1_elo: Option<RankedEloData>,
 }
 
+// aoe4world omits the play-derived fields entirely for an unranked or zero-game player.
 #[derive(Deserialize, Debug)]
 pub(crate) struct RankedData {
-    pub rank: i32,
+    pub rank: Option<i32>,
+    #[serde(default = "unranked")]
     pub rank_level: String,
-    pub rating: i32,
-    pub max_rating_1m: i32,
+    pub rating: Option<i32>,
+    pub max_rating_1m: Option<i32>,
+    #[serde(default)]
     pub games_count: i32,
-    pub win_rate: f64,
+    pub win_rate: Option<f64>,
+    #[serde(default)]
     pub civilizations: Vec<CivData>,
-    pub last_game_at: DateTime<Utc>,
+    pub last_game_at: Option<DateTime<Utc>>,
+}
+
+fn unranked() -> String {
+    "unranked".to_string()
 }
 
 #[derive(Deserialize, Clone, Debug)]
