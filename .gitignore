@@ -11,5 +11,7 @@ target/
 Secrets.toml/target
 Secrets*.toml
 
-*.sql
+# Narrow on purpose: a bare *.sql also swallows schema.sql and migrations/.
+/backup.sql
+/dump.sql
 *.db

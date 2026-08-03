@@ -9,4 +9,4 @@ create table if not exists reminders (
     days integer not null,
     last_played timestamp,
     last_reminded timestamp
-)
+);
