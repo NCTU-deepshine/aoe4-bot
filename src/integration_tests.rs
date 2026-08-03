@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::db::{bind_account, list_all, select_accounts};
+    use crate::db::{bind_account, list_all};
     use sqlx::{Executor, SqlitePool};
 
     #[tokio::test]
@@ -63,16 +63,13 @@ mod tests {
         // Bind second account to SAME user
         let _ = bind_account(&pool, user_id, aoe4_id2).await.unwrap();
 
-        let accounts = select_accounts(&pool, user_id).await;
-        assert_eq!(accounts.len(), 2);
-
-        let ids: Vec<i64> = accounts.iter().map(|a| a.aoe4_id).collect::<Vec<_>>();
-        assert!(ids.contains(&aoe4_id1));
-        assert!(ids.contains(&aoe4_id2));
-
-        // Verify list_all
         let all = list_all(&pool).await.unwrap();
         assert_eq!(all.len(), 2);
+
+        let owned: Vec<i64> = all.iter().filter(|a| a.user_id == user_id).map(|a| a.aoe4_id).collect();
+        assert_eq!(owned.len(), 2);
+        assert!(owned.contains(&aoe4_id1));
+        assert!(owned.contains(&aoe4_id2));
     }
 
     #[tokio::test]
@@ -92,11 +89,11 @@ mod tests {
         // This should UPDATE the owner to user2 because of ON CONFLICT (aoe4_id) DO UPDATE SET user_id = excluded.user_id
         let _ = bind_account(&pool, user2, aoe4_id).await.unwrap();
 
-        let accounts1 = select_accounts(&pool, user1).await;
-        assert_eq!(accounts1.len(), 0);
+        let all = list_all(&pool).await.unwrap();
+        assert_eq!(all.iter().filter(|a| a.user_id == user1).count(), 0);
 
-        let accounts2 = select_accounts(&pool, user2).await;
-        assert_eq!(accounts2.len(), 1);
-        assert_eq!(accounts2[0].aoe4_id, aoe4_id);
+        let owned: Vec<&crate::db::Account> = all.iter().filter(|a| a.user_id == user2).collect();
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].aoe4_id, aoe4_id);
     }
 }

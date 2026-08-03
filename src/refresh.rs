@@ -1,10 +1,9 @@
-use crate::db::{list_all, list_reminder_needed, reminder_update_last_reminded, to_user_id};
+use crate::db::list_all;
 use crate::ranked::{RankedPlayer, try_create_ranked_from_account};
 use crate::{Data, Error};
-use chrono::Utc;
 use poise::futures_util::StreamExt;
 use poise::futures_util::stream;
-use serenity::all::{ChannelId, CreateMessage, Http};
+use serenity::all::{ChannelId, Http};
 use std::collections::HashMap;
 use tracing::{error, info};
 
@@ -84,26 +83,5 @@ async fn send_rankings(http: &Http, content: &String) -> Result<(), Error> {
         .unwrap()
         .say(http, content)
         .await?;
-    Ok(())
-}
-
-pub(crate) async fn send_reminders(http: &Http, data: &Data) -> Result<(), Error> {
-    info!("starting to send reminders");
-    let reminders = list_reminder_needed(&data.database).await;
-    for reminder in reminders.iter() {
-        let user = http.get_user(to_user_id(reminder.user_id)).await?;
-        let days = Utc::now().signed_duration_since(reminder.last_played).num_days();
-        if user
-            .direct_message(
-                &http,
-                CreateMessage::new().content(format!("溫馨提醒：已經耍廢{}天囉 該爬天梯了！", days)),
-            )
-            .await
-            .is_ok()
-        {
-            reminder_update_last_reminded(&data.database, reminder.user_id).await
-        }
-    }
-
     Ok(())
 }

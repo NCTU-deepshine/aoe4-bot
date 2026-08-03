@@ -1,6 +1,6 @@
 use crate::Data;
 use crate::aoe4world::{CivData, fetch_profile, rank_level_zh};
-use crate::db::{Account, reminder_update_last_played, to_user_id};
+use crate::db::{Account, to_user_id};
 use chrono::{DateTime, Utc};
 use serenity::all::Http;
 use std::cmp::Ordering;
@@ -165,8 +165,6 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
 
     // unranked or never played: nothing to rank them by
     let last_played = rm_solo.last_game_at?;
-
-    let _ = reminder_update_last_played(&data.database, account.user_id, last_played).await;
 
     Some(RankedPlayer {
         aoe4_name: profile.name.clone(),

@@ -14,7 +14,6 @@ Built with [poise](https://github.com/serenity-rs/poise) on
 | `/bind id <aoe4_id>` | Bind your Discord account to an aoe4world profile id |
 | `/bind name <name>` | Same, but search by in-game name |
 | `/查分 <aoe4_id>` | Look up a player's ranked stats |
-| `/提醒 <days>` | Get a DM if you have not laddered for that many days (`0` to cancel) |
 | `/refresh` | Rebuild the ranking channel |
 | `/rebuild` | Re-import bindings by scanning channel history |
 

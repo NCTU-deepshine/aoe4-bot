@@ -1,5 +1,5 @@
 use crate::emperor::Emperor;
-use crate::refresh::{do_refresh, send_reminders};
+use crate::refresh::do_refresh;
 use serenity::all::Http;
 use serenity::model::id::GuildId;
 use serenity::prelude::*;
@@ -64,7 +64,6 @@ async fn main() {
                 commands::name(),
                 commands::refresh(),
                 commands::check(),
-                commands::remind(),
             ],
             ..Default::default()
         })
@@ -106,7 +105,6 @@ async fn main() {
                         };
                         info!("refresh triggered by cron");
                         do_refresh(&http, &data).await.unwrap();
-                        send_reminders(&http, &data).await.unwrap();
                     }
                 })
             })

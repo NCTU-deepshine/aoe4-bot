@@ -1,5 +1,5 @@
 use crate::aoe4world::search_players;
-use crate::db::{add_reminder, bind_account, delete_reminder, select_accounts, to_db_id};
+use crate::db::{bind_account, to_db_id};
 use crate::ranked::try_create_ranked_without_account;
 use crate::refresh::do_refresh;
 use crate::{Context, Error};
@@ -135,39 +135,6 @@ pub async fn check(
         .await?;
     ctx.say("查分成功").await?;
     Ok(())
-}
-
-#[poise::command(slash_command, rename = "提醒")]
-pub async fn remind(ctx: Context<'_>, #[description = "警告天數"] days: i32) -> Result<(), Error> {
-    info!(
-        "attempting to set {} days reminder for {}",
-        days,
-        ctx.cache().current_user().name
-    );
-    let user_id = to_db_id(ctx.author().id);
-    match select_accounts(&ctx.data().database, user_id).await {
-        accounts if accounts.is_empty() => {
-            ctx.say("需要先綁定天梯榜才能夠使用提醒功能！").await?;
-            Ok(())
-        },
-        _ => {
-            let message = if days > 0 {
-                add_reminder(&ctx.data().database, user_id, days)
-                    .await
-                    .inspect_err(|_error| {
-                        error!("setting reminder failed");
-                    })?
-            } else {
-                delete_reminder(&ctx.data().database, user_id)
-                    .await
-                    .inspect_err(|_error| {
-                        error!("deleting reminder failed");
-                    })?
-            };
-            ctx.say(message).await?;
-            Ok(())
-        },
-    }
 }
 
 #[poise::command(slash_command)]
