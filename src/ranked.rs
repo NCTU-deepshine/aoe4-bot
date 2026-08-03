@@ -1,8 +1,8 @@
 use crate::Data;
-use crate::aoe4world::{CivData, fetch_profile};
-use crate::db::{Account, reminder_update_last_played};
+use crate::aoe4world::{CivData, fetch_profile, rank_level_zh};
+use crate::db::{Account, reminder_update_last_played, to_user_id};
 use chrono::{DateTime, Utc};
-use serenity::all::{Http, UserId};
+use serenity::all::Http;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use tracing::info;
@@ -60,27 +60,7 @@ impl RankedPlayer {
     }
 
     pub(crate) fn rank_level(&self) -> String {
-        match self.rank_level.as_str() {
-            "conqueror_3" => "征服者3".to_string(),
-            "conqueror_2" => "征服者2".to_string(),
-            "conqueror_1" => "征服者1".to_string(),
-            "diamond_3" => "鑽石3".to_string(),
-            "diamond_2" => "鑽石2".to_string(),
-            "diamond_1" => "鑽石1".to_string(),
-            "platinum_3" => "白金3".to_string(),
-            "platinum_2" => "白金2".to_string(),
-            "platinum_1" => "白金1".to_string(),
-            "gold_3" => "黃金3".to_string(),
-            "gold_2" => "黃金2".to_string(),
-            "gold_1" => "黃金1".to_string(),
-            "silver_3" => "白銀3".to_string(),
-            "silver_2" => "白銀2".to_string(),
-            "silver_1" => "白銀1".to_string(),
-            "bronze_3" => "青銅3".to_string(),
-            "bronze_2" => "青銅2".to_string(),
-            "bronze_1" => "青銅1".to_string(),
-            _ => self.rank_level.clone(),
-        }
+        rank_level_zh(&self.rank_level)
     }
 
     pub fn discord_username(&self) -> &str {
@@ -163,14 +143,14 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
         "try create ranked from account, discord {}, aoe4 {}",
         account.user_id, account.aoe4_id
     );
-    let user = http.get_user(UserId::new(account.user_id as u64)).await.ok()?;
+    let user = http.get_user(to_user_id(account.user_id)).await.ok()?;
     let discord_username = user.name.clone();
     let discord_global_name = user.global_name.clone();
     let discord_nickname = http
         .get_guild(data.guild_id)
         .await
         .ok()?
-        .member(http, UserId::new(account.user_id as u64))
+        .member(http, to_user_id(account.user_id))
         .await
         .ok()
         .and_then(|member| member.nick.clone());

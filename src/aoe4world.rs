@@ -164,28 +164,26 @@ impl SearchedRankedData {
     }
 
     pub(crate) fn rank_level(&self) -> String {
-        match self.rank_level.as_str() {
-            "conqueror_3" => "征服者3".to_string(),
-            "conqueror_2" => "征服者2".to_string(),
-            "conqueror_1" => "征服者1".to_string(),
-            "diamond_3" => "鑽石3".to_string(),
-            "diamond_2" => "鑽石2".to_string(),
-            "diamond_1" => "鑽石1".to_string(),
-            "platinum_3" => "白金3".to_string(),
-            "platinum_2" => "白金2".to_string(),
-            "platinum_1" => "白金1".to_string(),
-            "gold_3" => "黃金3".to_string(),
-            "gold_2" => "黃金2".to_string(),
-            "gold_1" => "黃金1".to_string(),
-            "silver_3" => "白銀3".to_string(),
-            "silver_2" => "白銀2".to_string(),
-            "silver_1" => "白銀1".to_string(),
-            "bronze_3" => "青銅3".to_string(),
-            "bronze_2" => "青銅2".to_string(),
-            "bronze_1" => "青銅1".to_string(),
-            _ => self.rank_level.clone(),
-        }
+        rank_level_zh(&self.rank_level)
     }
+}
+
+/// Renders an aoe4world rank level such as `diamond_2` as `鑽石2`. Anything that is not a
+/// known `<tier>_<division>` pair (`unranked`, or a tier added later) is passed through.
+pub(crate) fn rank_level_zh(level: &str) -> String {
+    let Some((tier, division)) = level.rsplit_once('_') else {
+        return level.to_string();
+    };
+    let tier = match tier {
+        "conqueror" => "征服者",
+        "diamond" => "鑽石",
+        "platinum" => "白金",
+        "gold" => "黃金",
+        "silver" => "白銀",
+        "bronze" => "青銅",
+        _ => return level.to_string(),
+    };
+    format!("{}{}", tier, division)
 }
 
 impl Eq for SearchedPlayer {}
@@ -205,5 +203,27 @@ impl PartialOrd<Self> for SearchedPlayer {
 impl Ord for SearchedPlayer {
     fn cmp(&self, other: &Self) -> Ordering {
         other.rating().cmp(&self.rating())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rank_level_zh;
+
+    #[test]
+    fn renders_every_tier() {
+        assert_eq!(rank_level_zh("conqueror_3"), "征服者3");
+        assert_eq!(rank_level_zh("diamond_2"), "鑽石2");
+        assert_eq!(rank_level_zh("platinum_1"), "白金1");
+        assert_eq!(rank_level_zh("gold_3"), "黃金3");
+        assert_eq!(rank_level_zh("silver_2"), "白銀2");
+        assert_eq!(rank_level_zh("bronze_1"), "青銅1");
+    }
+
+    #[test]
+    fn passes_through_anything_unrecognised() {
+        assert_eq!(rank_level_zh("unranked"), "unranked");
+        assert_eq!(rank_level_zh("mythic_1"), "mythic_1");
+        assert_eq!(rank_level_zh(""), "");
     }
 }

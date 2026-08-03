@@ -1,6 +1,17 @@
 use chrono::{DateTime, Utc};
+use serenity::all::UserId;
 use sqlx::{FromRow, SqlitePool};
 use tracing::error;
+
+// Discord snowflakes are u64 but SQLite integers are signed, so they are stored as the same 64
+// bits reinterpreted. `as` round-trips every value exactly; `i64::try_from` would panic instead.
+pub(crate) fn to_db_id(id: UserId) -> i64 {
+    u64::from(id) as i64
+}
+
+pub(crate) fn to_user_id(id: i64) -> UserId {
+    UserId::new(id as u64)
+}
 
 #[derive(FromRow)]
 pub(crate) struct Account {
