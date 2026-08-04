@@ -34,22 +34,24 @@ ratings, generate a bracket, link each match to a draft on the external ban/pick
 
 ### Decisions
 
+Positions we took, each of which could have gone the other way.
+
+What the draft tool imposes is **not** listed here, because it was never ours to decide: the offer-and-snipe
+mechanic, how a civ ban is scoped, the civ and map vocabularies, that a seat cannot be reserved in advance, and
+that every entrant needs an account on the tool. Those are in §3, where they are described as constraints to work
+within. Mixing them into this table invites someone to revisit a position nobody ever held.
+
 | Topic | Decision |
 |---|---|
 | Bracket | Single elimination, fully pre-generated with advancement links |
 | Round rules | Per-round, not per-tournament |
 | Draft tool | External; the bot stores a pointer and queries draft content on the fly |
 | Planning assumption | **The read API in §3.2 item 1 will exist by ship time — it is small enough to write ourselves** |
-| Draft creation | The bot creates each draft from its own account on the tool, and is its host (§3.3) |
-| Seats | Claimed first-come by the players; the bot instructs, it cannot assign. Higher seed takes Player 1 (§8.7) |
+| Draft creation | The bot creates each draft itself, from an account of its own (§3.3) |
+| Seats | Higher seed takes Player 1, by instruction — seats cannot be reserved, so compliance is assumed (§8.7) |
 | Redraft | `/set redraft` in the set thread, either player or an admin — the remedy for a mis-seated draft |
-| Player accounts | Every entrant needs their own account on the draft tool (§3.4) |
 | Draft channel | A public channel carrying the spectator link once both seats are claimed (§8.1) |
-| Snipe | Removes civs from the opponent's hidden per-game offer; each side plays the survivor of its own offer |
-| Bans | Per-player, and scoped: a `pool` ban removes a civ for both, an `opponent` ban blocks only the banner's opponent |
-| Map order | Per-preset: game 1 is drawn at random from leftover maps, later games are picked by the loser from their own pool |
-| Civ list | Whatever the round's preset holds — the tool's default is the 12 base civs, not all 23 |
-| Map list | Whatever the round's preset holds — the tool's default is 30 maps |
+| Map order | The loser of game N picks from **the whole pool** — a requirement on the round's preset, not something we enforce (§3.3) |
 | Ratings | ATR (external tournament Elo) and ELO (`rm_1v1_elo`) |
 | Seeding | Bot suggests; organizer finalizes and may override any seed |
 | Player identity | The tournament side keeps its own player list — one main aoe4 profile per Discord user, bound at sign-up (§4) |
@@ -83,10 +85,21 @@ Consequences, each of which removes a table or column someone would otherwise re
 - No event-level map pool — the draft preset defines the pool per draft.
 - No `map_bans_per_player`, no `allow_civ_repeat` — preset settings.
 - No draft-action table — steps are fetched on demand, never mirrored.
-- No map-order validation — `MAP_SELECT` is the tool's business.
+- No map-order validation — `MAP_SELECT` is the tool's business. The one thing we check is the *preset*, once,
+  when a round is configured (§3.3): no `MAP_PICK` steps, so the loser picks from the whole pool.
 - No attempt to derive who is in which seat. The tool knows only its own user ids, and exposes only *whether*
   both seats are filled — so the bot instructs players where to sit (§8.7) instead of reconciling afterwards,
   and a mistake is fixed by redrafting rather than by a mapping table.
+
+**Rules versus ruleset.** That table divides *state and enforcement*, not decisions. Every rule inside a draft is
+the tool's to run and the only thing that enforces it: map order, civ ban scope, whether a civ may be replayed,
+when a set is decided. What the bot owns is **which ruleset a round uses** — one preset id on the round (§4) and
+the checks in §3.3. So "the loser picks from the whole pool" is our rule and the tool's mechanism: asserted once
+by refusing a preset that cannot express it, and never again per pick.
+
+Worth naming because an earlier draft of this document called that rule "enforced by the tool", which is the
+category error to avoid. The tool enforces whatever the preset says; the preset is ours to choose. The same holds
+for `resultMode: "vote"` and for match length, which is why both are preset checks rather than columns.
 
 `tournament_games` is the one place the bot keeps a copy of the tool's output. It is a **projection**, not a
 second source of truth: populated by import, refreshable, and used so standings and civ/map statistics are
@@ -119,8 +132,8 @@ no `completed` or `abandoned`.
 
 > **Nothing ever writes `finished`.** `deriveState()` computes it per request, but the only values ever written
 > to the stored `status` are `running` and `paused` (`lib/socket/matchHandlers.ts`). A decided series reads
-> `running` in the database forever. **Completion must be derived from `score` against
-> `target = floor(bestOf / 2) + 1`** (`lib/draft/engine.ts`), never from a status field.
+> `running` in the database forever. **Completion must be derived from the score, never from a status field.** The
+> tool works the threshold out itself (`lib/draft/engine.ts`); item 1 reports the answer as `finished`.
 
 `GAME_RESULT` and `MAP_SELECT` being step types is the important detail: **the tool drives the whole set**, not
 just a pre-match draft. Per-game results and the loser's next-map pick happen inside it.
@@ -136,10 +149,19 @@ Two rules the earlier draft got wrong:
 - **Snipe.** `CIV_SNIPE_OPPONENT` removes civs from the opponent's *hidden offer for that one game*; the civ each
   player fields is what survives their own offer (`lib/draft/engine.ts`). It does not remove a civ the opponent
   previously picked.
-- **Map order.** "Loser picks the next map" is a preset choice (`actor: "LOSER"`), not a tool-wide rule. In the
-  default preset game 1 is drawn at random by the server from the leftover *neutral* maps, and later games are
-  picked by the loser from their own picked pool — `mapScope` switches that to the shared pool
-  (`lib/draft/engine.ts`).
+- **Map order.** "Loser picks the next map" is a preset choice (`actor: "LOSER"`), not a tool-wide rule, and
+  *what* they may pick from has three cases (`lib/draft/engine.ts`):
+  - `mapScope: "own"`, the default — only maps **that player** picked, filtered on `by`. Not the opponent's.
+  - `mapScope: "shared"` — every map in state `picked`, with no `by` filter, so the *union* of both players'
+    picks. The schema comment calls this "the maps BOTH players picked", which reads like an intersection; the
+    code is a union, and the loser may take a map the opponent picked.
+  - **no `MAP_PICK` steps at all** — nothing is ever `picked`, so `mapsByP1.length ? mapsByP1 : neutralMaps`
+    falls through to every un-banned map. This is the case we want (§3.3).
+
+  Already-played maps are then filtered out, but not unconditionally: `notPlayedMaps.length > 0 ? notPlayedMaps :
+  mapSelectBase` permits a repeat rather than deadlocking on an exhausted pool. Unreachable with a 30-map pool;
+  quite reachable in `own` mode, where a player might hold three maps in a Bo5. Game 1 is a separate step, drawn
+  at random by the server when its actor is `HOST_DRAW`.
 
 **Civ bans are scoped.** `banScope: "pool" | "opponent"` — a pool ban removes the civ globally, while an
 opponent ban blocks only the banner's opponent and leaves the civ's global state untouched
@@ -317,6 +339,19 @@ presets: the cap constrains organizers — a Bo3 bracket with a Bo5 final needs 
 (`lib/draft/validate.ts`) is a hard block at creation and returns `400` with an `issues` list. Discovering that a
 preset cannot produce a Bo5 at the moment two players are waiting is the wrong time.
 
+Two of our own rules are properties of the preset rather than of the bot, and both are checkable from the preset's
+config, which is readable unauthenticated (§3.1):
+
+- **`resultMode` must be `"vote"`**, or every game waits on the bot to call it.
+- **`options.bestOf` must be odd, and must match the round's `best_of`.** Odd keeps "more than half" unambiguous
+  (§7); matching keeps the tool and the bracket from disagreeing about how long a set is.
+- **No `MAP_PICK` steps**, which is what makes the loser's pick range over the whole pool. With map picks present
+  the tool restricts each player to the maps *they* picked, and no `mapScope` value widens that back out — the
+  full pool is reached only by the empty-pool fallback. Map bans are unaffected and still work.
+
+None of these is enforced at draft time: §2 leaves map and civ legality to the tool. These are checks on the preset an
+organizer chose, made once, so a mis-built preset is caught before a set opens rather than after.
+
 ### 3.4 Players need accounts too
 
 A seat can only be claimed by a logged-in account, so **every entrant must register on the draft tool** before
@@ -423,7 +458,7 @@ create table if not exists tournament_rounds (
   stage_id integer not null references tournament_stages(id) on delete cascade,
   ordinal integer not null,
   name text not null,                       -- 'Ro16', 'Quarterfinal', 'Final', 'Swiss R1'
-  best_of integer not null,
+  best_of integer not null check (best_of % 2 = 1),   -- odd only; see §7 on completion
   bracket text                              -- double elimination, later
     check (bracket in ('winners','losers','grand_final')),
   draft_preset_id text,                     -- the tool's preset ObjectId; must be a PUBLIC preset (§3.3)
@@ -634,9 +669,9 @@ higher seed by instruction, §8.7, flipped when `draft_slots_swapped` is 1), and
 `tournament_games` with `source = 'draft_import'`. Stamp `draft_synced_at`. Never sync a superseded draft.
 
 > **Completion is derived, not reported.** The tool never stores `finished` (§3.1), so a decided series still
-> reads `status = "running"`. Treat a set as complete when a side's wins reach
-> `target = floor(best_of / 2) + 1`, or when item 1's explicit `finished` says so — never on status alone. A
-> payload with `status = "running"` and a score of 2–0 in a Bo3 **is** a finished draft.
+> reads `status = "running"`. Treat a set as complete when item 1 says `finished`, or when one side has won more
+> than half the games — never on status alone. A payload with `status = "running"` and a score of 2–0 in a Bo3
+> **is** a finished draft.
 
 **Two triggers, one code path:**
 
@@ -670,7 +705,9 @@ Because the draft tool is authoritative, an on-demand sync of an unfinished draf
 
 **Set completion**, in one transaction:
 
-- A set completes at `ceil(best_of / 2)` wins.
+- A set completes when one side has won more than half the games. `best_of` is odd — an even one is rejected when
+  the round is configured — so there is no rounding to argue about and no threshold of our own to keep in step
+  with the tool's.
 - Set `winner_user_id`, `completed_at`, `status = 'completed'`; mark the loser's entry `eliminated`.
 - Write the winner into `winner_advances_to_set_id` at `winner_advances_to_slot`.
 - Flip that target set from `pending` to `ready` once both its slots are filled.
@@ -1166,7 +1203,7 @@ than panicking (buttons from an older deploy will be pressed).
   observed with both seats already claimed, and omits player names when the preset is `anonymous`;
 - **redraft** overwrites the pointer, increments `redraft_count`, voids that set's `draft_import` games while
   preserving `manual` ones, clears the announcement handle, and is refused on a `completed` set;
-- a set reaching `ceil(best_of/2)` wins completes, eliminates the loser, and places the winner in the correct
+- a set reaching a majority of its games completes, eliminates the loser, and places the winner in the correct
   slot of the next set;
 - a draft's reported `score` disagreeing with the imported games is flagged rather than silently resolved;
 - **lifecycle transitions**: every illegal move is rejected — starting before check-in closes, checking in on a

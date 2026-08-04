@@ -144,9 +144,12 @@ Gate: preset-config deserialization from a saved payload; the handshake against 
 
 **15. Round presets, validated up front**
 `draft_preset_id` on rounds, checked when the round is configured rather than when a set opens: public, playable
-per the tool's own validation, and `resultMode: "vote"`.
+per the tool's own validation, `resultMode: "vote"`, an odd `bestOf` matching the round's, and no `MAP_PICK`
+steps — the last is what makes the loser's map pick range over the whole pool rather than over the maps they
+picked themselves.
 Design: §3.3.
-Gate: a host-mode preset and a non-public preset are both rejected, with the tool's `issues` surfaced.
+Gate: a host-mode preset, a non-public preset, an even or mismatched `bestOf`, and one containing map picks are
+each rejected, with the tool's `issues` surfaced alongside our own.
 
 **16. Set threads and draft creation**
 Thread on `ready`, members added, draft created as the bot's account, pinned panel carrying the room link and
@@ -166,7 +169,7 @@ The completion transaction: winner, loser eliminated, winner written into the ne
 to `ready`, bracket edited, thread archived and locked, next thread created. Driven by reported games; the import
 path in chunk 22 reuses all of it.
 Design: §7 ("Set completion"), §8.7.
-Gate: §10 — a set reaching `ceil(best_of/2)` wins completes and places the winner in the correct slot;
+Gate: §10 — a set reaching a majority of its games completes and places the winner in the correct slot;
 completion derived from score against `target`, never from a status field.
 
 **19. `/set report` — the manual path**
