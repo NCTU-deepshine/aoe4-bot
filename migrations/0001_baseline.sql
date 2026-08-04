@@ -1,0 +1,10 @@
+-- Baseline. Intentionally contains no statements.
+--
+-- `accounts` is created by schema.sql, which main.rs still executes before this
+-- migrator runs (see docs/tournament.md §9). The live database on the Fly volume
+-- predates migrations, so bringing that table under migration control would mean
+-- baselining a deployed database for no benefit.
+--
+-- This file exists so that `migrations/` is tracked by git and the migrator is
+-- exercised from the first deploy rather than the first time a migration matters.
+-- The tournament schema starts at 0002.

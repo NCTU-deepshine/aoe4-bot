@@ -3,6 +3,54 @@ mod tests {
     use crate::db::{bind_account, list_all};
     use sqlx::{Executor, SqlitePool};
 
+    /// An in-memory pool set up exactly as main.rs sets up the real one: schema.sql
+    /// first, then the versioned migrations. `include_str!` rather than a runtime
+    /// relative path, so a test does not depend on the working directory.
+    pub(crate) async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        pool.execute(include_str!("../schema.sql")).await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn migrator_runs_on_an_empty_database() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+
+        let applied: i64 = sqlx::query_scalar("select count(*) from _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(applied > 0, "the migrator recorded nothing");
+    }
+
+    #[tokio::test]
+    async fn migrator_runs_on_a_database_that_already_has_accounts() {
+        // test_pool() is itself the case under test: schema.sql, then the migrator.
+        let pool = test_pool().await;
+
+        // And re-running is a no-op, which is what makes a restart safe.
+        sqlx::migrate!().run(&pool).await.unwrap();
+
+        let result = bind_account(&pool, 123, 456).await;
+        assert!(result.is_ok(), "accounts unusable after migrating: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn foreign_keys_are_enforced() {
+        // sqlx enables this by default on SqliteConnectOptions, which is the same
+        // default main.rs relies on. Every `references` in the tournament schema is
+        // inert if it ever changes, so assert it rather than assume it.
+        let pool = test_pool().await;
+
+        let enabled: i64 = sqlx::query_scalar("pragma foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(enabled, 1, "foreign keys are not enforced");
+    }
+
     #[tokio::test]
     async fn reproduce_conflict_error() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -30,9 +78,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_schema_sql() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let schema = std::fs::read_to_string("schema.sql").unwrap();
-        pool.execute(schema.as_str()).await.unwrap();
+        let pool = test_pool().await;
 
         let result = bind_account(&pool, 123, 456).await;
         assert!(result.is_ok());
@@ -49,9 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_account_binding() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let schema = std::fs::read_to_string("schema.sql").unwrap();
-        pool.execute(schema.as_str()).await.unwrap();
+        let pool = test_pool().await;
 
         let user_id = 12345;
         let aoe4_id1 = 111;
@@ -74,9 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_aoe4_id_unique_constraint() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let schema = std::fs::read_to_string("schema.sql").unwrap();
-        pool.execute(schema.as_str()).await.unwrap();
+        let pool = test_pool().await;
 
         let user1 = 123;
         let user2 = 456;

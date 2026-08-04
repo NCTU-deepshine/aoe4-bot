@@ -49,10 +49,15 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
-    // Run the schema migration
+    // The pre-migration schema. Kept as a single batch so the database already on the
+    // Fly volume is unaffected by the migrator below.
     pool.execute(include_str!("../schema.sql"))
         .await
-        .expect("failed to run migrations");
+        .expect("failed to apply schema.sql");
+
+    // Versioned migrations, tracked by sqlx in its own _sqlx_migrations table. Runs
+    // after schema.sql; everything from the tournament feature onwards lives here.
+    sqlx::migrate!().run(&pool).await.expect("failed to run migrations");
 
     let pool_cloned = pool.clone();
     let framework = poise::Framework::builder()
