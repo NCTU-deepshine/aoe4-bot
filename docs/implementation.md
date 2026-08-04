@@ -1,0 +1,212 @@
+# Tournament implementation — commit plan
+
+Ordered chunks for building what [`tournament.md`](./tournament.md) designs. Each numbered entry is intended to
+be **one commit**: a single reviewable purpose, building and green on its own.
+
+Design decisions are **not** restated here. Each chunk names the sections that govern it; read those before
+writing the code, and if a chunk seems to contradict them, the design doc wins or gets amended first.
+
+## Working rules
+
+- **The gate is `./check.sh --check`** — `cargo fmt --all --check`, `cargo clippy --all-targets -D warnings`,
+  `cargo test`. Every commit passes it.
+- **No live network in new tests.** `src/ranked.rs` has tests that call aoe4world, but they are
+  `#[ignore = "hits the live aoe4world API"]` — opt-in, so CI does not depend on that service. Use the same
+  attribute if a live check is ever wanted; otherwise test deserialization against saved payloads (§10).
+- **`main` auto-deploys** (Fly, via GitHub Actions). So a half-finished command must not be added to the
+  registration lists in `src/main.rs` until its chunk is complete — landing the code is fine, exposing it is not.
+  Migrations, being additive, are safe to deploy as they land.
+- **One migration file per schema chunk**, never edited after it lands. A rewritten migration diverges from the
+  deployed database.
+- **Two guilds, hardcoded** (§8.0). No per-guild configuration table and no setup command in this plan.
+- Chunks 1–20 have no external dependencies, and 19 is already a shippable tournament. Chunk 21 is in **another
+  repository**; only 22 waits on it, and most of 22 can be built before it lands.
+
+## Phase A — foundations
+
+Nothing user-visible. All three are prerequisites for everything after.
+
+**1. Versioned migrations, and one test pool**
+Add `migrations/` driven by `sqlx::migrate!`, run *after* the existing `schema.sql` execute so the live
+database is untouched. `sqlx`'s default features are on, so no dependency change. Replace the three duplicated
+`sqlite::memory:` preambles in `src/integration_tests.rs` with a shared `test_pool()` that runs both steps.
+Design: §9.
+Gate: migrator clean on an empty database and on one that already has `accounts`; `pragma foreign_keys` is on
+(assert it — every `references` in §4 is inert otherwise).
+
+**2. Command-error plumbing and explicit serenity features**
+Add an `on_error` handler to `FrameworkOptions` (there is none today) and a helper for ephemeral replies. Add
+`builder` — and anything else §8's APIs need — to our **own** `serenity` features in `Cargo.toml`: it is
+currently enabled only transitively through poise, so §8's `CreateChannel` / `CreateThread` / `CreateButton` /
+`EditThread` would vanish if poise's feature set ever changed. Do **not** enable `collector` for our own use
+(§8.5 deliberately rejects it).
+Design: §8.2, §8.9.
+
+**3. Split the bot across two guilds**
+Registration becomes two lists instead of one: every existing command stays home-guild-only, and the
+tournament-guild list starts empty. Add the guild ids as config, thread them through `Data` — including the copy
+the cron closure builds — add a `guild_only` + right-guild check usable by every command, and put a guild guard on
+the message-reaction handler, which has none today and would otherwise start reacting in the tournament guild as
+soon as the bot joins.
+Design: §8.0.
+Gate: the right-guild check as a pure function; the two command lists asserted **disjoint**, so a later chunk
+cannot quietly register a tournament command in the home guild.
+
+## Phase B — pure logic
+
+No database, no Discord. These hold the subtle parts, so they are reviewed without any I/O noise around them,
+and they can land before the tables exist.
+
+**4. Bracket generation**
+`bracket_size`, seed order by reflection, bye placement, round/set construction, advancement links. Pure
+functions over plain structs.
+Design: §5.
+Gate: §10's bracket-math list — pairings for n = 2, 3, 4, 6, 8, 16; byes on top seeds; no two top-4 seeds meeting
+before the semi-finals; advancement links forming a single-rooted tree; `best_of` varying per round.
+
+**5. Bracket rendering**
+`fn render(sets, width) -> Vec<String>`, plus the per-round list view. Adds `unicode-width`.
+Design: §8.6.
+Gate: §10's rendering list. Assert the box-drawing joins share a column rather than only diffing golden strings;
+CJK alignment; backtick/fence stripping; n = 32 splitting under 2000 chars.
+
+## Phase C — data model
+
+**6. Core schema**
+One migration for all nine tables (§4's seven plus §8.8's `tournament_admins` and
+`tournament_bracket_messages`), the row types, and the queries the later chunks need. New module `src/tournament/`.
+Nothing here reads or writes `accounts` — the tournament side owns `tournament_players` and the separation is the
+design (§4 notes).
+Design: §4, §8.8.
+Gate: foreign keys enforced — an entry for a user with no `tournament_players` row is rejected; both uniqueness
+directions on `tournament_players` hold; the `check` constraints reject unknown status values.
+
+## Phase D — running an event
+
+Each chunk from here adds a usable command, registered in the tournament-guild list only. Register it when its
+chunk is done, not before.
+
+**7. `/tournament create`, and the admin list**
+Channel and category creation including `#…-draft`, the top-level-channel fallback, the `tournaments` and
+`tournament_admins` rows, and `/tournament admin add|remove|list`. This is where access control enters the
+codebase, `MANAGE_GUILD` bypass included.
+Design: §8.1, §8.2.
+Gate: the permission decision as a pure function (creator / admin / `MANAGE_GUILD` / nobody); slug validation.
+
+**8. The interaction dispatcher**
+One `EventHandler::interaction_create` branch over `"<action>:<entity_id>"` custom_ids, Defer-first for any
+handler that makes an HTTP call, unknown and malformed ids ignored rather than panicking, and the throttled
+panel-edit helper. No panels yet — this is the shared mechanism for chunks 9, 10, 20 and 22.
+Design: §8.5.
+Gate: §10's Discord-helper list — every custom_id round-trips to the right action and entity, and a stale or
+malformed one is ignored.
+
+**9. Registration, which is also binding**
+`/tournament register [aoe4_id]` with the aoe4world autocomplete, `/tournament rebind`, `/withdraw`, the panel,
+its buttons, and the ephemeral feedback rules. A first sign-up writes `tournament_players` and the entry in one
+transaction; later ones find the player row already there, which is what makes the button work with no argument.
+Design: §8.5 (registration panel), §4 (`tournament_players` and the notes).
+Gate: §10's registration and player-binding lists — the two writes are atomic, a profile already claimed by
+another user is rejected with a readable message, a rebind is refused during a running event, a second
+registration is idempotent, withdrawal only before start.
+
+**10. Check-in**
+`/tournament open-checkin`, `/tournament checkin`, `/tournament close-checkin`, the panel, and no-show marking.
+Design: §8.3, §8.5 (check-in panel).
+Gate: §10's check-in list — second check-in idempotent, unregistered rejected, closing marks exactly the
+non-checked-in entrants.
+
+**11. Seeding**
+ATR and ELO through the existing `fetch_profile` and shared client (§6 "Reuse" — no new HTTP client), the tiered
+suggestion, `/tournament seed list|set`, and the ratings refresh at seeding time. No ratings cache (§4).
+Design: §6.
+Gate: tiering with only some entrants rated; an organizer's override survives; esports-leaderboard
+deserialization against a saved payload.
+
+**12. `/tournament start`**
+Generate the bracket in one transaction from finalized seeds, publish it (chunked, ids in
+`tournament_bracket_messages`), and open round 1. Consumes chunks 4 and 5.
+Design: §8.3, §5, §8.6.
+Gate: §10's lifecycle list — starting before check-in closes, non-contiguous seeds, registering after start all
+rejected.
+
+**13. `/tournament bracket` and `/tournament cancel`**
+Refresh or repost the bracket, the per-round companion view, and cancellation. Small.
+Design: §8.4, §8.6.
+
+## Phase E — the draft tool
+
+**14. Draft-tool client**
+The authenticated session (cookie store, Auth.js credentials handshake, re-auth on 401), `POST /api/matches`,
+and reading a preset's config. Base URL and credentials from env, alongside `DISCORD_TOKEN`.
+Design: §3.3.
+Gate: preset-config deserialization from a saved payload; the handshake against a stub. No live calls.
+
+**15. Round presets, validated up front**
+`draft_preset_id` on rounds, checked when the round is configured rather than when a set opens: public, playable
+per the tool's own validation, and `resultMode: "vote"`.
+Design: §3.3.
+Gate: a host-mode preset and a non-public preset are both rejected, with the tool's `issues` surfaced.
+
+**16. Set threads and draft creation**
+Thread on `ready`, members added, draft created as the bot's account, pinned panel carrying the room link and
+the seat instruction with both players mentioned.
+Design: §8.7.
+Gate: thread names stay within 100 characters for worst-case names, using chunk 5's width helper.
+
+**17. Draft channel announcement**
+Post once both seats are claimed, via the `hasPlayer1`/`hasPlayer2` booleans; `draft_announce_message_id` as the
+idempotency guard; names omitted for an `anonymous` preset.
+Design: §8.7 ("Announcing the draft"), §3.1 (why that endpoint, and only for this).
+Gate: §10 — fires exactly once across repeated ticks, still fires when first seen with both seats claimed, omits
+names when anonymous.
+
+**18. Set completion and advancement**
+The completion transaction: winner, loser eliminated, winner written into the next set's slot, target set flipped
+to `ready`, bracket edited, thread archived and locked, next thread created. Driven by reported games; the import
+path in chunk 22 reuses all of it.
+Design: §7 ("Set completion"), §8.7.
+Gate: §10 — a set reaching `ceil(best_of/2)` wins completes and places the winner in the correct slot;
+completion derived from score against `target`, never from a status field.
+
+**19. `/set report` — the manual path**
+Organizer override writing `source = 'manual'` rows, plus `/set schedule`.
+Design: §3.7, §7 ("Fallback — manual"), §8.4.
+
+> **Chunk 19 is the first shippable milestone.** With it the bot runs a whole tournament in its own guild —
+> registration, check-in, seeding, bracket, threads, drafts created on the tool, results entered by hand — and
+> needs nothing from the draft tool's API beyond what already exists. Everything after this replaces hand-entry
+> with import.
+
+**20. `/set redraft`**
+Overwrite the pointer, increment `redraft_count`, clear the sync and announcement state, re-post the panel, and
+the three guards.
+Design: §8.7 (`/set redraft`), §4.
+Gate: §10 — refused on a completed set, voids that set's `draft_import` games while preserving `manual` ones,
+re-points the announcement.
+
+**21. [Other repository] the read endpoint**
+`GET /api/v1/drafts/:id` in `aoe4_banpick` — nine fields, a thin wrapper over `deriveState()`. Not a commit in
+this repo, and the only external gate in this plan. Whether we run it on a branch of our own or offer it upstream
+is still open (§12).
+Design: §3.2 item 1.
+
+**22. Result import and `/set done`**
+The payload type, slot mapping, the upsert into `tournament_games`, `/set done` and its thread button, and the
+background poll on its own schedule — the existing cron is twice daily, far too coarse, and its `.unwrap()`
+panics the job.
+Design: §7, §8.7.
+Gate: §10's import list — swapped slots both ways, re-import overwrites `draft_import` and preserves `manual`,
+`status = "running"` with a clinching score treated as complete, `setdone` on an unfinished draft changes nothing.
+Write the import against saved fixtures so this chunk can be built and tested before chunk 21 exists; only the
+live fetch is blocked.
+
+**23. Boot-time panel reconciliation**
+Confirm each stored panel message still exists on startup and recreate it if an organizer deleted it.
+Design: §8.5.
+
+## Not in this plan
+
+Swiss, group stage, round robin and double elimination (§1 "Designed for, not built now"); team tournaments;
+the catalog endpoint, seat assignment and the completion webhook (§3.2 items 2–4); Discord login on the tool
+(§3.6); per-guild configuration beyond the hardcoded ids (§8.0); everything under §11 "Follow-ups".
