@@ -16,10 +16,12 @@ mod aoe4world;
 mod commands;
 mod db;
 mod emperor;
+mod errors;
 #[cfg(test)]
 mod integration_tests;
 mod ranked;
 mod refresh;
+mod reply;
 
 struct Data {
     database: SqlitePool,
@@ -70,6 +72,7 @@ async fn main() {
                 commands::refresh(),
                 commands::check(),
             ],
+            on_error: |error| Box::pin(errors::on_error(error)),
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
@@ -133,5 +136,16 @@ mod tests {
         assert!(intents.guild_emojis_and_stickers());
         assert!(intents.guild_message_reactions());
         assert!(intents.guild_message_typing());
+    }
+
+    /// This asserts no behaviour — it is a canary that fails to compile the moment they are not available.
+    #[test]
+    fn serenity_builders_are_available() {
+        use serenity::all::{CreateActionRow, CreateButton, CreateChannel, CreateThread, EditThread};
+
+        let _ = CreateChannel::new("relic-cup-draft");
+        let _ = CreateThread::new("R1M1");
+        let _ = EditThread::new().archived(true);
+        let _ = CreateActionRow::Buttons(vec![CreateButton::new("setdone:1")]);
     }
 }

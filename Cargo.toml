@@ -5,7 +5,17 @@ edition = "2024"
 
 [dependencies]
 serde = "1.0.226"
-serenity = { version = "0.12.4", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
+# `builder` is what the tournament feature's channels, threads and buttons are made
+# of (docs/tournament.md §8). It was previously only enabled transitively by poise,
+# so ask for it directly rather than depending on another crate's feature set.
+# Deliberately not `collector`: §8.5 rejects collectors for persistent panels.
+serenity = { version = "0.12.4", default-features = false, features = [
+    "builder",
+    "client",
+    "gateway",
+    "rustls_backend",
+    "model",
+] }
 sqlx = { version ="0.8.6", features = ["runtime-tokio", "tls-native-tls", "sqlite", "chrono"]}
 tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.41"
