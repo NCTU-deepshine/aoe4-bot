@@ -1,12 +1,19 @@
+use crate::guilds::{Feature, Guilds};
 use rand::Rng;
 use serenity::all::{EmojiId, Message, Reaction, ReactionType, Ready, UserId};
 use serenity::async_trait;
 use serenity::prelude::*;
 use tracing::info;
 
-pub(crate) struct Emperor;
+pub(crate) struct Emperor {
+    guilds: Guilds,
+}
 
 impl Emperor {
+    pub(crate) fn new(guilds: Guilds) -> Self {
+        Self { guilds }
+    }
+
     fn select_emoji() -> ReactionType {
         let num = rand::rng().random_range(0..100);
         if num == 0 {
@@ -21,7 +28,14 @@ impl Emperor {
 
 #[async_trait]
 impl EventHandler for Emperor {
-    async fn message(&self, ctx: poise::serenity_prelude::Context, new_message: Message) {
+    async fn message(&self, ctx: Context, new_message: Message) {
+        // Home guild only. This handler matches on user ids and keywords with no
+        // notion of where it is, so without the guard it would start reacting in the
+        // tournament guild the moment the bot joins (docs/tournament.md §8.0).
+        if !self.guilds.allows(Feature::Home, new_message.guild_id) {
+            return;
+        }
+
         let emperor = UserId::new(453010726311821322);
         let emperor2 = UserId::new(1511740443132428328);
         let knockgod = UserId::new(364796522396647424);
@@ -105,7 +119,7 @@ impl EventHandler for Emperor {
         }
     }
 
-    async fn ready(&self, _: poise::serenity_prelude::Context, ready: Ready) {
+    async fn ready(&self, _: Context, ready: Ready) {
         info!("{} emperor bot is connected!", ready.user.name);
     }
 }

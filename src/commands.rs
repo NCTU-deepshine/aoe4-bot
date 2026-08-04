@@ -1,8 +1,9 @@
 use crate::aoe4world::search_players;
 use crate::db::{bind_account, to_db_id};
+use crate::guilds::home_only;
 use crate::ranked::try_create_ranked_without_account;
 use crate::refresh::do_refresh;
-use crate::{Context, Error};
+use crate::{Context, Data, Error};
 use regex::Regex;
 use serenity::all::{AutocompleteChoice, ChannelId, GetMessages};
 use serenity::json::json;
@@ -10,12 +11,32 @@ use tracing::{error, info};
 
 static INTERACTION_CHANNEL_ID: ChannelId = ChannelId::new(1263524546582020254);
 
-#[poise::command(slash_command, subcommands("id", "name"), subcommand_required)]
+pub(crate) type Command = poise::Command<Data, Error>;
+
+/// The home guild's commands
+pub(crate) fn home() -> Vec<Command> {
+    vec![rebuild(), bind(), id(), name(), refresh(), check()]
+}
+
+/// The tournament guild's commands. Empty until §8.4's arrive — the list exists now
+/// so registration is already split, and so a later chunk adding a tournament
+/// command has an obvious place to put it that is not the home guild.
+pub(crate) fn tournament() -> Vec<Command> {
+    Vec::new()
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "home_only",
+    subcommands("id", "name"),
+    subcommand_required
+)]
 pub async fn bind(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command)]
+#[poise::command(slash_command, guild_only, check = "home_only")]
 pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
     info!("attempting to bind id {}", aoe4_id);
     let user_id = ctx.author().id;
@@ -29,7 +50,7 @@ pub async fn id(ctx: Context<'_>, aoe4_id: i32) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command)]
+#[poise::command(slash_command, guild_only, check = "home_only")]
 pub async fn rebuild(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
     let channel = ctx.guild_channel().await.unwrap();
@@ -92,7 +113,7 @@ async fn auto_complete_id(_ctx: Context<'_>, username: &str) -> impl Iterator<It
         .take(10)
 }
 
-#[poise::command(slash_command)]
+#[poise::command(slash_command, guild_only, check = "home_only")]
 pub async fn name(
     ctx: Context<'_>,
     #[description = "遊戲ID"]
@@ -111,7 +132,7 @@ pub async fn name(
     Ok(())
 }
 
-#[poise::command(slash_command, rename = "查分")]
+#[poise::command(slash_command, guild_only, check = "home_only", rename = "查分")]
 pub async fn check(
     ctx: Context<'_>,
     #[description = "遊戲ID"]
@@ -137,7 +158,7 @@ pub async fn check(
     Ok(())
 }
 
-#[poise::command(slash_command)]
+#[poise::command(slash_command, guild_only, check = "home_only")]
 pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
     do_refresh(ctx.http(), ctx.data()).await?;

@@ -1,13 +1,13 @@
 use crate::emperor::Emperor;
+use crate::guilds::{Feature, Guilds};
 use crate::refresh::do_refresh;
 use serenity::all::Http;
-use serenity::model::id::GuildId;
 use serenity::prelude::*;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
 use std::str::FromStr;
 use tokio_cron_scheduler::{Job, JobScheduler};
-use tracing::info;
+use tracing::{error, info};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
@@ -17,6 +17,7 @@ mod commands;
 mod db;
 mod emperor;
 mod errors;
+mod guilds;
 #[cfg(test)]
 mod integration_tests;
 mod ranked;
@@ -25,7 +26,7 @@ mod reply;
 
 struct Data {
     database: SqlitePool,
-    guild_id: GuildId,
+    guilds: Guilds,
 }
 
 #[tokio::main]
@@ -33,13 +34,8 @@ async fn main() {
     tracing_subscriber::fmt::init();
     info!("starting app");
 
-    // Get the discord token set in `Secrets.toml`
     let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");
-    // Get the guild_id set in `Secrets.toml`
-    let guild_id: GuildId = std::env::var("GUILD_ID")
-        .expect("GUILD_ID must be set")
-        .parse()
-        .expect("GUILD_ID must be a valid integer");
+    let guilds = Guilds::configured();
 
     let conn_opts = SqliteConnectOptions::from_str("sqlite:///data/bot.db")
         .expect("failed to parse database url")
@@ -61,26 +57,37 @@ async fn main() {
     // after schema.sql; everything from the tournament feature onwards lives here.
     sqlx::migrate!().run(&pool).await.expect("failed to run migrations");
 
+    // One list per guild. poise needs every command in a
+    // single `commands` vec to dispatch them, so the two lists are concatenated and
+    // the boundary kept as an index — Command is not Clone, so slicing the one vec is
+    // how both halves stay available.
+    let mut all_commands = commands::home();
+    let home_count = all_commands.len();
+    all_commands.extend(commands::tournament());
+
     let pool_cloned = pool.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![
-                commands::rebuild(),
-                commands::bind(),
-                commands::id(),
-                commands::name(),
-                commands::refresh(),
-                commands::check(),
-            ],
+            commands: all_commands,
             on_error: |error| Box::pin(errors::on_error(error)),
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
             Box::pin(async move {
-                poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id).await?;
+                let registered = &framework.options().commands;
+                let (home, tournament) = registered.split_at(home_count);
+
+                // Fatal: without its commands the bot is useless.
+                poise::builtins::register_in_guild(ctx, home, guilds.guild_for(Feature::Home)).await?;
+
+                let tournament_guild = guilds.guild_for(Feature::Tournament);
+                if let Err(err) = poise::builtins::register_in_guild(ctx, tournament, tournament_guild).await {
+                    error!("could not register tournament commands in guild {tournament_guild}: {err:?}");
+                }
+
                 Ok(Data {
                     database: pool_cloned,
-                    guild_id,
+                    guilds,
                 })
             })
         })
@@ -93,7 +100,7 @@ async fn main() {
         GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT,
     )
     .framework(framework)
-    .event_handler(Emperor)
+    .event_handler(Emperor::new(guilds))
     .await
     .expect("Err creating client");
     info!("prepared client");
@@ -109,7 +116,7 @@ async fn main() {
                         let http = Http::new(&token_cloned);
                         let data = Data {
                             database: pool_cloned,
-                            guild_id,
+                            guilds,
                         };
                         info!("refresh triggered by cron");
                         do_refresh(&http, &data).await.unwrap();
@@ -136,6 +143,21 @@ mod tests {
         assert!(intents.guild_emojis_and_stickers());
         assert!(intents.guild_message_reactions());
         assert!(intents.guild_message_typing());
+    }
+
+    /// The two guilds' command lists must never overlap (docs/tournament.md §8.0):
+    /// a command in both would be registered in both guilds, which is the leak the
+    /// split exists to prevent. Empty on one side today, so this is here to fail the
+    /// moment a later chunk adds a tournament command to the wrong list.
+    #[test]
+    fn command_lists_are_disjoint() {
+        use std::collections::HashSet;
+
+        let home: HashSet<String> = crate::commands::home().into_iter().map(|c| c.name).collect();
+        let tournament: HashSet<String> = crate::commands::tournament().into_iter().map(|c| c.name).collect();
+
+        let both: Vec<&String> = home.intersection(&tournament).collect();
+        assert!(both.is_empty(), "registered in both guilds: {both:?}");
     }
 
     /// This asserts no behaviour — it is a canary that fails to compile the moment they are not available.

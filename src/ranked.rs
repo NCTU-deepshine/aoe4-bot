@@ -147,7 +147,7 @@ pub(crate) async fn try_create_ranked_from_account(http: &Http, data: &Data, acc
     let discord_username = user.name.clone();
     let discord_global_name = user.global_name.clone();
     let discord_nickname = http
-        .get_guild(data.guild_id)
+        .get_guild(data.guilds.home)
         .await
         .ok()?
         .member(http, to_user_id(account.user_id))
