@@ -126,7 +126,12 @@ impl Display for RankedPlayer {
     }
 }
 
-fn escape(input: &str) -> String {
+/// Escape markdown in text that will appear *outside* a code fence.
+///
+/// Also used by the bracket's per-round list view (docs/tournament.md §8.6). The
+/// bracket itself does not use this — inside a fence the only hazards are a backtick
+/// and a newline, and escaping there would print the backslashes literally.
+pub(crate) fn escape(input: &str) -> String {
     input
         .replace('\\', "\\\\")
         .replace('*', "\\*")

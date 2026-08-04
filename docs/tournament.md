@@ -922,19 +922,31 @@ Same feedback rules: newly checked in, already checked in, not registered, check
 An ASCII bracket in a code block, posted in `#…-bracket` and edited in place as results land.
 
 ```
-1·MarineLorD ─┐
-              ├─ MarineLorD 2-1 ─┐
-8·Beasty     ─┘                  │
-                                 ├─ ?
-5·VortiX     ─┐                  │
-              ├─ Anotand    2-0 ─┘
-4·Anotand    ─┘
+MarineLorD   2 ─┐
+                ├─ MarineLorD     ─┐
+Beasty       1 ─┘                  │
+                                   ├─ ?
+VortiX       0 ─┐                  │
+                ├─ Anotand        ─┘
+Anotand      2 ─┘
 ```
+
+**Every column holds the participants of the match to its right, each with the games they won in it.** So a
+score sits beside the player who earned it, in the round it was played — `MarineLorD 2` against `Beasty 1` is
+that semi-final, read off two adjacent rows. The rightmost column is the winner of the final, who has no next
+match and so no score. An earlier form put a combined `2-1` on the connector instead, which reads worse and
+needed the score reordered to the winner's side to avoid `Anotand 0-2` appearing beside the player who won.
+
+**A match that has not started leaves the score blank** rather than showing `0`, so "not begun" stays
+distinguishable from "0-2 down".
+
+**No seeds in the graph.** A seed prefix costs two or three of a name cell's twelve columns, which is what forces
+an ordinary name into an ellipsis. Seeds stay in the per-round list view below, where there is room.
 
 Four constraints, all easy to miss and all visible in production if missed:
 
-1. **No markdown inside a code block.** Winners cannot be bolded — mark them in ASCII (a `>` prefix or trailing
-   `*`) and put the score on the connector line.
+1. **No markdown inside a code block.** Winners cannot be bolded. Nothing marks them explicitly: advancing to the
+   next column *is* the mark, and the games each player won are right there to compare.
 2. **Backticks in a player name break the fence.** `ranked::escape()` (`src/ranked.rs`) is the wrong
    tool here: it escapes markdown *outside* code blocks. Inside a fence the only hazards are backticks and the
    fence sequence, so strip or replace them.
@@ -942,13 +954,16 @@ Four constraints, all easy to miss and all visible in production if missed:
    double-width, so `str::chars().count()` returns the wrong column width and every row after a CJK name
    misaligns. Column math must use East Asian display width — add `unicode-width` (tiny, no transitive deps)
    rather than counting chars.
-4. **The 2000-char message limit.** At a 12-column name width: 8 players ≈ 600 chars, 16 ≈ 1700 (one message,
-   near the edge), 32 ≈ 4500 — **must split**. Render as top half / bottom half plus a final message for the
-   closing rounds and champion, storing each message id in `tournament_bracket_messages` so all chunks are
-   edited in place.
+4. **The 2000-char message limit.** Measured at a 12-column name width, every match decided: 4 players 294
+   chars, 8 → 855, **16 → 2308**, 32 → 5897. So the split starts at 16, not 32 — an earlier estimate here put 16
+   at ≈1700 and inside the limit, which the implementation disproved. Most of the bulk is structural: in a
+   16-player bracket 14 of the 31 rows exist only to carry a `│` in a far column, so no amount of narrowing
+   rescues it. Render as top half / bottom half plus a final message for the closing rounds and champion,
+   recursing while a part still does not fit, and store each message id in `tournament_bracket_messages` so all
+   chunks are edited in place.
 
-Names truncate to a fixed display width (default 12) with a single-cell ellipsis, seeds prefixed as
-`1·MarineLorD`.
+Names truncate to a fixed display width (default 12) with a single-cell ellipsis, and a wide character is never
+split in half — the cell is padded back up instead.
 
 Mobile is this format's known weakness — a 16-player bracket is already wider than a phone's code block. So
 `/tournament bracket round:<n>` should also offer a plain per-round list as a companion view:

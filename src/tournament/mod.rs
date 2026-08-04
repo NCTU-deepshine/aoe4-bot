@@ -4,3 +4,5 @@
 // lands, only this module's own tests exercise it — remove the allow then.
 #[allow(dead_code)]
 pub(crate) mod bracket;
+#[allow(dead_code)]
+pub(crate) mod render;

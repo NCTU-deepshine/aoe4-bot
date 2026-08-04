@@ -26,3 +26,5 @@ tokio-cron-scheduler = "0.15.1"
 rand = "0.9.2"
 tracing-subscriber = "0.3.22"
 regex = "1.12.2"
+# East Asian display width, for the bracket's column alignment (docs/tournament.md §8.6).
+unicode-width = "0.2.2"
