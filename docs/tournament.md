@@ -567,13 +567,18 @@ Pure functions, no database access, so this is unit-testable in isolation.
 
 1. `bracket_size(n) = n.next_power_of_two()`; round count is `log2(size)`.
 2. Seed slot order by reflection: start with `[1, 2]`; to double from size `s` to `2s`, map each entry `x` to
-   `[x, 2s + 1 - x]`. Size 8 gives `[1,8,5,4,3,6,7,2]`, so round 1 is `(1,8) (5,4) (3,6) (7,2)` — top seeds
-   meet bottom seeds and cannot meet each other before the final.
+   `[x, 2s + 1 - x]`. Size 8 gives `[1,8,4,5,2,7,3,6]`, so round 1 is `(1,8) (4,5) (2,7) (3,6)` — every seed
+   meets its mirror, no two of the top four can meet before the semi-finals, and 1 and 2 not before the final.
 3. Seeds beyond `n` are absent, leaving a one-player set with `status = 'bye'` that auto-advances at start.
+   Reflection puts those gaps against the top seeds, which is where a bye belongs.
 4. Create one `tournament_rounds` row per round, then all sets, then link advancement: `position` p in round r
    feeds `ceil(p/2)` in round r+1, into slot 1 if p is odd and slot 2 if even.
-5. Input is the **finalized** `seed` values. Generation is gated on tournament status `seeded`, so it never
-   computes an order itself and an organizer override is respected by construction.
+5. Round names come from the end, not the start: the last round is `Final`, then `Semifinal` and
+   `Quarterfinal`, and anything earlier is `Ro{players in that round}` — `Ro16`, `Ro32`.
+6. Input is the **finalized** `seed` values. Generation is gated on tournament status `seeded`, so it never
+   computes an order itself and an organizer override is respected by construction. It takes a *count*, not a
+   list — seeds are required to be 1..=n and contiguous by then (§8.3) — and returns seeds for the caller to map
+   back to entrants.
 
 ## 6. Ratings and seeding
 

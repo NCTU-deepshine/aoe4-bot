@@ -23,6 +23,7 @@ mod integration_tests;
 mod ranked;
 mod refresh;
 mod reply;
+mod tournament;
 
 struct Data {
     database: SqlitePool,
