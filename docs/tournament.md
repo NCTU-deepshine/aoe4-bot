@@ -52,9 +52,11 @@ ratings, generate a bracket, link each match to a draft on the external ban/pick
 | Map list | Whatever the round's preset holds — the tool's default is 30 maps |
 | Ratings | ATR (external tournament Elo) and ELO (`rm_1v1_elo`) |
 | Seeding | Bot suggests; organizer finalizes and may override any seed |
-| Registration | Requires a bound account; own channel with a button panel and explicit feedback (§8.5) |
+| Player identity | The tournament side keeps its own player list — one main aoe4 profile per Discord user, bound at sign-up (§4) |
+| Registration | Own channel with a button panel and explicit feedback; first sign-up also binds (§8.5) |
 | Per-game record | Map, both civs, winner |
 | Check-in | Required, and must close before start — the bracket is built from checked-in players only (§8.3) |
+| Guild scope | Tournament features live in their own guild, the existing features stay in theirs; ids hardcoded for now (§8.0) |
 | Channels | `/tournament create` uses the invoking channel for announcements and creates the rest in its category (§8.1) |
 | Admins | Creator is the first admin and may add others (§8.2) |
 | Set spaces | One private thread per set, players + admins added (§8.7) |
@@ -341,7 +343,7 @@ cron-shaped request/response. Recorded as a fallback so nobody thinks we are blo
 
 Every awkward part of §3.4 and §8.7 comes from the same root: the tool's accounts and ours are unrelated, so
 the bot cannot tell which entrant is in which seat. Discord login would dissolve that rather than work around
-it — the tool would hold each player's Discord id, which is already our `accounts.user_id`.
+it — the tool would hold each player's Discord id, which is already the key of `tournament_players` (§4).
 
 It looks cheap from the source. The tool is Auth.js v5 with a JWT session and Credentials as its only provider
 (`auth.ts`), yet it already depends on `@auth/mongodb-adapter` with `lib/mongodb.ts`
@@ -365,10 +367,11 @@ abandoned mid-way, and API outages: a report command writing the same `tournamen
 
 ## 4. Data model
 
-Six tables. Conventions follow the existing schema: lowercase SQL, `integer primary key
+Seven tables. Conventions follow the existing schema: lowercase SQL, `integer primary key
 autoincrement`, Discord snowflakes and aoe4 ids as `bigint`, timestamps written with `datetime('now')`.
 
-Note what is *not* here: no column holds an entrant's draft-tool identity. There is nothing worth storing yet —
+Note what is *not* here: no column holds an entrant's **draft-tool** identity — distinct from `tournament_players`,
+which holds their **aoe4world** profile. There is nothing worth storing yet —
 tool display names are player-editable, and the read API exposes no seat identity today (§3.4) — so the design
 instructs players where to sit and corrects mistakes by redrafting, rather than keeping a mapping it cannot
 trust. If item 1 ever returns `seats[].accountId`, one nullable column on `tournament_entries` is what turns that
@@ -428,10 +431,26 @@ create table if not exists tournament_rounds (
   unique (stage_id, ordinal, bracket)
 );
 
--- 4. entrants. bound accounts only (accounts.aoe4_id is unique, so it is a valid fk target).
+-- 4. tournament players: one MAIN aoe4 profile per discord user, and one user per
+--    profile. deliberately separate from `accounts`, which is the ranked board's
+--    table and allows a user several profiles — see the notes. bound at sign-up
+--    (§8.5) and reused by every later tournament.
+create table if not exists tournament_players (
+  user_id bigint primary key,               -- discord user; one main profile each
+  aoe4_id bigint not null unique,           -- and one user per profile
+  display_name text not null,               -- snapshot; aoe4world names change
+  bound_at timestamp not null default (datetime('now')),
+  updated_at timestamp
+);
+
+-- 5. entrants. keyed by discord user: everything the bot does with an entrant is a
+--    discord action (mentions, thread membership, buttons). the profile is resolved
+--    through tournament_players, and snapshotted here so a later rebind cannot
+--    rewrite history.
 create table if not exists tournament_entries (
   tournament_id integer not null references tournaments(id) on delete cascade,
-  aoe4_id bigint not null references accounts(aoe4_id),
+  user_id bigint not null references tournament_players(user_id),
+  aoe4_id bigint not null,                  -- snapshot, not a fk; see above
   seed integer,                             -- FINAL seed; the organizer may override
   suggested_seed integer,                   -- what the bot computed, kept for audit
   display_name text not null,               -- snapshot; aoe4world names change
@@ -442,11 +461,11 @@ create table if not exists tournament_entries (
     check (status in ('active','eliminated','withdrawn','no_show')),
   registered_at timestamp not null default (datetime('now')),
   checked_in_at timestamp,                  -- null = did not check in; see §8.3
-  primary key (tournament_id, aoe4_id),
+  primary key (tournament_id, user_id),
   unique (tournament_id, seed)
 );
 
--- 5. a set = one Bo_N meeting between two entrants.
+-- 6. a set = one Bo_N meeting between two entrants.
 --    loser_advances_to_* is unused by single elimination but present so
 --    double elimination needs no migration.
 create table if not exists tournament_sets (
@@ -454,11 +473,11 @@ create table if not exists tournament_sets (
   tournament_id integer not null references tournaments(id) on delete cascade,
   round_id integer not null references tournament_rounds(id) on delete cascade,
   position integer not null,                -- index within the round, 1-based, top to bottom
-  slot1_aoe4_id bigint references accounts(aoe4_id),   -- null until fed by a previous round
-  slot2_aoe4_id bigint references accounts(aoe4_id),
+  slot1_user_id bigint references tournament_players(user_id),  -- null until fed by a previous round
+  slot2_user_id bigint references tournament_players(user_id),
   slot1_wins integer not null default 0,
   slot2_wins integer not null default 0,
-  winner_aoe4_id bigint references accounts(aoe4_id),
+  winner_user_id bigint references tournament_players(user_id),
   status text not null default 'pending'
     check (status in ('pending','ready','drafting','in_progress','completed','bye','walkover')),
   draft_external_id text,                   -- the tool's 24-hex id; overwritten by a redraft (§8.7)
@@ -477,7 +496,7 @@ create table if not exists tournament_sets (
   unique (round_id, position)
 );
 
--- 6. games: a projection of the draft's GAME_RESULT steps, or a manual override.
+-- 7. games: a projection of the draft's GAME_RESULT steps, or a manual override.
 create table if not exists tournament_games (
   id integer primary key autoincrement,
   set_id integer not null references tournament_sets(id) on delete cascade,
@@ -485,7 +504,7 @@ create table if not exists tournament_games (
   map text,                                 -- draft-tool map id, kebab-case
   slot1_civ text,                           -- draft-tool civ id, kebab-case
   slot2_civ text,
-  winner_aoe4_id bigint references accounts(aoe4_id),
+  winner_user_id bigint references tournament_players(user_id),
   status text not null default 'pending'
     check (status in ('pending','in_progress','completed','void')),
   source text not null default 'draft_import'
@@ -498,6 +517,21 @@ create table if not exists tournament_games (
 
 ### Notes
 
+- **`tournament_players` is deliberately not `accounts`.** The ranked board's `accounts` table lets one Discord
+  user bind **several** aoe4 profiles, which is right for a board that lists all of them and wrong for a bracket
+  that needs exactly one. Rather than constrain or reinterpret a table another feature depends on, the tournament
+  side keeps its own list with the constraint it actually needs: `user_id` as the primary key (one main profile
+  per user) and `aoe4_id` unique (one user per profile, so two people cannot both claim a profile). The two
+  tables are independent — no foreign key, no sync, no shared writes — which is also what keeps the two guilds'
+  command sets disjoint (§8.0).
+- **Binding happens at sign-up, once.** A first registration takes the profile as an argument and writes
+  `tournament_players`; every later tournament finds the row already there and needs nothing (§8.5). There is no
+  separate bind step to forget.
+- **Entrants are keyed by `user_id`, with `aoe4_id` snapshotted alongside.** Every action the bot performs on an
+  entrant is a Discord action — mention them, add them to a thread, check a button press — so the Discord id is
+  the natural key, and sets and games reference it for the same reason. The profile is snapshotted onto the entry
+  so that changing a main later cannot silently re-attribute finished games. A rebind is refused while the user
+  has an entry in a `running` tournament.
 - **`slot1`/`slot2`, not `p1`/`p2`.** Slots exist before players do, and `winner_advances_to_slot` /
   `loser_advances_to_slot` use the same numbering.
 - **`tournaments` has no `best_of`.** A Bo5 final is the last round's `best_of`. A Swiss stage with Bo1 early
@@ -632,7 +666,7 @@ Because the draft tool is authoritative, an on-demand sync of an unfinished draf
 **Set completion**, in one transaction:
 
 - A set completes at `ceil(best_of / 2)` wins.
-- Set `winner_aoe4_id`, `completed_at`, `status = 'completed'`; mark the loser's entry `eliminated`.
+- Set `winner_user_id`, `completed_at`, `status = 'completed'`; mark the loser's entry `eliminated`.
 - Write the winner into `winner_advances_to_set_id` at `winner_advances_to_slot`.
 - Flip that target set from `pending` to `ready` once both its slots are filled.
 
@@ -672,6 +706,30 @@ Messages, Send Messages in Threads, Read Message History. As an invite: scopes `
 Deliberately absent: **Add Reactions**, which belongs to the home guild and is guarded off here (§8.0), and
 **Manage Roles**. §8.1 only ever creates channels *with* their overwrites, which Manage Channels covers; editing
 the overwrites of a channel that already exists is what would need Manage Roles.
+
+### 8.0 Two guilds, one bot
+
+Tournaments may run in a **different guild** from the one the bot serves today, and the two feature sets must not
+leak into each other: no `/tournament` or `/set` commands in the home guild, and none of the ranked-board,
+`/查分` or reaction behavior in the tournament guild.
+
+- **Slash commands are registered per guild**, from two lists rather than one. `register_in_guild` already takes a
+  command slice, so this is a split of the existing single list, not a new mechanism.
+- **The two lists are fully disjoint.** Nothing is shared, including `bind`: the tournament side keeps its own
+  player list and binds at sign-up (§4, §8.5), so the home guild's `/bind` is not needed here and the ranked
+  board's `accounts` table is not touched. That independence is the point — one guild's feature set can change
+  without consulting the other's.
+- **Registration is not a security boundary.** Stale registrations linger and commands can be invoked from
+  unexpected contexts, so every command is `guild_only` and additionally checks it is in the guild it belongs to.
+- **The message-reaction handler needs a guild guard.** It currently filters on user ids and keywords with no
+  guild condition at all, so it would start reacting in the tournament guild the moment the bot joins.
+- **`MANAGE_GUILD` (§8.2) is inherently per-guild**, which is what we want: tournament-guild moderators get the
+  bypass there and nothing in the home guild.
+
+**Guild ids are hardcoded, or read from env with the home guild as the fallback** — no per-guild configuration
+table and no setup command. This is deliberate for now: there are two guilds, both known, and `commands.rs`
+already hardcodes a channel id for `/查分`, so this follows existing practice rather than introducing a pattern.
+The bot must be invited to the tournament guild with the permissions listed above.
 
 ### 8.1 Channels and threads
 
@@ -750,7 +808,8 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 |---|---|---|
 | `/tournament create name slug` | Manage Guild | Creates channels; registers creator as admin |
 | `/tournament admin add\|remove\|list` | creator | Manage the admin list |
-| `/tournament register` | anyone | Requires a bound account · also a button |
+| `/tournament register [aoe4_id]` | anyone | `aoe4_id` on a first sign-up only, autocompleted · also a button |
+| `/tournament rebind aoe4_id` | anyone | Change your main profile; refused during a running event |
 | `/tournament withdraw` | anyone | Before start only · also a button |
 | `/tournament open-checkin [minutes]` | admin | Posts the check-in panel |
 | `/tournament checkin` | anyone | Self check-in · also a button |
@@ -794,18 +853,32 @@ MarineLorD · Puppypaw · Wam01 · Anotand · …
 [ 📝 Register ]  [ ❌ Withdraw ]
 ```
 
+**Signing up is also how a player binds.** There is no separate bind step (§4):
+
+- **First time ever** — `/tournament register aoe4_id:<profile>`, with the same aoe4world autocomplete the
+  existing bind command uses. This writes `tournament_players` and the entry together, in one transaction.
+- **Every tournament after** — the `📝 Register` button, or `/tournament register` with no argument. The player
+  list already has them.
+- **The button cannot take an argument**, so a first-timer who presses it gets an ephemeral reply naming the
+  command to use instead. This is deliberate: a modal would work but adds a whole interaction type, and
+  autocomplete — the thing that makes picking the right profile easy — does not work inside one.
+- **Changing a main profile** is `/tournament rebind`, refused while the player has an entry in a `running`
+  tournament, since the profile is snapshotted onto entries and sets already reference the player.
+
 Registration must give unmistakable feedback:
 
 1. **An ephemeral confirmation naming what was registered**, so the player can see it resolved the right
    profile — `✅ Registered as MarineLorD (ATR 2292, ELO 1180). You are entrant #12.` Silence, or a bare "ok",
    is what makes people press twice.
 2. **The roster updates in the panel**, so signups are publicly visible without an announcement per player.
-3. **Failures are equally explicit and ephemeral**: not bound (`run /bind id <your aoe4 id> first`),
-   registration closed, already registered, or the aoe4world lookup failed.
+3. **Failures are equally explicit and ephemeral**: registration closed, already registered, the aoe4world lookup
+   failed, a first-timer pressing the button, and — the one worth wording carefully — **that profile is already
+   bound to another Discord user**. The last is either a typo or two people claiming the same profile; say which
+   profile and tell them to ask an admin, rather than reporting a bare constraint violation.
 
-Registering fetches the aoe4world profile anyway — it validates the binding and supplies `display_name` — which
-is where the numbers in that confirmation come from. Snapshot ratings at registration and **refresh them at
-seeding**, so a stale signup-time number never decides a seed.
+Registering fetches the aoe4world profile anyway — it resolves the id to a real player and supplies
+`display_name` — which is where the numbers in that confirmation come from. Snapshot ratings at registration and
+**refresh them at seeding**, so a stale signup-time number never decides a seed.
 
 #### Check-in panel
 
@@ -1057,7 +1130,12 @@ than panicking (buttons from an older deploy will be pressed).
 **Database, on `sqlite::memory:` following `src/integration_tests.rs`:**
 
 - the migrator runs clean on an empty database and on one that already has `accounts`;
-- `pragma foreign_keys` is on, and an entry referencing an unbound `aoe4_id` is rejected;
+- `pragma foreign_keys` is on, and an entry for a user with no `tournament_players` row is rejected;
+- **player binding**: a second profile for the same Discord user replaces the main rather than adding one; the
+  same profile claimed by a second user is rejected; a rebind is refused while the user has an entry in a
+  `running` tournament, and an entry keeps its snapshotted `aoe4_id` across a permitted rebind;
+- **`accounts` is untouched** by every tournament code path — a user bound there is not implicitly a tournament
+  player, and vice versa;
 - seeding tiers correctly when only some entrants have an `atr`, and an organizer's `seed` override survives
   bracket generation;
 - draft import maps slots correctly with `draft_slots_swapped` both 0 and 1;
@@ -1075,7 +1153,8 @@ than panicking (buttons from an older deploy will be pressed).
   `running` tournament, registering after start, starting with non-contiguous seeds;
 - **check-in**: a second check-in is idempotent; an unregistered user is rejected; closing marks exactly the
   non-checked-in entrants `no_show` and seeds only the rest;
-- **registration**: an unbound user is rejected with the bind hint; a second registration is idempotent;
+- **registration**: a first sign-up writes the player row and the entry in one transaction, and neither survives
+  if the other fails; a second registration is idempotent; a later tournament needs no profile argument;
   withdrawal works only before start;
 - **`setdone` on an unfinished draft** imports nothing and leaves the set untouched.
 
@@ -1115,6 +1194,12 @@ leftover `Secrets.toml` from the removed Shuttle setup — have since been done,
 - **Civ/map key mapping** between the draft tool's kebab-case and aoe4world's snake_case still needs to be built
   and tested rather than assumed. Both vocabularies are now known exactly (§3.1), so this is work, not a question
   — but it is work nobody has done.
+- **Should a first sign-up offer a profile from `accounts` as a default?** A user with exactly one row there has
+  an unambiguous candidate, which would make their first registration a single button press. It is a read, not a
+  dependency, but it is still coupling between two tables the design just separated — and it does nothing for a
+  user with several. Currently no.
+- **Who resolves a contested profile** — two Discord users claiming the same `aoe4_id`? The constraint rejects the
+  second; nothing says who adjudicates, or whether an admin can force a reassignment.
 - **Registration roster contents** (§8.5) — names only, or names with ATR/ELO? Ratings make the field's strength
   visible during signup but turn registration into a public leaderboard, which some players dislike. The
   ephemeral confirmation shows a registrant their own numbers either way.
