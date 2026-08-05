@@ -913,4 +913,206 @@ mod tests {
             crate::tournament::registration::RebindOutcome::RefusedRunningTournament
         );
     }
+
+    // Chunk 10 (check-in) gate tests.
+
+    #[tokio::test]
+    async fn checkin_rejects_an_unregistered_user() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "checkin").await;
+
+        let outcome = crate::tournament::checkin::checkin(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::tournament::checkin::CheckinOutcome::NotRegistered);
+    }
+
+    #[tokio::test]
+    async fn checkin_rejects_a_withdrawn_entry() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "checkin").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::update_entry_status(&pool, tournament.id, 1, "withdrawn")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::checkin::checkin(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::tournament::checkin::CheckinOutcome::NotRegistered);
+    }
+
+    #[tokio::test]
+    async fn checkin_is_rejected_before_it_opens() {
+        let pool = test_pool().await;
+        let registration = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, registration.id, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::checkin::checkin(&pool, &registration, 1)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::tournament::checkin::CheckinOutcome::CheckinNotOpen);
+    }
+
+    #[tokio::test]
+    async fn checkin_is_rejected_after_it_closes() {
+        let pool = test_pool().await;
+        let seeding = setup_tournament(&pool, "seeding").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, seeding.id, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::checkin::checkin(&pool, &seeding, 1).await.unwrap();
+        assert_eq!(outcome, crate::tournament::checkin::CheckinOutcome::CheckinNotOpen);
+    }
+
+    #[tokio::test]
+    async fn checkin_second_press_is_idempotent() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "checkin").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::checkin::checkin(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::checkin::CheckinOutcome::CheckedIn { .. }
+        ));
+        let first_checked_in_at = crate::tournament::db::get_entry(&pool, tournament.id, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .checked_in_at
+            .unwrap();
+
+        let outcome = crate::tournament::checkin::checkin(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::checkin::CheckinOutcome::AlreadyCheckedIn { .. }
+        ));
+        let checked_in_at = crate::tournament::db::get_entry(&pool, tournament.id, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .checked_in_at
+            .unwrap();
+        assert_eq!(checked_in_at, first_checked_in_at);
+    }
+
+    #[tokio::test]
+    async fn open_checkin_is_refused_unless_the_tournament_is_in_registration() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "checkin").await;
+
+        let outcome = crate::tournament::checkin::open(&pool, &tournament, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::checkin::OpenCheckinOutcome::NotInRegistration {
+                current_status: "checkin".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn open_checkin_moves_to_checkin_and_stores_closes_at() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        let outcome = crate::tournament::checkin::open(&pool, &tournament, Some(30))
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::checkin::OpenCheckinOutcome::Opened { closes_at: Some(_) }
+        ));
+
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tournament.status, "checkin");
+        assert!(tournament.checkin_closes_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn close_checkin_is_refused_unless_checkin_is_open() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        let outcome = crate::tournament::checkin::close(&pool, &tournament).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::checkin::CloseCheckinOutcome::NotOpen {
+                current_status: "registration".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn close_checkin_marks_exactly_the_non_checked_in_entrants_no_show() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "checkin").await;
+
+        // 1 checks in, 2 does not, 3 already withdrew before check-in even opened.
+        for (user_id, aoe4_id) in [(1, 100), (2, 200), (3, 300)] {
+            crate::tournament::db::insert_player_if_absent(&pool, user_id, aoe4_id, "P")
+                .await
+                .unwrap();
+            crate::tournament::db::insert_entry(&pool, tournament.id, user_id, aoe4_id, "P")
+                .await
+                .unwrap();
+        }
+        crate::tournament::db::update_entry_status(&pool, tournament.id, 3, "withdrawn")
+            .await
+            .unwrap();
+        crate::tournament::checkin::checkin(&pool, &tournament, 1)
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::checkin::close(&pool, &tournament).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::checkin::CloseCheckinOutcome::Closed {
+                checked_in_count: 1,
+                no_show_count: 1
+            }
+        );
+
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        let status_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().status.clone();
+        assert_eq!(status_of(1), "active");
+        assert_eq!(status_of(2), "no_show");
+        assert_eq!(status_of(3), "withdrawn");
+
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tournament.status, "seeding");
+    }
 }

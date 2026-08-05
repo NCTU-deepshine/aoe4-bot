@@ -167,6 +167,38 @@ pub(crate) async fn set_register_message_id(
     Ok(())
 }
 
+/// The check-in panel's message id (docs/tournament.md §8.5) — set once, right
+/// after `/tournament open-checkin` posts the panel to the register channel.
+pub(crate) async fn set_checkin_message_id(
+    pool: &SqlitePool,
+    id: i64,
+    checkin_message_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set checkin_message_id = ?1 where id = ?2")
+        .bind(checkin_message_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// When check-in closes on its own (docs/tournament.md §8.3) — informational
+/// only today; nothing polls this to auto-close (§11 follow-ups).
+pub(crate) async fn set_checkin_closes_at(
+    pool: &SqlitePool,
+    id: i64,
+    closes_at: Option<DateTime<Utc>>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set checkin_closes_at = ?1 where id = ?2")
+        .bind(closes_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 /// Resolves a tournament from ANY of its five stored channel ids — the announce
 /// channel (`/tournament create`'s invoking channel) or any of the four it
 /// created. Used by `/tournament admin add|remove|list`'s resolution, which has
@@ -666,6 +698,27 @@ pub(crate) async fn set_entry_checked_in(
     .await
     .inspect_err(log_db_error)?;
     Ok(())
+}
+
+/// `/tournament close-checkin`'s no-show sweep (docs/tournament.md §8.3): every
+/// `active` entry that never checked in becomes `no_show` in one statement.
+/// Already-`withdrawn`/`no_show` entries are untouched. Returns how many rows
+/// changed, for the closing reply.
+pub(crate) async fn mark_no_shows(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        update tournament_entries
+        set status = 'no_show'
+        where tournament_id = ?1
+          and status = 'active'
+          and checked_in_at is null
+        ",
+    )
+    .bind(tournament_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.rows_affected())
 }
 
 pub(crate) async fn set_entry_ratings(

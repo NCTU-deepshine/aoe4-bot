@@ -81,7 +81,7 @@ impl RegisterOutcome {
                 entrant_number,
             } => {
                 let elo_suffix = elo.map(|e| format!(" (ELO {e})")).unwrap_or_default();
-                format!("✅ Registered as **{display_name}**{elo_suffix}. You are entrant #{entrant_number}.")
+                format!("Registered as **{display_name}**{elo_suffix}. You are entrant #{entrant_number}.")
             },
             RegisterOutcome::AlreadyRegistered {
                 display_name,

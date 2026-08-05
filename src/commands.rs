@@ -4,10 +4,10 @@ use crate::guilds::{home_only, tournament_only};
 use crate::ranked::try_create_ranked_without_account;
 use crate::refresh::do_refresh;
 use crate::reply::ephemeral;
-use crate::tournament::access::{create_tournament_only, tournament_admin_only};
+use crate::tournament::access::{create_tournament_only, tournament_admin_only, tournament_manage_only};
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
-use crate::tournament::{panel, registration};
+use crate::tournament::{checkin, checkin_panel, panel, registration};
 use crate::{Context, Data, Error};
 use regex::Regex;
 use serenity::all::{
@@ -180,7 +180,16 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     guild_only,
     check = "tournament_only",
     rename = "tournament",
-    subcommands("create", "admin", "register", "rebind", "withdraw"),
+    subcommands(
+        "create",
+        "admin",
+        "register",
+        "rebind",
+        "withdraw",
+        "open_checkin",
+        "check_in",
+        "close_checkin"
+    ),
     subcommand_required
 )]
 pub async fn tournament_root(_: Context<'_>) -> Result<(), Error> {
@@ -496,6 +505,99 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
     if outcome.changed_state() {
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
     }
+    Ok(())
+}
+
+// Opens check-in for the tournament resolved from the invoking channel
+// (docs/tournament.md §8.3) and posts the check-in panel to the register
+// channel `/tournament create` made. `minutes` is purely informational —
+// there is no cron closing check-in automatically; `/tournament close-checkin`
+// stays a separate, explicit action (§11 follow-ups).
+/// Opens check-in and posts its panel. `minutes`, if given, is shown as when it closes.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    rename = "open-checkin"
+)]
+pub async fn open_checkin(
+    ctx: Context<'_>,
+    #[description = "Minutes until check-in closes — informational only; closing is still a separate command"]
+    minutes: Option<i64>,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let outcome = checkin::open(pool, &tournament, minutes).await?;
+
+    if let checkin::OpenCheckinOutcome::Opened { closes_at } = outcome {
+        // Always set by `create()` when the tournament was made.
+        let register_channel_id = ChannelId::new(u64::try_from(tournament.register_channel_id.unwrap()).unwrap());
+        let message_id = checkin_panel::post_initial(
+            ctx.http(),
+            pool,
+            register_channel_id,
+            tournament.id,
+            &tournament.name,
+            closes_at,
+        )
+        .await?;
+        tournament_db::set_checkin_message_id(pool, tournament.id, i64::try_from(message_id.get()).unwrap()).await?;
+    }
+
+    ctx.say(outcome.message(&tournament.name)).await?;
+    Ok(())
+}
+
+// `check_in` in Rust to avoid colliding with the `checkin` module import;
+// `rename` keeps the Discord-visible command `/tournament checkin`.
+/// Checks you in, once check-in has opened.
+#[poise::command(slash_command, guild_only, check = "tournament_only", rename = "checkin")]
+pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let outcome = checkin::checkin(pool, &tournament, user_id).await?;
+    ephemeral(ctx, outcome.message(&tournament.name)).await?;
+
+    if outcome.changed_state() {
+        checkin_panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+    }
+    Ok(())
+}
+
+/// Closes check-in: marks no-shows and moves the tournament into seeding.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    rename = "close-checkin"
+)]
+pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let outcome = checkin::close(pool, &tournament).await?;
+
+    if matches!(outcome, checkin::CloseCheckinOutcome::Closed { .. }) {
+        checkin_panel::close(ctx.http(), pool, &tournament).await?;
+    }
+
+    ctx.say(outcome.message(&tournament.name)).await?;
     Ok(())
 }
 

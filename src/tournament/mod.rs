@@ -15,6 +15,12 @@ pub(crate) mod action;
 // db.rs itself for which chunk consumes which table.
 #[allow(dead_code)]
 pub(crate) mod db;
+// `/tournament open-checkin|checkin|close-checkin`'s business logic (chunk 10,
+// §8.3, §8.5).
+pub(crate) mod checkin;
+// The check-in panel (chunk 10, §8.5): rendering plus the Discord/DB glue
+// `commands.rs` and `dispatch::Dispatcher` call into.
+pub(crate) mod checkin_panel;
 // The interaction dispatcher's own `EventHandler` (chunk 8, §8.5) — kept
 // separate from `Emperor`, which is home-guild meme/reaction logic with no
 // tournament knowledge; registered as a second handler in `main.rs`.

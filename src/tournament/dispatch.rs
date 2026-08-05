@@ -2,17 +2,18 @@
 //! `EventHandler::interaction_create` branch over `"<action>:<entity_id>"`
 //! custom_ids.
 //!
-//! Register and Withdraw are wired up (chunk 9); Checkin/Redraft/SetDone stay
-//! stubs until their own chunks (10, 20, 22). The button path resolves its
+//! Register, Withdraw and Checkin are wired up (chunks 9, 10); Redraft/SetDone
+//! stay stubs until their own chunks (20, 22). The button path resolves its
 //! tournament by the id encoded in the custom_id (`db::get_tournament`), unlike
 //! the slash commands in `commands.rs`, which resolve it from the invoking
 //! channel.
 
 use crate::guilds::{Feature, Guilds};
 use crate::tournament::action::{self, Action};
+use crate::tournament::checkin::CheckinOutcome;
 use crate::tournament::registration::{RegisterOutcome, WithdrawOutcome};
 use crate::tournament::throttle::EditThrottle;
-use crate::tournament::{db, panel, registration};
+use crate::tournament::{checkin, checkin_panel, db, panel, registration};
 use serenity::all::{
     ComponentInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
     Interaction,
@@ -65,7 +66,7 @@ impl EventHandler for Dispatcher {
         match action {
             Action::Register => self.handle_register(&ctx, &component, entity_id).await,
             Action::Withdraw => self.handle_withdraw(&ctx, &component, entity_id).await,
-            Action::Checkin => {}, // chunk 10
+            Action::Checkin => self.handle_checkin(&ctx, &component, entity_id).await,
             Action::Redraft => {}, // chunk 20
             Action::SetDone => {}, // chunk 22
         }
@@ -135,6 +136,36 @@ impl Dispatcher {
         }
     }
 
+    async fn handle_checkin(&self, ctx: &Context, component: &ComponentInteraction, tournament_id: i64) {
+        let Some(tournament) = self.resolve_tournament(Action::Checkin, tournament_id).await else {
+            return;
+        };
+
+        let user_id = i64::try_from(component.user.id.get()).unwrap();
+        let outcome = match checkin::checkin(&self.pool, &tournament, user_id).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                error!("checkin button failed for tournament {tournament_id}, user {user_id}: {err:?}");
+                return;
+            },
+        };
+
+        // Never deferred (Action::Checkin.requires_defer() == false), so the
+        // reply is a fresh ephemeral message, not an edit of a deferred one.
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .content(outcome.message(&tournament.name)),
+        );
+        if let Err(err) = component.create_response(&ctx.http, response).await {
+            error!("failed to respond to a checkin interaction for tournament {tournament_id}: {err:?}");
+        }
+
+        if matches!(outcome, CheckinOutcome::CheckedIn { .. }) {
+            self.refresh_checkin_panel(ctx, &tournament).await;
+        }
+    }
+
     async fn resolve_tournament(&self, action: Action, entity_id: i64) -> Option<db::Tournament> {
         match db::get_tournament(&self.pool, entity_id).await {
             Ok(Some(tournament)) => Some(tournament),
@@ -159,6 +190,15 @@ impl Dispatcher {
         if let Err(err) = panel::refresh(&ctx.http, &self.pool, &self.panel_throttle, tournament).await {
             error!(
                 "failed to refresh the registration panel for tournament {}: {err:?}",
+                tournament.id
+            );
+        }
+    }
+
+    async fn refresh_checkin_panel(&self, ctx: &Context, tournament: &db::Tournament) {
+        if let Err(err) = checkin_panel::refresh(&ctx.http, &self.pool, &self.panel_throttle, tournament).await {
+            error!(
+                "failed to refresh the check-in panel for tournament {}: {err:?}",
                 tournament.id
             );
         }

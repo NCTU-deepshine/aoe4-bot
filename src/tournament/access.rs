@@ -28,6 +28,13 @@ impl Access {
     pub(crate) fn may_manage_admins(self) -> bool {
         matches!(self, Access::Creator | Access::ManageGuildBypass)
     }
+
+    /// The broader "any admin" tier (§8.2: "open/close check-in, seed, start,
+    /// cancel, draft, manual report, schedule") — unlike `may_manage_admins`,
+    /// a plain `Admin` is included.
+    pub(crate) fn may_manage_tournament(self) -> bool {
+        matches!(self, Access::Creator | Access::Admin | Access::ManageGuildBypass)
+    }
 }
 
 /// Pure decision. `has_manage_guild` is checked before `is_admin` deliberately:
@@ -75,6 +82,38 @@ pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Erro
     ephemeral(
         ctx,
         "Only the tournament's creator (or a member with Manage Guild) can manage its admin list.",
+    )
+    .await?;
+    Ok(false)
+}
+
+/// Command check for `/tournament open-checkin|close-checkin` (and, in later
+/// chunks, seed/start/cancel/draft/report/schedule) — the broader "any admin"
+/// tier, unlike `tournament_admin_only`'s creator-only gate.
+pub(crate) async fn tournament_manage_only(ctx: Context<'_>) -> Result<bool, Error> {
+    let pool = &ctx.data().database;
+    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+
+    let Some(tournament) = db::get_tournament_by_any_channel_id(pool, channel_id).await? else {
+        ephemeral(
+            ctx,
+            "This command must be run in one of the tournament's own channels \
+             (its announce, register, bracket, draft or matches channel).",
+        )
+        .await?;
+        return Ok(false);
+    };
+
+    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let is_admin = db::is_admin(pool, tournament.id, user_id).await?;
+    let has_manage_guild = author_has_manage_guild(ctx).await?;
+
+    if decide(user_id, tournament.created_by, is_admin, has_manage_guild).may_manage_tournament() {
+        return Ok(true);
+    }
+    ephemeral(
+        ctx,
+        "Only the tournament's creator, an admin, or a member with Manage Guild can do that.",
     )
     .await?;
     Ok(false)
@@ -162,6 +201,14 @@ mod tests {
         assert!(Access::ManageGuildBypass.may_manage_admins());
         assert!(!Access::Admin.may_manage_admins());
         assert!(!Access::Nobody.may_manage_admins());
+    }
+
+    #[test]
+    fn creator_admin_and_bypass_may_manage_the_tournament() {
+        assert!(Access::Creator.may_manage_tournament());
+        assert!(Access::Admin.may_manage_tournament());
+        assert!(Access::ManageGuildBypass.may_manage_tournament());
+        assert!(!Access::Nobody.may_manage_tournament());
     }
 
     #[test]

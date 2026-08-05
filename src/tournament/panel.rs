@@ -47,17 +47,17 @@ pub(crate) fn render(tournament_id: i64, name: &str, entries: &[TournamentEntry]
     // about format yet. "Single elimination" itself is a fixed design decision
     // (§1), not per-round data, so it stays.
     let content = format!(
-        "📝 **{name} — registration is OPEN**\nSingle elimination · check-in required before start\n\n\
+        "**{name} — registration is OPEN**\nSingle elimination · check-in required before start\n\n\
          **Registered ({})**\n{roster}",
         active.len()
     );
 
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new(Action::Register.custom_id(tournament_id))
-            .label("📝 Register")
+            .label("Register")
             .style(ButtonStyle::Primary),
         CreateButton::new(Action::Withdraw.custom_id(tournament_id))
-            .label("❌ Withdraw")
+            .label("Withdraw")
             .style(ButtonStyle::Danger),
     ])];
 
@@ -178,13 +178,13 @@ mod tests {
         assert_eq!(
             buttons[0],
             CreateButton::new(Action::Register.custom_id(42))
-                .label("📝 Register")
+                .label("Register")
                 .style(ButtonStyle::Primary)
         );
         assert_eq!(
             buttons[1],
             CreateButton::new(Action::Withdraw.custom_id(42))
-                .label("❌ Withdraw")
+                .label("Withdraw")
                 .style(ButtonStyle::Danger)
         );
     }
