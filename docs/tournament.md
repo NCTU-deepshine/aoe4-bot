@@ -1151,9 +1151,43 @@ All first-of-its-kind in this codebase, so the cost is visible up front:
 6. Boot-time reconciliation of long-lived panel messages.
 7. An authenticated HTTP session against the draft tool: a cookie store, the Auth.js credentials handshake, and
    re-auth on 401 (§3.3).
+8. Per-user localization of the bot's own reply text (§8.10) — the first locale-aware text in the tournament
+   feature.
 
 Deliberately **not** on that list: direct messages. Everything player-facing happens in a channel or a thread,
 so the design needs no DM path and no closed-DM fallback.
+
+### 8.10 Localization
+
+Two locales, on purpose: **Traditional Chinese (`zh-TW`) and English**, the fallback for everything else —
+including `zh-CN` and any locale Discord adds later. This is not "detect Chinese and guess a variant"; it is one
+exact string match, with English underneath everything unmatched. This is a **different, narrower** mechanism
+from the home guild's existing approach of hardcoding Chinese into individual commands (`/查分`, `bind`'s
+subcommands) — those are untouched; this adds per-user detection for the tournament feature's own text only.
+
+**Detection is per-interaction, not per-guild.** Every `CommandInteraction`/`ComponentInteraction` carries the
+invoking user's own client-locale setting as `locale: String`, "the selected language of the invoking user"
+(verified against the vendored serenity 0.12.5 source, `command_interaction.rs`/`component_interaction.rs`); poise
+exposes the slash-command side as `Context::locale() -> Option<&str>`. There is a separate `guild_locale:
+Option<String>`, "the guild's preferred locale" — deliberately not used: it is the guild's own default, not any
+one member's language, and every reply this applies to (an outcome message, a panel) is already either ephemeral
+to one user or a shared panel where a language pick has to be made anyway — the invoking user's own setting is
+the only signal that is actually about *them*.
+
+**Scope: the tournament feature's own dynamic reply text.** Outcome messages (`RegisterOutcome`,
+`WithdrawOutcome`, `RebindOutcome`, `CheckinOutcome`, `OpenCheckinOutcome`, `CloseCheckinOutcome`), both panels'
+content and button labels, and `access.rs`'s ephemeral refusals. **Not** in scope:
+
+- Slash command names and descriptions — Discord has its own static localization for these
+  (`name_localizations`/`description_localizations`), a different code path from runtime reply text, and out of
+  scope here.
+- The home guild's existing hardcoded Chinese (`/查分`, `bind`'s subcommands) — untouched.
+
+**Mechanism.** A `Locale` enum (`ZhTw`, `En`) and a pure `from_discord_locale(code: &str) -> Locale` — anything
+other than the exact string `"zh-TW"` maps to `En`. Every message-producing function this applies to gains a
+`locale: Locale` parameter and picks its template accordingly. This is retroactive: chunks 7–10 already shipped
+without it, so their outcome/panel/refusal messages are retrofitted rather than written fresh — and every chunk
+from here on writing new user-facing text follows the same shape from the start rather than adding it later.
 
 ## 9. Delivery notes
 
@@ -1225,7 +1259,10 @@ than panicking (buttons from an older deploy will be pressed).
 - **registration**: a first sign-up writes the player row and the entry in one transaction, and neither survives
   if the other fails; a second registration is idempotent; a later tournament needs no profile argument;
   withdrawal works only before start;
-- **`setdone` on an unfinished draft** imports nothing and leaves the set untouched.
+- **`setdone` on an unfinished draft** imports nothing and leaves the set untouched;
+- **localization**: `from_discord_locale` maps `"zh-TW"` and only `"zh-TW"` to `Locale::ZhTw` — `"zh-CN"`, an
+  empty string, and an unrecognized future locale code all fall back to `Locale::En`; every retrofitted
+  outcome/panel/refusal message renders correctly in both locales.
 
 ## 11. Follow-ups
 

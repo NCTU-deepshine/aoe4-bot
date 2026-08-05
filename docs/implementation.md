@@ -19,8 +19,13 @@ writing the code, and if a chunk seems to contradict them, the design doc wins o
 - **One migration file per schema chunk**, never edited after it lands. A rewritten migration diverges from the
   deployed database.
 - **Two guilds, hardcoded** (§8.0). No per-guild configuration table and no setup command in this plan.
-- Chunks 1–20 have no external dependencies, and 19 is already a shippable tournament. Chunk 21 is in **another
-  repository**; only 22 waits on it, and most of 22 can be built before it lands.
+- Chunks 1–20 and 24 have no external dependencies, and 19 is already a shippable tournament. Chunk 21 is in
+  **another repository**; only 22 waits on it, and most of 22 can be built before it lands.
+- **Chunk 24 (localization) is numbered last but meant to land next**, right after chunk 10 — it retrofits
+  chunks 7–10's existing messages, and every chunk after it must write new user-facing text through it from the
+  start. It sits at 24 rather than 11 so the chunk numbers already cited in shipped code (chunks 6–10's comments
+  in `db.rs`, `panel.rs`, `registration.rs`, `mod.rs`, `dispatch.rs`, `commands.rs` — e.g. "consumed by chunk
+  12") stay correct; renumbering would silently break every one of them.
 
 ## Phase A — foundations
 
@@ -207,6 +212,20 @@ live fetch is blocked.
 **23. Boot-time panel reconciliation**
 Confirm each stored panel message still exists on startup and recreate it if an organizer deleted it.
 Design: §8.5.
+
+## Phase F — localization
+
+Numbered last so already-shipped chunk numbers cited in code comments stay correct (see Working rules), but
+**scheduled right after chunk 10** — every chunk after it must use it for new text from the start.
+
+**24. Localization (zh-TW, English default)**
+A `Locale` enum and `from_discord_locale`, resolved per-interaction from `Context::locale()`
+(slash commands) / `ComponentInteraction.locale` (buttons) — never `guild_locale`. Retrofits chunks 7–10's
+outcome messages, both panels' content and button labels, and `access.rs`'s ephemeral refusals to take a
+`Locale` and render accordingly.
+Design: §8.10.
+Gate: §10's localization list — `"zh-TW"` and only `"zh-TW"` resolves to `Locale::ZhTw`; `"zh-CN"`, empty, and
+an unrecognized code all fall back to `Locale::En`; every retrofitted message renders correctly in both.
 
 ## Not in this plan
 
