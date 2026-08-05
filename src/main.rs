@@ -102,6 +102,7 @@ async fn main() {
     )
     .framework(framework)
     .event_handler(Emperor::new(guilds))
+    .event_handler(tournament::dispatch::Dispatcher::new(guilds))
     .await
     .expect("Err creating client");
     info!("prepared client");
