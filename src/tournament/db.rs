@@ -16,6 +16,9 @@ fn log_db_error(err: &sqlx::Error) {
 
 // 1. tournaments
 
+// Most fields below are read starting with chunk 9 (registration replies, panels)
+// and beyond — chunk 7 only writes them via `insert_tournament`/
+// `set_tournament_channels`, never reads them back off a fetched row.
 #[derive(FromRow)]
 pub(crate) struct Tournament {
     pub id: i64,
@@ -59,6 +62,7 @@ pub(crate) async fn insert_tournament(
     Ok(result.last_insert_rowid())
 }
 
+// consumed by chunk 12 (`/tournament start`, generating and publishing the bracket)
 pub(crate) async fn get_tournament(pool: &SqlitePool, id: i64) -> Result<Option<Tournament>, sqlx::Error> {
     sqlx::query_as(
         r"
@@ -93,6 +97,7 @@ pub(crate) async fn get_tournament_by_slug(pool: &SqlitePool, slug: &str) -> Res
     .inspect_err(log_db_error)
 }
 
+// consumed starting with chunk 10 (checkin/seeding/running/... lifecycle transitions)
 pub(crate) async fn update_tournament_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {
     sqlx::query(r"update tournaments set status = ?1 where id = ?2")
         .bind(status)
@@ -103,7 +108,78 @@ pub(crate) async fn update_tournament_status(pool: &SqlitePool, id: i64, status:
     Ok(())
 }
 
-// 2. tournament_stages
+/// The channel ids `/tournament create` allocates, written once Discord confirms
+/// they exist (§8.1). A carrier rather than six positional args, matching
+/// `NewGame`'s precedent (`insert_game`).
+pub(crate) struct TournamentChannels {
+    pub category_id: Option<i64>,
+    pub announce_channel_id: i64,
+    pub register_channel_id: i64,
+    pub bracket_channel_id: i64,
+    pub matches_channel_id: i64,
+    pub draft_channel_id: i64,
+}
+
+pub(crate) async fn set_tournament_channels(
+    pool: &SqlitePool,
+    id: i64,
+    channels: TournamentChannels,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournaments
+        set
+            category_id = ?1,
+            announce_channel_id = ?2,
+            register_channel_id = ?3,
+            bracket_channel_id = ?4,
+            matches_channel_id = ?5,
+            draft_channel_id = ?6
+        where id = ?7
+        ",
+    )
+    .bind(channels.category_id)
+    .bind(channels.announce_channel_id)
+    .bind(channels.register_channel_id)
+    .bind(channels.bracket_channel_id)
+    .bind(channels.matches_channel_id)
+    .bind(channels.draft_channel_id)
+    .bind(id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Resolves a tournament from ANY of its five stored channel ids — the announce
+/// channel (`/tournament create`'s invoking channel) or any of the four it
+/// created. Used by `/tournament admin add|remove|list`'s resolution, which has
+/// no slug argument to go on (see `tournament::access::tournament_admin_only`).
+pub(crate) async fn get_tournament_by_any_channel_id(
+    pool: &SqlitePool,
+    channel_id: i64,
+) -> Result<Option<Tournament>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
+               register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
+               draft_channel_id, checkin_message_id, checkin_closes_at, created_by, created_at,
+               started_at, completed_at
+        from tournaments
+        where announce_channel_id = ?1
+           or register_channel_id = ?1
+           or bracket_channel_id = ?1
+           or draft_channel_id = ?1
+           or matches_channel_id = ?1
+        ",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+// 2. tournament_stages — consumed by chunk 12 (`/tournament start`, generating the bracket)
 
 #[derive(FromRow)]
 pub(crate) struct TournamentStage {
@@ -167,7 +243,7 @@ pub(crate) async fn update_stage_status(pool: &SqlitePool, id: i64, status: &str
     Ok(())
 }
 
-// 3. tournament_rounds
+// 3. tournament_rounds — consumed by chunk 12 (`/tournament start`) and chunk 15 (round presets)
 
 #[derive(FromRow)]
 pub(crate) struct TournamentRound {
@@ -238,7 +314,7 @@ pub(crate) async fn get_round(pool: &SqlitePool, id: i64) -> Result<Option<Tourn
     .inspect_err(log_db_error)
 }
 
-// 4. tournament_players
+// 4. tournament_players — consumed by chunk 9 (registration, which is also binding)
 
 #[derive(FromRow)]
 pub(crate) struct TournamentPlayer {
@@ -373,7 +449,7 @@ pub(crate) async fn set_player_display_name(
     Ok(())
 }
 
-// 5. tournament_entries
+// 5. tournament_entries — consumed starting with chunk 9 (registration) through chunk 11 (seeding)
 
 #[derive(FromRow)]
 pub(crate) struct TournamentEntry {
@@ -556,7 +632,7 @@ pub(crate) async fn set_entry_seed(
     Ok(())
 }
 
-// 6. tournament_sets
+// 6. tournament_sets — consumed starting with chunk 12 (bracket generation creates sets) through chunk 20
 
 #[derive(FromRow)]
 pub(crate) struct TournamentSet {
@@ -836,7 +912,7 @@ pub(crate) async fn set_scheduled_at(
     Ok(())
 }
 
-// 7. tournament_games
+// 7. tournament_games — consumed starting with chunk 18 (set completion) through chunk 22 (result import)
 
 #[derive(FromRow)]
 pub(crate) struct TournamentGame {
@@ -1061,7 +1137,7 @@ pub(crate) async fn is_admin(pool: &SqlitePool, tournament_id: i64, user_id: i64
     .inspect_err(log_db_error)
 }
 
-// 9. tournament_bracket_messages
+// 9. tournament_bracket_messages — consumed by chunk 12 (bracket publication, chunked across several messages)
 
 #[derive(FromRow)]
 pub(crate) struct TournamentBracketMessage {

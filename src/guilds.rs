@@ -1,6 +1,6 @@
 use crate::reply::ephemeral;
 use crate::{Context, Error};
-use serenity::model::id::GuildId;
+use serenity::model::id::{GuildId, RoleId};
 
 /// Which feature set something belongs to (docs/tournament.md §8.0).
 ///
@@ -15,12 +15,23 @@ pub(crate) enum Feature {
     Tournament,
 }
 
-/// Where each feature set lives. Two guilds, both known, so this is configuration
-/// rather than a per-guild table.
+/// Where each feature set lives, plus the one role this codebase currently
+/// hardcodes alongside them. All of it is known and fixed for now, so this is
+/// configuration rather than a per-guild table.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Guilds {
     pub(crate) home: GuildId,
     pub(crate) tournament: GuildId,
+    /// Who may run `/tournament create` (docs/tournament.md §8.4), besides
+    /// anyone with `MANAGE_GUILD` (that bypass always applies — see
+    /// `tournament::access` — so the tournament stays creatable even if this
+    /// role is never assigned, misconfigured, or later deleted). Hardcoded, with
+    /// no env override (unlike the guild ids below): a scratch guild used for
+    /// local testing would need its own different role id anyway, and a local
+    /// admin already has `MANAGE_GUILD` on their own scratch server, so an
+    /// override would buy nothing there. Real configurability is a later
+    /// improvement (a proper per-guild setting), not an env var.
+    pub(crate) tournament_organizer_role: RoleId,
 }
 
 // Both guilds, in the source. A guild id is an identifier, not a credential — it is
@@ -29,9 +40,10 @@ pub(crate) struct Guilds {
 // environment. There are exactly two, and both are known (docs/tournament.md §8.0).
 const HOME_GUILD: GuildId = GuildId::new(1262320259252097034);
 const TOURNAMENT_GUILD: GuildId = GuildId::new(1154585078811340850);
+const TOURNAMENT_ORGANIZER_ROLE: RoleId = RoleId::new(1477224039817678940);
 
 impl Guilds {
-    /// The constants above, unless the environment names something else.
+    /// The guild constants above, unless the environment names something else.
     ///
     /// The overrides let a local run point at a scratch server, and they mean this
     /// change cannot break the deployed bot: if `GUILD_ID` is still set in production
@@ -40,6 +52,7 @@ impl Guilds {
         let guilds = Self {
             home: from_env("GUILD_ID", HOME_GUILD),
             tournament: from_env("TOURNAMENT_GUILD_ID", TOURNAMENT_GUILD),
+            tournament_organizer_role: TOURNAMENT_ORGANIZER_ROLE,
         };
         ensure_distinct(guilds.home, guilds.tournament);
         guilds
@@ -93,6 +106,13 @@ pub(crate) async fn home_only(ctx: Context<'_>) -> Result<bool, Error> {
     allowed_here(ctx, Feature::Home).await
 }
 
+/// Command check for the tournament guild's commands. Mirrors `home_only`
+/// exactly (docs/tournament.md §8.0) — defence in depth, not the mechanism,
+/// since registration is already per guild.
+pub(crate) async fn tournament_only(ctx: Context<'_>) -> Result<bool, Error> {
+    allowed_here(ctx, Feature::Tournament).await
+}
+
 async fn allowed_here(ctx: Context<'_>, feature: Feature) -> Result<bool, Error> {
     if ctx.data().guilds.allows(feature, ctx.guild_id()) {
         return Ok(true);
@@ -107,16 +127,18 @@ async fn allowed_here(ctx: Context<'_>, feature: Feature) -> Result<bool, Error>
 #[cfg(test)]
 mod tests {
     use super::{Feature, Guilds, HOME_GUILD, TOURNAMENT_GUILD, ensure_distinct, resolve};
-    use serenity::model::id::GuildId;
+    use serenity::model::id::{GuildId, RoleId};
 
     const HOME: GuildId = GuildId::new(1);
     const TOURNAMENT: GuildId = GuildId::new(2);
     const ELSEWHERE: GuildId = GuildId::new(3);
+    const ORGANIZER_ROLE: RoleId = RoleId::new(9);
 
     fn two_guilds() -> Guilds {
         Guilds {
             home: HOME,
             tournament: TOURNAMENT,
+            tournament_organizer_role: ORGANIZER_ROLE,
         }
     }
 

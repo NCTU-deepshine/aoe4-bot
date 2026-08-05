@@ -1,11 +1,18 @@
 use crate::aoe4world::search_players;
 use crate::db::{bind_account, to_db_id};
-use crate::guilds::home_only;
+use crate::guilds::{home_only, tournament_only};
 use crate::ranked::try_create_ranked_without_account;
 use crate::refresh::do_refresh;
+use crate::reply::ephemeral;
+use crate::tournament::access::{create_tournament_only, tournament_admin_only};
+use crate::tournament::db as tournament_db;
+use crate::tournament::slug::{slugify, validate_slug};
 use crate::{Context, Data, Error};
 use regex::Regex;
-use serenity::all::{AutocompleteChoice, ChannelId, GetMessages};
+use serenity::all::{
+    AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, PermissionOverwrite,
+    PermissionOverwriteType, Permissions, User,
+};
 use serenity::json::json;
 use tracing::{error, info};
 
@@ -18,11 +25,9 @@ pub(crate) fn home() -> Vec<Command> {
     vec![rebuild(), bind(), id(), name(), refresh(), check()]
 }
 
-/// The tournament guild's commands. Empty until §8.4's arrive — the list exists now
-/// so registration is already split, and so a later chunk adding a tournament
-/// command has an obvious place to put it that is not the home guild.
+/// The tournament guild's commands (§8.4).
 pub(crate) fn tournament() -> Vec<Command> {
-    Vec::new()
+    vec![tournament_root()]
 }
 
 #[poise::command(
@@ -163,6 +168,260 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
     do_refresh(ctx.http(), ctx.data()).await?;
     ctx.say("刷新完成").await?;
+    Ok(())
+}
+
+// `tournament_root` rather than `tournament`, which is already the name of the
+// `crate::tournament` module and of this file's own list-returning `tournament()`
+// above; `rename` keeps the Discord-visible command `/tournament` regardless.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    rename = "tournament",
+    subcommands("create", "admin"),
+    subcommand_required
+)]
+pub async fn tournament_root(_: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+// Creates a tournament (docs/tournament.md §8.1): the invoking channel becomes
+// its announce channel, and `#{slug}-register|bracket|draft|matches` are created
+// alongside it in the invoking channel's existing category (or uncategorized, if
+// the invoking channel has none). The creator is registered as the first admin.
+/// Creates a tournament: makes its channels and registers you as the first admin.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "create_tournament_only",
+    required_bot_permissions = "MANAGE_CHANNELS"
+)]
+pub async fn create(
+    ctx: Context<'_>,
+    #[description = "Display name (defaults to this channel's category name)"] name: Option<String>,
+    #[description = "Channel prefix (defaults to a slug derived from the name)"] slug: Option<String>,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+
+    // guild_only + tournament_only already guarantee a real guild text channel,
+    // the same shortcut rebuild() takes on the same guarantee.
+    let announce_channel = ctx.guild_channel().await.unwrap();
+    let category_id = announce_channel.parent_id;
+
+    let name = match name.filter(|n| !n.trim().is_empty()) {
+        Some(name) => name,
+        None => match category_name(ctx, category_id).await? {
+            Some(name) => name,
+            None => {
+                ephemeral(
+                    ctx,
+                    "This channel has no category to name the tournament after — please provide a name.",
+                )
+                .await?;
+                return Ok(());
+            },
+        },
+    };
+
+    let slug = match slug.filter(|s| !s.trim().is_empty()) {
+        Some(slug) => slug,
+        None => match slugify(&name) {
+            Some(slug) => slug,
+            None => {
+                ephemeral(
+                    ctx,
+                    "Couldn't derive a slug from that name — please provide one explicitly.",
+                )
+                .await?;
+                return Ok(());
+            },
+        },
+    };
+
+    if let Err(err) = validate_slug(&slug) {
+        ephemeral(ctx, err.message()).await?;
+        return Ok(());
+    }
+
+    let pool = &ctx.data().database;
+    if tournament_db::get_tournament_by_slug(pool, &slug).await?.is_some() {
+        ephemeral(ctx, format!("A tournament with slug `{slug}` already exists.")).await?;
+        return Ok(());
+    }
+
+    let read_only_to_everyone = PermissionOverwrite {
+        allow: Permissions::empty(),
+        deny: Permissions::SEND_MESSAGES,
+        kind: PermissionOverwriteType::Role(ctx.guild_id().unwrap().everyone_role()),
+    };
+
+    let register = create_tournament_channel(ctx, &format!("{slug}-register"), category_id, vec![]).await?;
+    let bracket = create_tournament_channel(
+        ctx,
+        &format!("{slug}-bracket"),
+        category_id,
+        vec![read_only_to_everyone.clone()],
+    )
+    .await?;
+    let draft = create_tournament_channel(
+        ctx,
+        &format!("{slug}-draft"),
+        category_id,
+        vec![read_only_to_everyone.clone()],
+    )
+    .await?;
+    let matches = create_tournament_channel(
+        ctx,
+        &format!("{slug}-matches"),
+        category_id,
+        vec![read_only_to_everyone],
+    )
+    .await?;
+
+    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let tournament_id = tournament_db::insert_tournament(pool, &slug, &name, user_id).await?;
+    tournament_db::set_tournament_channels(
+        pool,
+        tournament_id,
+        tournament_db::TournamentChannels {
+            category_id: category_id.map(|id| i64::try_from(id.get()).unwrap()),
+            announce_channel_id: i64::try_from(announce_channel.id.get()).unwrap(),
+            register_channel_id: i64::try_from(register.id.get()).unwrap(),
+            bracket_channel_id: i64::try_from(bracket.id.get()).unwrap(),
+            matches_channel_id: i64::try_from(matches.id.get()).unwrap(),
+            draft_channel_id: i64::try_from(draft.id.get()).unwrap(),
+        },
+    )
+    .await?;
+    tournament_db::add_admin(pool, tournament_id, user_id, user_id).await?;
+
+    let category_note = if category_id.is_none() {
+        "\n(This channel has no category, so the new channels are uncategorized.)"
+    } else {
+        ""
+    };
+    ctx.say(format!(
+        "Created **{name}** (`{slug}`): <#{}> <#{}> <#{}> <#{}>{category_note}",
+        register.id, bracket.id, draft.id, matches.id,
+    ))
+    .await?;
+    Ok(())
+}
+
+async fn category_name(ctx: Context<'_>, category_id: Option<ChannelId>) -> Result<Option<String>, Error> {
+    let Some(category_id) = category_id else {
+        return Ok(None);
+    };
+    Ok(ctx
+        .http()
+        .get_channel(category_id)
+        .await?
+        .guild()
+        .map(|channel| channel.name))
+}
+
+async fn create_tournament_channel(
+    ctx: Context<'_>,
+    name: &str,
+    category_id: Option<ChannelId>,
+    overwrites: Vec<PermissionOverwrite>,
+) -> Result<GuildChannel, Error> {
+    let mut builder = CreateChannel::new(name).permissions(overwrites);
+    if let Some(category_id) = category_id {
+        builder = builder.category(category_id);
+    }
+    Ok(ctx.guild_id().unwrap().create_channel(ctx.http(), builder).await?)
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    subcommands("add", "remove", "list"),
+    subcommand_required
+)]
+pub async fn admin(_: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+/// Resolves the tournament for `/tournament admin *` from the invoking channel —
+/// the same lookup `tournament_admin_only` already did to authorize the call, but
+/// poise checks don't hand their result forward to the command body.
+async fn resolve_tournament_by_channel(ctx: Context<'_>) -> Result<Option<tournament_db::Tournament>, Error> {
+    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    Ok(tournament_db::get_tournament_by_any_channel_id(&ctx.data().database, channel_id).await?)
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_admin_only"
+)]
+pub async fn add(ctx: Context<'_>, user: User) -> Result<(), Error> {
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let added_by = i64::try_from(ctx.author().id.get()).unwrap();
+    let target = i64::try_from(user.id.get()).unwrap();
+    tournament_db::add_admin(&ctx.data().database, tournament.id, target, added_by).await?;
+    ephemeral(
+        ctx,
+        format!("Added {} as an admin for **{}**.", user.name, tournament.name),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_admin_only"
+)]
+pub async fn remove(ctx: Context<'_>, user: User) -> Result<(), Error> {
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let target = i64::try_from(user.id.get()).unwrap();
+    tournament_db::remove_admin(&ctx.data().database, tournament.id, target).await?;
+    ephemeral(
+        ctx,
+        format!("Removed {} as an admin for **{}**.", user.name, tournament.name),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_admin_only"
+)]
+pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let admins = tournament_db::list_admins(&ctx.data().database, tournament.id).await?;
+    let body = if admins.is_empty() {
+        "No admins yet.".to_string()
+    } else {
+        admins
+            .iter()
+            .map(|a| format!("<@{}>", a.user_id))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    ephemeral(ctx, format!("Admins for **{}**:\n{body}", tournament.name)).await?;
     Ok(())
 }
 

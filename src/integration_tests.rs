@@ -485,4 +485,94 @@ mod tests {
         assert_eq!(player.aoe4_id, 200);
         assert_eq!(player.display_name, "Name");
     }
+
+    // Chunk 7 (`/tournament create`, the admin list) gate tests.
+
+    #[tokio::test]
+    async fn set_tournament_channels_round_trips() {
+        let pool = test_pool().await;
+        let id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+
+        crate::tournament::db::set_tournament_channels(
+            &pool,
+            id,
+            crate::tournament::db::TournamentChannels {
+                category_id: Some(10),
+                announce_channel_id: 20,
+                register_channel_id: 21,
+                bracket_channel_id: 22,
+                matches_channel_id: 23,
+                draft_channel_id: 24,
+            },
+        )
+        .await
+        .unwrap();
+
+        let tournament = crate::tournament::db::get_tournament(&pool, id).await.unwrap().unwrap();
+        assert_eq!(tournament.category_id, Some(10));
+        assert_eq!(tournament.announce_channel_id, Some(20));
+        assert_eq!(tournament.register_channel_id, Some(21));
+        assert_eq!(tournament.bracket_channel_id, Some(22));
+        assert_eq!(tournament.matches_channel_id, Some(23));
+        assert_eq!(tournament.draft_channel_id, Some(24));
+    }
+
+    #[tokio::test]
+    async fn resolves_a_tournament_from_any_of_its_five_channels() {
+        let pool = test_pool().await;
+        let id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::set_tournament_channels(
+            &pool,
+            id,
+            crate::tournament::db::TournamentChannels {
+                category_id: None,
+                announce_channel_id: 100,
+                register_channel_id: 101,
+                bracket_channel_id: 102,
+                matches_channel_id: 103,
+                draft_channel_id: 104,
+            },
+        )
+        .await
+        .unwrap();
+
+        for channel_id in [100, 101, 102, 103, 104] {
+            let found = crate::tournament::db::get_tournament_by_any_channel_id(&pool, channel_id)
+                .await
+                .unwrap()
+                .expect("every stored channel id should resolve the tournament");
+            assert_eq!(found.id, id);
+        }
+
+        assert!(
+            crate::tournament::db::get_tournament_by_any_channel_id(&pool, 999)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_list_add_and_remove_round_trip() {
+        let pool = test_pool().await;
+        let id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+        // Mirrors what `create` does: the creator is added as the first admin.
+        crate::tournament::db::add_admin(&pool, id, 1, 1).await.unwrap();
+
+        crate::tournament::db::add_admin(&pool, id, 2, 1).await.unwrap();
+        let admins = crate::tournament::db::list_admins(&pool, id).await.unwrap();
+        assert_eq!(admins.len(), 2);
+        assert!(crate::tournament::db::is_admin(&pool, id, 2).await.unwrap());
+
+        crate::tournament::db::remove_admin(&pool, id, 2).await.unwrap();
+        let admins = crate::tournament::db::list_admins(&pool, id).await.unwrap();
+        assert_eq!(admins.len(), 1);
+        assert!(!crate::tournament::db::is_admin(&pool, id, 2).await.unwrap());
+    }
 }
