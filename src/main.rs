@@ -1,11 +1,13 @@
 use crate::emperor::Emperor;
 use crate::guilds::{Feature, Guilds};
 use crate::refresh::do_refresh;
+use crate::tournament::throttle::EditThrottle;
 use serenity::all::Http;
 use serenity::prelude::*;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
 
@@ -28,6 +30,11 @@ mod tournament;
 struct Data {
     database: SqlitePool,
     guilds: Guilds,
+    // Shared with `tournament::dispatch::Dispatcher` (docs/tournament.md §8.5:
+    // "edits must be throttled") — a command-triggered panel edit and a
+    // button-triggered one must coalesce against each other, not just within
+    // their own path, which is only true if both hold the same instance.
+    panel_throttle: Arc<EditThrottle>,
 }
 
 #[tokio::main]
@@ -66,7 +73,13 @@ async fn main() {
     let home_count = all_commands.len();
     all_commands.extend(commands::tournament());
 
+    // One instance, shared between the poise `Data` (the slash-command path) and
+    // the `Dispatcher` event handler (the button path) below — see the field
+    // doc comment on `Data::panel_throttle`.
+    let panel_throttle = Arc::new(EditThrottle::new(tournament::panel::PANEL_EDIT_MIN_INTERVAL));
+
     let pool_cloned = pool.clone();
+    let panel_throttle_cloned = panel_throttle.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: all_commands,
@@ -89,6 +102,7 @@ async fn main() {
                 Ok(Data {
                     database: pool_cloned,
                     guilds,
+                    panel_throttle: panel_throttle_cloned,
                 })
             })
         })
@@ -102,7 +116,11 @@ async fn main() {
     )
     .framework(framework)
     .event_handler(Emperor::new(guilds))
-    .event_handler(tournament::dispatch::Dispatcher::new(guilds))
+    .event_handler(tournament::dispatch::Dispatcher::new(
+        guilds,
+        pool.clone(),
+        panel_throttle.clone(),
+    ))
     .await
     .expect("Err creating client");
     info!("prepared client");
@@ -114,11 +132,13 @@ async fn main() {
                 Box::pin({
                     let token_cloned = token.clone();
                     let pool_cloned = pool.clone();
+                    let panel_throttle_cloned = panel_throttle.clone();
                     async move {
                         let http = Http::new(&token_cloned);
                         let data = Data {
                             database: pool_cloned,
                             guilds,
+                            panel_throttle: panel_throttle_cloned,
                         };
                         info!("refresh triggered by cron");
                         do_refresh(&http, &data).await.unwrap();

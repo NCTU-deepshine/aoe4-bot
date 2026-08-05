@@ -1,9 +1,10 @@
 //! Parsing and building `custom_id`s for the button panels (docs/tournament.md
 //! §8.5, §8.7): `"<action>:<entity_id>"`, e.g. `register:42`. Pure and
 //! Discord-free, so every case is unit-tested directly; `dispatch::Dispatcher`
-//! is the only caller today, and later panel chunks (9, 10, 20, 22) will build
-//! their buttons' ids through `Action::custom_id` so they round-trip through
-//! the same code path `parse_custom_id` reads.
+//! parses every custom_id, and `panel::render` (chunk 9) is the first to build
+//! one — later panel chunks (10, 20, 22) will build theirs through
+//! `Action::custom_id` too, so every button round-trips through the same code
+//! path `parse_custom_id` reads.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Action {
@@ -43,10 +44,10 @@ impl Action {
         matches!(self, Action::Register | Action::SetDone)
     }
 
-    /// The `custom_id` a button carries. Not built by any button yet — that
-    /// starts with chunk 9's registration panel — only this module's own
-    /// round-trip tests call it until then.
-    #[allow(dead_code)]
+    /// The `custom_id` a button carries. Built by `panel::render`'s Register and
+    /// Withdraw buttons (chunk 9) — later panel chunks (10, 20, 22) will build
+    /// theirs through this too, so every button round-trips through the same
+    /// `parse_custom_id` this module tests directly.
     pub(crate) fn custom_id(self, entity_id: i64) -> String {
         format!("{}:{entity_id}", self.tag())
     }

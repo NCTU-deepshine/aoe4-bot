@@ -575,4 +575,342 @@ mod tests {
         assert_eq!(admins.len(), 1);
         assert!(!crate::tournament::db::is_admin(&pool, id, 2).await.unwrap());
     }
+
+    // Chunk 9 (registration, which is also binding) gate tests.
+
+    async fn setup_tournament(pool: &SqlitePool, status: &str) -> crate::tournament::db::Tournament {
+        let id = crate::tournament::db::insert_tournament(pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+        if status != "registration" {
+            crate::tournament::db::update_tournament_status(pool, id, status)
+                .await
+                .unwrap();
+        }
+        crate::tournament::db::get_tournament(pool, id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn register_new_player_and_entry_rolls_back_together_on_failure() {
+        let pool = test_pool().await;
+        // A non-existent tournament_id makes the entry insert fail its FK,
+        // forcing the whole transaction to roll back — proving the player
+        // insert does not survive on its own (docs/tournament.md §8.5: "neither
+        // survives if the other fails").
+        let result = crate::tournament::db::register_new_player_and_entry(&pool, 999, 1, 100, "A", Some(1200)).await;
+        assert!(result.is_err());
+        assert!(
+            crate::tournament::db::get_player(&pool, 1).await.unwrap().is_none(),
+            "the player row survived a rolled-back transaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_new_player_and_entry_writes_the_elo_snapshot() {
+        let pool = test_pool().await;
+        let tournament_id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::register_new_player_and_entry(&pool, tournament_id, 1, 100, "A", Some(1234))
+            .await
+            .unwrap();
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.elo, Some(1234));
+    }
+
+    #[tokio::test]
+    async fn has_running_tournament_entry_reflects_status() {
+        let pool = test_pool().await;
+        let tournament_id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament_id, 1, 100, "A")
+            .await
+            .unwrap();
+
+        assert!(
+            !crate::tournament::db::has_running_tournament_entry(&pool, 1)
+                .await
+                .unwrap()
+        );
+
+        crate::tournament::db::update_tournament_status(&pool, tournament_id, "running")
+            .await
+            .unwrap();
+        assert!(
+            crate::tournament::db::has_running_tournament_entry(&pool, 1)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_register_message_id_round_trips() {
+        let pool = test_pool().await;
+        let id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::set_register_message_id(&pool, id, 555)
+            .await
+            .unwrap();
+
+        let tournament = crate::tournament::db::get_tournament(&pool, id).await.unwrap().unwrap();
+        assert_eq!(tournament.register_message_id, Some(555));
+    }
+
+    #[tokio::test]
+    async fn register_reactivates_a_withdrawn_entry() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::update_entry_status(&pool, tournament.id, 1, "withdrawn")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::Reactivated { .. }
+        ));
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.status, "active");
+    }
+
+    #[tokio::test]
+    async fn register_is_idempotent_for_an_active_entry() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::AlreadyRegistered { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_asks_a_first_timer_for_a_profile() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::NeedsProfileArgument
+        );
+    }
+
+    #[tokio::test]
+    async fn register_refuses_a_different_profile_when_already_bound() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, Some(200))
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::AlreadyBoundToDifferentProfile { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_with_your_own_current_profile_falls_through_to_normal_signup() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, Some(100))
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::Registered { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_rejects_a_profile_already_claimed_by_someone_else() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 2, 100, "B")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, Some(100))
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::ProfileClaimedByAnother { other_user_id: 2, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_is_refused_once_the_tournament_has_started() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "running").await;
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::RegistrationClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn register_for_a_later_tournament_needs_no_profile_argument() {
+        let pool = test_pool().await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::Registered { .. }
+        ));
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.aoe4_id, 100);
+    }
+
+    #[tokio::test]
+    async fn withdraw_outcomes_not_registered_success_then_idempotent() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        let outcome = crate::tournament::registration::withdraw(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::tournament::registration::WithdrawOutcome::NotRegistered);
+
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::withdraw(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::tournament::registration::WithdrawOutcome::Success);
+
+        let outcome = crate::tournament::registration::withdraw(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::WithdrawOutcome::AlreadyWithdrawn
+        );
+    }
+
+    #[tokio::test]
+    async fn withdraw_is_refused_once_the_tournament_has_started() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "running").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::withdraw(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::WithdrawOutcome::TournamentAlreadyStarted
+        );
+    }
+
+    #[tokio::test]
+    async fn rebind_requires_an_existing_profile() {
+        let pool = test_pool().await;
+        let outcome = crate::tournament::registration::rebind(&pool, 1, 100).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RebindOutcome::NoExistingProfile
+        );
+    }
+
+    #[tokio::test]
+    async fn rebind_rejects_a_profile_claimed_by_someone_else() {
+        let pool = test_pool().await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_player_if_absent(&pool, 2, 200, "B")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::rebind(&pool, 1, 200).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RebindOutcome::ProfileClaimedByAnother { other_user_id: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn rebind_is_refused_while_an_entry_is_running() {
+        let pool = test_pool().await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+            .await
+            .unwrap();
+        let tournament_id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament_id, 1, 100, "A")
+            .await
+            .unwrap();
+        crate::tournament::db::update_tournament_status(&pool, tournament_id, "running")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::rebind(&pool, 1, 999).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RebindOutcome::RefusedRunningTournament
+        );
+    }
 }

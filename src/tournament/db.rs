@@ -151,6 +151,22 @@ pub(crate) async fn set_tournament_channels(
     Ok(())
 }
 
+/// The registration panel's message id (docs/tournament.md §8.5) — set once, right
+/// after `/tournament create` posts the panel to the register channel it just made.
+pub(crate) async fn set_register_message_id(
+    pool: &SqlitePool,
+    id: i64,
+    register_message_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set register_message_id = ?1 where id = ?2")
+        .bind(register_message_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 /// Resolves a tournament from ANY of its five stored channel ids — the announce
 /// channel (`/tournament create`'s invoking channel) or any of the four it
 /// created. Used by `/tournament admin add|remove|list`'s resolution, which has
@@ -447,6 +463,83 @@ pub(crate) async fn set_player_display_name(
 
     tx.commit().await.inspect_err(log_db_error)?;
     Ok(())
+}
+
+/// A first sign-up (docs/tournament.md §8.5): writes `tournament_players` and the
+/// entry together, atomically — neither survives if the other fails. Only called
+/// when the caller has already confirmed no `tournament_players` row exists for
+/// `user_id`; a concurrent sign-up racing for the same `aoe4_id` still surfaces as
+/// a genuine UNIQUE constraint failure on `tournament_players.aoe4_id`, which the
+/// caller (`tournament::registration`) maps to a friendly message rather than
+/// treating as an unexpected error. `elo` is the profile's `rm_1v1_elo` rating,
+/// already in hand from the same aoe4world fetch that resolved `display_name` —
+/// snapshotted now and refreshed again at seeding (chunk 11).
+pub(crate) async fn register_new_player_and_entry(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    aoe4_id: i64,
+    display_name: &str,
+    elo: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        insert into tournament_players (user_id, aoe4_id, display_name)
+        values (?1, ?2, ?3)
+        ",
+    )
+    .bind(user_id)
+    .bind(aoe4_id)
+    .bind(display_name)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name, elo)
+        values (?1, ?2, ?3, ?4, ?5)
+        ",
+    )
+    .bind(tournament_id)
+    .bind(user_id)
+    .bind(aoe4_id)
+    .bind(display_name)
+    .bind(elo)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    tx.commit().await.inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Whether `user_id` holds an entry in any `running` tournament — the guard for
+/// `/tournament rebind` (docs/tournament.md §4 notes: "a rebind is refused while
+/// the user has an entry in a running tournament", since the profile is
+/// snapshotted onto entries and sets already reference the player). Deliberately
+/// global, not scoped to one tournament, and deliberately narrower than
+/// registration/withdrawal's "has the tournament started" gate — a `completed` or
+/// `canceled` tournament's entry is frozen history, not something a rebind could
+/// disturb.
+pub(crate) async fn has_running_tournament_entry(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r"
+        select exists(
+            select 1
+            from tournament_entries e
+            join tournaments t on t.id = e.tournament_id
+            where e.user_id = ?1
+              and t.status = 'running'
+        )
+        ",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .inspect_err(log_db_error)
 }
 
 // 5. tournament_entries — consumed starting with chunk 9 (registration) through chunk 11 (seeding)

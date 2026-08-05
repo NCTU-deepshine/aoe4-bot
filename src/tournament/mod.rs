@@ -19,12 +19,15 @@ pub(crate) mod db;
 // separate from `Emperor`, which is home-guild meme/reaction logic with no
 // tournament knowledge; registered as a second handler in `main.rs`.
 pub(crate) mod dispatch;
+// The registration panel (chunk 9, §8.5): rendering plus the Discord/DB glue
+// `commands::create` and `dispatch::Dispatcher` call into.
+pub(crate) mod panel;
 #[allow(dead_code)]
 pub(crate) mod render;
+// `/tournament register|rebind|withdraw`'s business logic (chunk 9, §8.5, §4).
+pub(crate) mod registration;
 // `/tournament create`'s slug argument (§8.1).
 pub(crate) mod slug;
-// The panel-edit throttle (§8.5, "Edits must be throttled"). Consumed starting
-// with chunk 9's registration panel; only this module's own tests exercise it
-// until then.
-#[allow(dead_code)]
+// The panel-edit throttle (§8.5, "Edits must be throttled"). Consumed by
+// chunk 9's registration panel (`panel::refresh`).
 pub(crate) mod throttle;

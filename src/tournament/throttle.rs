@@ -4,8 +4,9 @@
 //! callers own the actual edit and the "final edit when the phase closes"
 //! that keeps the panel eventually consistent.
 //!
-//! Not consumed yet — no panel exists until chunk 9 — so `mod throttle` in
-//! `tournament/mod.rs` carries `#[allow(dead_code)]` until then.
+//! Consumed by `panel::refresh` (chunk 9), which shares one `EditThrottle`
+//! instance (via `Arc`, `main.rs`) between the slash-command and button paths so
+//! edits from either coalesce against each other.
 
 use serenity::model::id::MessageId;
 use std::collections::HashMap;

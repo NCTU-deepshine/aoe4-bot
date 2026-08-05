@@ -7,6 +7,7 @@ use crate::reply::ephemeral;
 use crate::tournament::access::{create_tournament_only, tournament_admin_only};
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
+use crate::tournament::{panel, registration};
 use crate::{Context, Data, Error};
 use regex::Regex;
 use serenity::all::{
@@ -179,7 +180,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
     guild_only,
     check = "tournament_only",
     rename = "tournament",
-    subcommands("create", "admin"),
+    subcommands("create", "admin", "register", "rebind", "withdraw"),
     subcommand_required
 )]
 pub async fn tournament_root(_: Context<'_>) -> Result<(), Error> {
@@ -296,6 +297,13 @@ pub async fn create(
     )
     .await?;
     tournament_db::add_admin(pool, tournament_id, user_id, user_id).await?;
+
+    // Tournaments start in `registration` status immediately, with no separate
+    // "open registration" command (docs/tournament.md §8.3) — so this is the only
+    // place the panel can ever get posted.
+    let register_message_id = panel::post_initial(ctx.http(), register.id, tournament_id, &name).await?;
+    tournament_db::set_register_message_id(pool, tournament_id, i64::try_from(register_message_id.get()).unwrap())
+        .await?;
 
     let category_note = if category_id.is_none() {
         "\n(This channel has no category, so the new channels are uncategorized.)"
@@ -422,6 +430,72 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
             .join("\n")
     };
     ephemeral(ctx, format!("Admins for **{}**:\n{body}", tournament.name)).await?;
+    Ok(())
+}
+
+// Registers for the tournament resolved from the invoking channel (any of its
+// five stored channels — see `resolve_tournament_by_channel`). A first sign-up
+// also binds an aoe4world profile; there is no separate bind step
+// (docs/tournament.md §8.5). Only ELO is snapshotted here — ATR is a bulk
+// seeding-time fetch (chunk 11, §6 "Reuse"), not a per-registrant one.
+/// Registers you for the tournament. Give `aoe4_id` only on your first ever sign-up.
+#[poise::command(slash_command, guild_only, check = "tournament_only")]
+pub async fn register(
+    ctx: Context<'_>,
+    #[description = "Your aoe4world profile — required on your first ever sign-up only"]
+    #[autocomplete = "auto_complete_id"]
+    aoe4_id: Option<i32>,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let outcome = registration::register(pool, &tournament, user_id, aoe4_id.map(i64::from)).await?;
+    ephemeral(ctx, outcome.message(&tournament.name)).await?;
+
+    if outcome.changed_state() {
+        panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+    }
+    Ok(())
+}
+
+// Tournament-independent — the player list is global (§4), so unlike
+// register/withdraw this resolves no tournament by channel.
+/// Changes which aoe4world profile is bound to your Discord account.
+#[poise::command(slash_command, guild_only, check = "tournament_only")]
+pub async fn rebind(
+    ctx: Context<'_>,
+    #[description = "The aoe4world profile to bind instead"]
+    #[autocomplete = "auto_complete_id"]
+    aoe4_id: i32,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let outcome = registration::rebind(&ctx.data().database, user_id, i64::from(aoe4_id)).await?;
+    ephemeral(ctx, outcome.message()).await?;
+    Ok(())
+}
+
+/// Withdraws you from the tournament, before it has started.
+#[poise::command(slash_command, guild_only, check = "tournament_only")]
+pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let outcome = registration::withdraw(pool, &tournament, user_id).await?;
+    ephemeral(ctx, outcome.message(&tournament.name)).await?;
+
+    if outcome.changed_state() {
+        panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+    }
     Ok(())
 }
 
