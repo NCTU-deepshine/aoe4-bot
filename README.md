@@ -41,6 +41,13 @@ cargo test           # unit and in-memory database tests
 cargo test -- --ignored   # additionally hit the live aoe4world API
 ```
 
+`data/schema.db` (gitignored) is a local, data-free SQLite file — `schema.sql` plus every migration applied —
+kept around purely so an IDE can introspect the current schema. After adding or editing a migration, refresh it:
+
+```sh
+sqlx migrate run --database-url sqlite:data/schema.db
+```
+
 ## Deployment
 
 Pushing to `main` deploys to [Fly.io](https://fly.io) via `.github/workflows/fly-deploy.yml`. The

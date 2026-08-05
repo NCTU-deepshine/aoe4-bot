@@ -473,7 +473,7 @@ create table if not exists tournament_rounds (
 create table if not exists tournament_players (
   user_id bigint primary key,               -- discord user; one main profile each
   aoe4_id bigint not null unique,           -- and one user per profile
-  display_name text not null,               -- snapshot; aoe4world names change
+  display_name text not null,               -- player-editable; seeded from aoe4world at first sign-up
   bound_at timestamp not null default (datetime('now')),
   updated_at timestamp
 );
@@ -488,7 +488,7 @@ create table if not exists tournament_entries (
   aoe4_id bigint not null,                  -- snapshot, not a fk; see above
   seed integer,                             -- FINAL seed; the organizer may override
   suggested_seed integer,                   -- what the bot computed, kept for audit
-  display_name text not null,               -- snapshot; aoe4world names change
+  display_name text not null,               -- copy of tournament_players.display_name, kept in sync; see notes
   elo integer,                              -- snapshot of rm_1v1_elo.rating
   atr real,                                 -- snapshot of esports tournament elo
   atr_source text check (atr_source in ('esports','manual')),
@@ -515,9 +515,8 @@ create table if not exists tournament_sets (
   winner_user_id bigint references tournament_players(user_id),
   status text not null default 'pending'
     check (status in ('pending','ready','drafting','in_progress','completed','bye','walkover')),
-  draft_external_id text,                   -- the tool's 24-hex id; overwritten by a redraft (§8.7)
-  draft_url text,
-  draft_slots_swapped integer not null default 0,   -- 1 if the tool's slot 1 is our slot 2
+  draft_external_id text,                   -- the tool's 24-hex id; overwritten by a redraft (§8.7).
+                                              -- the room link is derived (§3), never stored: see notes
   draft_synced_at timestamp,
   draft_announce_message_id bigint,         -- post in the draft channel; null = not announced yet (§8.7)
   redraft_count integer not null default 0, -- guards /set redraft; also a signal something went wrong
@@ -567,22 +566,32 @@ create table if not exists tournament_games (
   the natural key, and sets and games reference it for the same reason. The profile is snapshotted onto the entry
   so that changing a main later cannot silently re-attribute finished games. A rebind is refused while the user
   has an entry in a `running` tournament.
+- **`display_name` is player-editable, and deliberately not frozen like the rest of the snapshot.** Unlike
+  `aoe4_id`/`elo`/`atr`, a name carries no game-result attribution, so there is nothing to protect by freezing it.
+  Setting it is its own action, independent of `/tournament rebind` — changing which profile is bound and
+  changing how a name displays are unrelated — and it writes through to every entry in a tournament that has not
+  yet completed or been canceled, so brackets and threads always show the current name. A finished tournament
+  keeps whatever name was in effect when it ended.
 - **`slot1`/`slot2`, not `p1`/`p2`.** Slots exist before players do, and `winner_advances_to_slot` /
   `loser_advances_to_slot` use the same numbering.
 - **`tournaments` has no `best_of`.** A Bo5 final is the last round's `best_of`. A Swiss stage with Bo1 early
   rounds and Bo3 late rounds is expressible with no schema change. This is the whole reason rounds are a table.
 - **`stage.config` and `round.rules` are JSON escape hatches** so a new format's knobs don't each require a
   migration. Concepts shared across formats (`best_of`, `bracket`) stay real columns.
-- **`draft_slots_swapped`** is not insurance against a hand-made draft — it is the correction for the normal
-  case. Seats are claimed first-come and the bot cannot assign them (§3.2 item 3), so if the players sit the
-  wrong way round an admin flips this rather than letting a win be attributed to the wrong player. The primary
-  remedy is `/set redraft`; this covers a set already under way when someone notices.
+- **There is no column for a wrong seat.** Seats are claimed first-come and the bot cannot assign them (§3.2
+  item 3), so a player sitting in the other seat is possible in principle. For now this is assumed not to
+  happen — the panel's seat instruction (§8.7) is trusted rather than defended against — and `/set redraft` is
+  the only remedy if it ever does. A correction bit (flip the mapping without redrafting) is one column to add
+  later if this assumption stops holding.
 - **There is no ratings cache table.** An earlier draft had one mirroring the esports leaderboard — name, rank,
   active rank, active flag, country, Liquipedia name — of which the design only ever read `rating`. It is gone
   entirely, not just trimmed: ATR for a whole field is **one request** (§6), the durable record is the `atr`
   snapshot on `tournament_entries`, and a cache would buy a table, a sync command and staleness reasoning for no
   benefit at this scale. If rate limits ever bite, it comes back as three columns — `aoe4_id`, `rating`,
   `fetched_at` — and nothing else.
+- **There is no `draft_url` column.** The tool exposes one fixed base URL with a documented path scheme (§3):
+  the room is `<draft_base_url>/match/<draft_external_id>`. Storing a second column that must be kept in step
+  with `draft_external_id` on every redraft buys nothing a one-line format doesn't already give for free.
 - **`draft_preset_id` holds an id, not a name.** Preset names are neither unique nor stable — any user can name
   a preset anything — and `POST /api/matches` takes an ObjectId anyway.
 - **A redraft overwrites the pointer; there is no draft-history table.** The bot only ever syncs the current
@@ -665,8 +674,8 @@ dropped entirely; seeding must tolerate `None`, which is why every rating column
 
 **Primary path — import.** A set holds `draft_external_id` — the *current* draft, since `/set redraft` can
 replace it. On a poll tick or an on-demand refresh, fetch item 1, map the draft's slots onto ours (slot 1 is the
-higher seed by instruction, §8.7, flipped when `draft_slots_swapped` is 1), and upsert `games` into
-`tournament_games` with `source = 'draft_import'`. Stamp `draft_synced_at`. Never sync a superseded draft.
+higher seed, by instruction — §8.7, §4 notes), and upsert `games` into `tournament_games` with
+`source = 'draft_import'`. Stamp `draft_synced_at`. Never sync a superseded draft.
 
 > **Completion is derived, not reported.** The tool never stores `finished` (§3.1), so a decided series still
 > reads `status = "running"`. Treat a set as complete when item 1 says `finished`, or when one side has won more
@@ -719,9 +728,10 @@ worth knowing about.
 Civ and map values must be ids the round's preset actually contains (§3.1). **Legality within the draft is the
 tool's business**, so the bot does not check whether a civ was available or a map was banned.
 
-**A redraft resets the set's draft state**, not its results: `draft_external_id` and `draft_url` are
-overwritten, `draft_synced_at` and `draft_announce_message_id` clear, the seat-claim watch restarts, and that
-set's `source = 'draft_import'` games are voided while `manual` ones survive. See §8.7.
+**A redraft resets the set's draft state**, not its results: `draft_external_id` is overwritten (which moves the
+derived room link along with it, §4 notes), `draft_synced_at` and `draft_announce_message_id` clear, the
+seat-claim watch restarts, and that set's `source = 'draft_import'` games are voided while `manual` ones survive.
+See §8.7.
 
 ## 8. Discord orchestration
 
@@ -906,6 +916,9 @@ MarineLorD · Puppypaw · Wam01 · Anotand · …
   autocomplete — the thing that makes picking the right profile easy — does not work inside one.
 - **Changing a main profile** is `/tournament rebind`, refused while the player has an entry in a `running`
   tournament, since the profile is snapshotted onto entries and sets already reference the player.
+- **Changing your display name** is a separate action from rebind — it never touches which aoe4 profile is
+  bound, and unlike rebind is not blocked by a running tournament, since a name carries no result attribution
+  (§4 notes). It writes through to every active entry immediately.
 
 Registration must give unmistakable feedback:
 
@@ -1022,7 +1035,7 @@ When a set reaches `ready`:
    limit (budget ~30 display-width chars per name, using the same width helper as the bracket).
 2. Add both players and every current admin (`Http::add_thread_channel_member`).
 3. Create the draft from the round's public preset, as the bot's own account (§3.3); store
-   `draft_external_id`, `draft_url`, `thread_id`. The bot is the draft's host.
+   `draft_external_id`, `thread_id`. The bot is the draft's host.
 4. Post a pinned control panel **in the thread**, carrying the room link and the seat instruction, with both
    players @-mentioned so it pings them.
 
@@ -1075,8 +1088,7 @@ The same message is edited with the final score when the set completes, so the c
   unauthenticated source for it today, and the one sanctioned use of that endpoint (§3.1). Item 1's
   `seats[].claimed` is meant to replace it.
 - It tells us only *that* both seats are filled, never *who* took which. The post therefore states the mapping
-  the players were instructed to use; if it is wrong, that is what `/set redraft` and `draft_slots_swapped` are
-  for.
+  the players were instructed to use; if it is wrong, that is what `/set redraft` is for (§4 notes).
 - **If the round's preset is `anonymous`, post seeds and the link without names.** Naming both players in a
   public channel defeats `options.anonymous`, which the tool enforces by stripping seat names from every
   non-participant (§3.4).
@@ -1085,7 +1097,7 @@ The same message is edited with the final score when the set completes, so the c
 
 Either player or an admin, in the set thread — also the `🔄 Regenerate draft` button
 (`custom_id = "redraft:<set_id>"`). It creates a fresh draft from the same preset, **overwrites**
-`draft_external_id` / `draft_url`, increments `redraft_count`, clears `draft_synced_at` and
+`draft_external_id`, increments `redraft_count`, clears `draft_synced_at` and
 `draft_announce_message_id`, re-posts the panel with the seat instruction, and leaves a visible notice in the
 thread naming who triggered it. The old room is orphaned on the tool's side; it cannot be deleted (§4).
 
@@ -1195,7 +1207,7 @@ than panicking (buttons from an older deploy will be pressed).
   player, and vice versa;
 - seeding tiers correctly when only some entrants have an `atr`, and an organizer's `seed` override survives
   bracket generation;
-- draft import maps slots correctly with `draft_slots_swapped` both 0 and 1;
+- draft import maps slots correctly (slot 1 is the higher seed);
 - re-import overwrites `draft_import` rows and preserves `manual` ones;
 - **completion is derived, not read**: a payload with `status = "running"` and a Bo3 score of 2–0 completes the
   set, and one with `status = "running"` at 1–0 does not;

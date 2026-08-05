@@ -1,0 +1,1111 @@
+//! Row types and queries for the tournament schema (docs/tournament.md §4, §8.8).
+//!
+//! One section per table, in the same order as `migrations/0002_tournament_schema.sql`.
+//! Scope is deliberately general-purpose reads/writes, not the business logic later
+//! chunks build on top (bracket persistence, permission decisions, draft-preset
+//! validation, the re-import upsert) — those stay in the chunk that needs them.
+
+use crate::tournament::bracket::Slot;
+use chrono::{DateTime, Utc};
+use sqlx::{FromRow, SqlitePool};
+use tracing::error;
+
+fn log_db_error(err: &sqlx::Error) {
+    error!("database operation failed with error {}", err.to_string());
+}
+
+// 1. tournaments
+
+#[derive(FromRow)]
+pub(crate) struct Tournament {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+    pub status: String,
+    pub draft_base_url: Option<String>,
+    pub announce_channel_id: Option<i64>,
+    pub category_id: Option<i64>,
+    pub register_channel_id: Option<i64>,
+    pub register_message_id: Option<i64>,
+    pub bracket_channel_id: Option<i64>,
+    pub matches_channel_id: Option<i64>,
+    pub draft_channel_id: Option<i64>,
+    pub checkin_message_id: Option<i64>,
+    pub checkin_closes_at: Option<DateTime<Utc>>,
+    pub created_by: i64,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+pub(crate) async fn insert_tournament(
+    pool: &SqlitePool,
+    slug: &str,
+    name: &str,
+    created_by: i64,
+) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        insert into tournaments (slug, name, created_by)
+        values (?1, ?2, ?3)
+        ",
+    )
+    .bind(slug)
+    .bind(name)
+    .bind(created_by)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.last_insert_rowid())
+}
+
+pub(crate) async fn get_tournament(pool: &SqlitePool, id: i64) -> Result<Option<Tournament>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
+               register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
+               draft_channel_id, checkin_message_id, checkin_closes_at, created_by, created_at,
+               started_at, completed_at
+        from tournaments
+        where id = ?1
+        ",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn get_tournament_by_slug(pool: &SqlitePool, slug: &str) -> Result<Option<Tournament>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
+               register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
+               draft_channel_id, checkin_message_id, checkin_closes_at, created_by, created_at,
+               started_at, completed_at
+        from tournaments
+        where slug = ?1
+        ",
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn update_tournament_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set status = ?1 where id = ?2")
+        .bind(status)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+// 2. tournament_stages
+
+#[derive(FromRow)]
+pub(crate) struct TournamentStage {
+    pub id: i64,
+    pub tournament_id: i64,
+    pub ordinal: i64,
+    pub name: String,
+    pub format: String,
+    pub config: Option<String>,
+    pub status: String,
+}
+
+pub(crate) async fn insert_stage(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    ordinal: i64,
+    name: &str,
+    format: &str,
+) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        insert into tournament_stages (tournament_id, ordinal, name, format)
+        values (?1, ?2, ?3, ?4)
+        ",
+    )
+    .bind(tournament_id)
+    .bind(ordinal)
+    .bind(name)
+    .bind(format)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.last_insert_rowid())
+}
+
+pub(crate) async fn list_stages_for_tournament(
+    pool: &SqlitePool,
+    tournament_id: i64,
+) -> Result<Vec<TournamentStage>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, tournament_id, ordinal, name, format, config, status
+        from tournament_stages
+        where tournament_id = ?1
+        order by ordinal
+        ",
+    )
+    .bind(tournament_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn update_stage_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_stages set status = ?1 where id = ?2")
+        .bind(status)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+// 3. tournament_rounds
+
+#[derive(FromRow)]
+pub(crate) struct TournamentRound {
+    pub id: i64,
+    pub stage_id: i64,
+    pub ordinal: i64,
+    pub name: String,
+    pub best_of: i64,
+    pub bracket: Option<String>,
+    pub draft_preset_id: Option<String>,
+    pub rules: Option<String>,
+}
+
+pub(crate) async fn insert_round(
+    pool: &SqlitePool,
+    stage_id: i64,
+    ordinal: i64,
+    name: &str,
+    best_of: i64,
+    bracket: Option<&str>,
+) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        insert into tournament_rounds (stage_id, ordinal, name, best_of, bracket)
+        values (?1, ?2, ?3, ?4, ?5)
+        ",
+    )
+    .bind(stage_id)
+    .bind(ordinal)
+    .bind(name)
+    .bind(best_of)
+    .bind(bracket)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.last_insert_rowid())
+}
+
+pub(crate) async fn list_rounds_for_stage(
+    pool: &SqlitePool,
+    stage_id: i64,
+) -> Result<Vec<TournamentRound>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, stage_id, ordinal, name, best_of, bracket, draft_preset_id, rules
+        from tournament_rounds
+        where stage_id = ?1
+        order by ordinal
+        ",
+    )
+    .bind(stage_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn get_round(pool: &SqlitePool, id: i64) -> Result<Option<TournamentRound>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, stage_id, ordinal, name, best_of, bracket, draft_preset_id, rules
+        from tournament_rounds
+        where id = ?1
+        ",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+// 4. tournament_players
+
+#[derive(FromRow)]
+pub(crate) struct TournamentPlayer {
+    pub user_id: i64,
+    pub aoe4_id: i64,
+    pub display_name: String,
+    pub bound_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+pub(crate) async fn get_player(pool: &SqlitePool, user_id: i64) -> Result<Option<TournamentPlayer>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select user_id, aoe4_id, display_name, bound_at, updated_at
+        from tournament_players
+        where user_id = ?1
+        ",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn get_player_by_aoe4_id(
+    pool: &SqlitePool,
+    aoe4_id: i64,
+) -> Result<Option<TournamentPlayer>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select user_id, aoe4_id, display_name, bound_at, updated_at
+        from tournament_players
+        where aoe4_id = ?1
+        ",
+    )
+    .bind(aoe4_id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+/// A no-op if `user_id` already has a bound profile — the caller (chunk 9's
+/// registration) uses this to write the player row on a first sign-up only, and
+/// otherwise falls through to `insert_entry` against the row that's already there.
+pub(crate) async fn insert_player_if_absent(
+    pool: &SqlitePool,
+    user_id: i64,
+    aoe4_id: i64,
+    display_name: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        insert into tournament_players (user_id, aoe4_id, display_name)
+        values (?1, ?2, ?3)
+        on conflict (user_id) do nothing
+        ",
+    )
+    .bind(user_id)
+    .bind(aoe4_id)
+    .bind(display_name)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Rebinding changes which aoe4 profile is bound, nothing else — `display_name` is a
+/// separate, player-editable concern (see `set_player_display_name`).
+pub(crate) async fn update_player_binding(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_players
+        set
+            aoe4_id = ?1,
+            updated_at = datetime('now')
+        where user_id = ?2
+        ",
+    )
+    .bind(aoe4_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Unlike `aoe4_id`/`elo`/`atr`, a name carries no game-result attribution, so it is
+/// not frozen on existing entries the way those are (§4 notes) — this writes through
+/// to every entry the player has in a tournament that has not yet completed or been
+/// canceled, so brackets and threads always show the current name. A transaction
+/// because the two tables must agree: an entry with a name `tournament_players`
+/// no longer has would be a silent regression the next time it's read.
+pub(crate) async fn set_player_display_name(
+    pool: &SqlitePool,
+    user_id: i64,
+    display_name: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        update tournament_players
+        set
+            display_name = ?1,
+            updated_at = datetime('now')
+        where user_id = ?2
+        ",
+    )
+    .bind(display_name)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        update tournament_entries
+        set display_name = ?1
+        where user_id = ?2
+          and tournament_id in (
+              select id from tournaments where status not in ('completed', 'canceled')
+          )
+        ",
+    )
+    .bind(display_name)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    tx.commit().await.inspect_err(log_db_error)?;
+    Ok(())
+}
+
+// 5. tournament_entries
+
+#[derive(FromRow)]
+pub(crate) struct TournamentEntry {
+    pub tournament_id: i64,
+    pub user_id: i64,
+    pub aoe4_id: i64,
+    pub seed: Option<i64>,
+    pub suggested_seed: Option<i64>,
+    pub display_name: String,
+    pub elo: Option<i64>,
+    pub atr: Option<f64>,
+    pub atr_source: Option<String>,
+    pub status: String,
+    pub registered_at: DateTime<Utc>,
+    pub checked_in_at: Option<DateTime<Utc>>,
+}
+
+pub(crate) async fn insert_entry(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    aoe4_id: i64,
+    display_name: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name)
+        values (?1, ?2, ?3, ?4)
+        ",
+    )
+    .bind(tournament_id)
+    .bind(user_id)
+    .bind(aoe4_id)
+    .bind(display_name)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn get_entry(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+) -> Result<Option<TournamentEntry>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select tournament_id, user_id, aoe4_id, seed, suggested_seed, display_name, elo, atr,
+               atr_source, status, registered_at, checked_in_at
+        from tournament_entries
+        where tournament_id = ?1
+          and user_id = ?2
+        ",
+    )
+    .bind(tournament_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn list_entries_for_tournament(
+    pool: &SqlitePool,
+    tournament_id: i64,
+) -> Result<Vec<TournamentEntry>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select tournament_id, user_id, aoe4_id, seed, suggested_seed, display_name, elo, atr,
+               atr_source, status, registered_at, checked_in_at
+        from tournament_entries
+        where tournament_id = ?1
+        ",
+    )
+    .bind(tournament_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn update_entry_status(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    status: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_entries
+        set status = ?1
+        where tournament_id = ?2
+          and user_id = ?3
+        ",
+    )
+    .bind(status)
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn set_entry_checked_in(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    checked_in_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_entries
+        set checked_in_at = ?1
+        where tournament_id = ?2
+          and user_id = ?3
+        ",
+    )
+    .bind(checked_in_at)
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn set_entry_ratings(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    elo: Option<i64>,
+    atr: Option<f64>,
+    atr_source: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_entries
+        set
+            elo = ?1,
+            atr = ?2,
+            atr_source = ?3
+        where tournament_id = ?4
+          and user_id = ?5
+        ",
+    )
+    .bind(elo)
+    .bind(atr)
+    .bind(atr_source)
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn set_entry_seed(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    seed: Option<i64>,
+    suggested_seed: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_entries
+        set
+            seed = ?1,
+            suggested_seed = ?2
+        where tournament_id = ?3
+          and user_id = ?4
+        ",
+    )
+    .bind(seed)
+    .bind(suggested_seed)
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+// 6. tournament_sets
+
+#[derive(FromRow)]
+pub(crate) struct TournamentSet {
+    pub id: i64,
+    pub tournament_id: i64,
+    pub round_id: i64,
+    pub position: i64,
+    pub slot1_user_id: Option<i64>,
+    pub slot2_user_id: Option<i64>,
+    pub slot1_wins: i64,
+    pub slot2_wins: i64,
+    pub winner_user_id: Option<i64>,
+    pub status: String,
+    pub draft_external_id: Option<String>,
+    pub draft_synced_at: Option<DateTime<Utc>>,
+    pub draft_announce_message_id: Option<i64>,
+    pub redraft_count: i64,
+    pub thread_id: Option<i64>,
+    pub winner_advances_to_set_id: Option<i64>,
+    pub winner_advances_to_slot: Option<i64>,
+    pub loser_advances_to_set_id: Option<i64>,
+    pub loser_advances_to_slot: Option<i64>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+const TOURNAMENT_SET_COLUMNS: &str = r"
+    id, tournament_id, round_id, position, slot1_user_id, slot2_user_id, slot1_wins,
+    slot2_wins, winner_user_id, status, draft_external_id, draft_synced_at,
+    draft_announce_message_id, redraft_count, thread_id, winner_advances_to_set_id,
+    winner_advances_to_slot, loser_advances_to_set_id, loser_advances_to_slot,
+    scheduled_at, completed_at
+";
+
+pub(crate) async fn insert_set(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    round_id: i64,
+    position: i64,
+    slot1_user_id: Option<i64>,
+    slot2_user_id: Option<i64>,
+    status: &str,
+) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        insert into tournament_sets (tournament_id, round_id, position, slot1_user_id, slot2_user_id, status)
+        values (?1, ?2, ?3, ?4, ?5, ?6)
+        ",
+    )
+    .bind(tournament_id)
+    .bind(round_id)
+    .bind(position)
+    .bind(slot1_user_id)
+    .bind(slot2_user_id)
+    .bind(status)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.last_insert_rowid())
+}
+
+pub(crate) async fn get_set(pool: &SqlitePool, id: i64) -> Result<Option<TournamentSet>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        r"
+        select {TOURNAMENT_SET_COLUMNS}
+        from tournament_sets
+        where id = ?1
+        "
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn get_set_by_position(
+    pool: &SqlitePool,
+    round_id: i64,
+    position: i64,
+) -> Result<Option<TournamentSet>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        r"
+        select {TOURNAMENT_SET_COLUMNS}
+        from tournament_sets
+        where round_id = ?1
+          and position = ?2
+        "
+    ))
+    .bind(round_id)
+    .bind(position)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn list_sets_for_round(pool: &SqlitePool, round_id: i64) -> Result<Vec<TournamentSet>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        r"
+        select {TOURNAMENT_SET_COLUMNS}
+        from tournament_sets
+        where round_id = ?1
+        order by position
+        "
+    ))
+    .bind(round_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn set_advancement(
+    pool: &SqlitePool,
+    id: i64,
+    winner_advances_to_set_id: Option<i64>,
+    winner_advances_to_slot: Option<i64>,
+    loser_advances_to_set_id: Option<i64>,
+    loser_advances_to_slot: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_sets
+        set
+            winner_advances_to_set_id = ?1,
+            winner_advances_to_slot = ?2,
+            loser_advances_to_set_id = ?3,
+            loser_advances_to_slot = ?4
+        where id = ?5
+        ",
+    )
+    .bind(winner_advances_to_set_id)
+    .bind(winner_advances_to_slot)
+    .bind(loser_advances_to_set_id)
+    .bind(loser_advances_to_slot)
+    .bind(id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn update_set_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_sets set status = ?1 where id = ?2")
+        .bind(status)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Which column a winner lands in is decided by `Slot`, not by the caller building
+/// SQL — the column name is never data, so this stays two static queries.
+pub(crate) async fn set_slot(pool: &SqlitePool, id: i64, slot: Slot, user_id: i64) -> Result<(), sqlx::Error> {
+    let sql = match slot {
+        Slot::One => r"update tournament_sets set slot1_user_id = ?1 where id = ?2",
+        Slot::Two => r"update tournament_sets set slot2_user_id = ?1 where id = ?2",
+    };
+    sqlx::query(sql)
+        .bind(user_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn set_thread(pool: &SqlitePool, id: i64, thread_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_sets set thread_id = ?1 where id = ?2")
+        .bind(thread_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Used for both the first draft (chunk 16) and a redraft (chunk 20): a redraft
+/// overwrites the pointer, so the sync/announcement state from the superseded room
+/// must not survive alongside it. The room link is not stored — it is
+/// `draft_base_url` (on `tournaments`) plus `/match/` plus this id (docs/tournament.md §4).
+pub(crate) async fn set_draft_pointer(pool: &SqlitePool, id: i64, draft_external_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_sets
+        set
+            draft_external_id = ?1,
+            draft_synced_at = null,
+            draft_announce_message_id = null
+        where id = ?2
+        ",
+    )
+    .bind(draft_external_id)
+    .bind(id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn increment_redraft_count(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_sets set redraft_count = redraft_count + 1 where id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn set_draft_synced_at(
+    pool: &SqlitePool,
+    id: i64,
+    synced_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_sets set draft_synced_at = ?1 where id = ?2")
+        .bind(synced_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn set_draft_announce_message(pool: &SqlitePool, id: i64, message_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_sets set draft_announce_message_id = ?1 where id = ?2")
+        .bind(message_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn record_set_result(
+    pool: &SqlitePool,
+    id: i64,
+    slot1_wins: i64,
+    slot2_wins: i64,
+    winner_user_id: Option<i64>,
+    status: &str,
+    completed_at: Option<DateTime<Utc>>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_sets
+        set
+            slot1_wins = ?1,
+            slot2_wins = ?2,
+            winner_user_id = ?3,
+            status = ?4,
+            completed_at = ?5
+        where id = ?6
+        ",
+    )
+    .bind(slot1_wins)
+    .bind(slot2_wins)
+    .bind(winner_user_id)
+    .bind(status)
+    .bind(completed_at)
+    .bind(id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn set_scheduled_at(
+    pool: &SqlitePool,
+    id: i64,
+    scheduled_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_sets set scheduled_at = ?1 where id = ?2")
+        .bind(scheduled_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+// 7. tournament_games
+
+#[derive(FromRow)]
+pub(crate) struct TournamentGame {
+    pub id: i64,
+    pub set_id: i64,
+    pub game_number: i64,
+    pub map: Option<String>,
+    pub slot1_civ: Option<String>,
+    pub slot2_civ: Option<String>,
+    pub winner_user_id: Option<i64>,
+    pub status: String,
+    pub source: String,
+    pub reported_by: Option<i64>,
+    pub reported_at: Option<DateTime<Utc>>,
+}
+
+/// A plain data carrier rather than positional arguments — `insert_game` would
+/// otherwise take eleven parameters.
+pub(crate) struct NewGame {
+    pub set_id: i64,
+    pub game_number: i64,
+    pub map: Option<String>,
+    pub slot1_civ: Option<String>,
+    pub slot2_civ: Option<String>,
+    pub winner_user_id: Option<i64>,
+    pub status: String,
+    pub source: String,
+    pub reported_by: Option<i64>,
+    pub reported_at: Option<DateTime<Utc>>,
+}
+
+pub(crate) async fn insert_game(pool: &SqlitePool, new: NewGame) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        insert into tournament_games (
+            set_id, game_number, map, slot1_civ, slot2_civ, winner_user_id, status, source,
+            reported_by, reported_at
+        )
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ",
+    )
+    .bind(new.set_id)
+    .bind(new.game_number)
+    .bind(new.map)
+    .bind(new.slot1_civ)
+    .bind(new.slot2_civ)
+    .bind(new.winner_user_id)
+    .bind(new.status)
+    .bind(new.source)
+    .bind(new.reported_by)
+    .bind(new.reported_at)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.last_insert_rowid())
+}
+
+pub(crate) async fn get_game(
+    pool: &SqlitePool,
+    set_id: i64,
+    game_number: i64,
+) -> Result<Option<TournamentGame>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, set_id, game_number, map, slot1_civ, slot2_civ, winner_user_id, status,
+               source, reported_by, reported_at
+        from tournament_games
+        where set_id = ?1
+          and game_number = ?2
+        ",
+    )
+    .bind(set_id)
+    .bind(game_number)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn list_games_for_set(pool: &SqlitePool, set_id: i64) -> Result<Vec<TournamentGame>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select id, set_id, game_number, map, slot1_civ, slot2_civ, winner_user_id, status,
+               source, reported_by, reported_at
+        from tournament_games
+        where set_id = ?1
+        order by game_number
+        ",
+    )
+    .bind(set_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn update_game_result(
+    pool: &SqlitePool,
+    id: i64,
+    winner_user_id: Option<i64>,
+    status: &str,
+    map: Option<&str>,
+    slot1_civ: Option<&str>,
+    slot2_civ: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_games
+        set
+            winner_user_id = ?1,
+            status = ?2,
+            map = ?3,
+            slot1_civ = ?4,
+            slot2_civ = ?5
+        where id = ?6
+        ",
+    )
+    .bind(winner_user_id)
+    .bind(status)
+    .bind(map)
+    .bind(slot1_civ)
+    .bind(slot2_civ)
+    .bind(id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// `source = 'manual'` rows survive — chunk 20's redraft guard.
+pub(crate) async fn void_games_for_set(pool: &SqlitePool, set_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_games
+        set status = 'void'
+        where set_id = ?1
+          and source = 'draft_import'
+        ",
+    )
+    .bind(set_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+// 8. tournament_admins
+
+#[derive(FromRow)]
+pub(crate) struct TournamentAdmin {
+    pub tournament_id: i64,
+    pub user_id: i64,
+    pub added_by: i64,
+    pub added_at: DateTime<Utc>,
+}
+
+pub(crate) async fn add_admin(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    added_by: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        insert into tournament_admins (tournament_id, user_id, added_by)
+        values (?1, ?2, ?3)
+        on conflict (tournament_id, user_id) do nothing
+        ",
+    )
+    .bind(tournament_id)
+    .bind(user_id)
+    .bind(added_by)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn remove_admin(pool: &SqlitePool, tournament_id: i64, user_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        delete from tournament_admins
+        where tournament_id = ?1
+          and user_id = ?2
+        ",
+    )
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn list_admins(pool: &SqlitePool, tournament_id: i64) -> Result<Vec<TournamentAdmin>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select tournament_id, user_id, added_by, added_at
+        from tournament_admins
+        where tournament_id = ?1
+        ",
+    )
+    .bind(tournament_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+pub(crate) async fn is_admin(pool: &SqlitePool, tournament_id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r"
+        select exists(
+            select 1
+            from tournament_admins
+            where tournament_id = ?1
+              and user_id = ?2
+        )
+        ",
+    )
+    .bind(tournament_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+// 9. tournament_bracket_messages
+
+#[derive(FromRow)]
+pub(crate) struct TournamentBracketMessage {
+    pub tournament_id: i64,
+    pub ordinal: i64,
+    pub message_id: i64,
+}
+
+pub(crate) async fn upsert_bracket_message(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    ordinal: i64,
+    message_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        insert into tournament_bracket_messages (tournament_id, ordinal, message_id)
+        values (?1, ?2, ?3)
+        on conflict (tournament_id, ordinal) do update set message_id = excluded.message_id
+        ",
+    )
+    .bind(tournament_id)
+    .bind(ordinal)
+    .bind(message_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn list_bracket_messages(
+    pool: &SqlitePool,
+    tournament_id: i64,
+) -> Result<Vec<TournamentBracketMessage>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select tournament_id, ordinal, message_id
+        from tournament_bracket_messages
+        where tournament_id = ?1
+        order by ordinal
+        ",
+    )
+    .bind(tournament_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
