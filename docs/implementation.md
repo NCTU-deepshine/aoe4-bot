@@ -21,11 +21,14 @@ writing the code, and if a chunk seems to contradict them, the design doc wins o
 - **Two guilds, hardcoded** (§8.0). No per-guild configuration table and no setup command in this plan.
 - Chunks 1–20 and 24 have no external dependencies, and 19 is already a shippable tournament. Chunk 21 is in
   **another repository**; only 22 waits on it, and most of 22 can be built before it lands.
-- **Chunk 24 (localization) is numbered last but meant to land next**, right after chunk 10 — it retrofits
-  chunks 7–10's existing messages, and every chunk after it must write new user-facing text through it from the
-  start. It sits at 24 rather than 11 so the chunk numbers already cited in shipped code (chunks 6–10's comments
-  in `db.rs`, `panel.rs`, `registration.rs`, `mod.rs`, `dispatch.rs`, `commands.rs` — e.g. "consumed by chunk
-  12") stay correct; renumbering would silently break every one of them.
+- **Chunk numbers are append-only.** New chunks take the next free number rather than slotting in where they
+  belong in the order, because the numbers already cited in shipped code (chunks 6–10's comments in `db.rs`,
+  `panel.rs`, `registration.rs`, `mod.rs`, `dispatch.rs`, `commands.rs` — e.g. "consumed by chunk 12") would
+  silently break under renumbering. So the number says where a chunk was written down, and only the phase it
+  sits in says where it belongs.
+- **Chunks 25, 26 and 24 land next, in that order**, all before the rest of Phase D. 24 (localization) retrofits
+  the existing messages of chunks 7–10 plus 25 and 26, and every chunk after it must write new user-facing text
+  through it from the start.
 
 ## Phase A — foundations
 
@@ -89,7 +92,8 @@ directions on `tournament_players` hold; the `check` constraints reject unknown 
 ## Phase D — running an event
 
 Each chunk from here adds a usable command, registered in the tournament-guild list only. Register it when its
-chunk is done, not before.
+chunk is done, not before. Chunks 25 and 26 belong to this phase but sit at the end of it, carrying the numbers
+they were written down with (see Working rules); they land right after chunk 10, before 11.
 
 **7. `/tournament create`, and the admin list**
 Channel and category creation including `#…-draft`, the top-level-channel fallback, the `tournaments` and
@@ -138,6 +142,28 @@ rejected.
 **13. `/tournament bracket` and `/tournament cancel`**
 Refresh or repost the bracket, the per-round companion view, and cancellation. Small.
 Design: §8.4, §8.6.
+
+**25. `/tournament reopen-registration`**
+The one backward lifecycle edge, for admin mistakes. Reverts `checkin` or `seeding` to `registration`:
+`no_show` entries back to `active`, every `checked_in_at` cleared, `checkin_closes_at` and
+`checkin_message_id` nulled, and the check-in panel message deleted so a later `open-checkin` posts a clean
+one. Needs `set_checkin_message_id` widened to `Option<i64>` (mirroring `set_checkin_closes_at`), an inverse of
+`mark_no_shows`, and an unthrottled `panel::refresh_now` mirroring `checkin_panel::close` — restoring no-shows
+changes the registration roster, and a phase change deserves a guaranteed edit rather than a throttled one. No
+migration: the `check` constraints already permit both target values.
+Design: §8.3, §8.4.
+Gate: §10's reopening-registration list.
+
+**26. `/tournament delete`**
+The inverse of chunk 7, for a mistyped `create` and for teardown between test runs. Refuses unless `confirm`
+matches the slug exactly and unless invoked from the announce channel — the only one of the five that survives,
+so the reply doesn't vanish with its own channel. Deletes `#…-register|bracket|draft|matches`, then the
+`tournaments` row, which cascades to every tournament-scoped table; the announce channel, the category and
+`tournament_players` are left alone. Channel deletions are best-effort and logged — one an admin already
+removed by hand must not block the database cleanup. Creator-or-`MANAGE_GUILD` tier, so it reuses
+`tournament_admin_only` unchanged.
+Design: §8.1, §8.2, §8.4.
+Gate: §10's deletion-cascade list.
 
 ## Phase E — the draft tool
 
@@ -215,14 +241,14 @@ Design: §8.5.
 
 ## Phase F — localization
 
-Numbered last so already-shipped chunk numbers cited in code comments stay correct (see Working rules), but
-**scheduled right after chunk 10** — every chunk after it must use it for new text from the start.
+Numbered before 25 and 26 but **scheduled after them** — all three land right after chunk 10, and every chunk
+after 24 must use it for new text from the start.
 
 **24. Localization (zh-TW, English default)**
 A `Locale` enum and `from_discord_locale`, resolved per-interaction from `Context::locale()`
-(slash commands) / `ComponentInteraction.locale` (buttons) — never `guild_locale`. Retrofits chunks 7–10's
-outcome messages, both panels' content and button labels, and `access.rs`'s ephemeral refusals to take a
-`Locale` and render accordingly.
+(slash commands) / `ComponentInteraction.locale` (buttons) — never `guild_locale`. Retrofits the outcome
+messages of chunks 7–10, 25 and 26, both panels' content and button labels, and `access.rs`'s ephemeral
+refusals to take a `Locale` and render accordingly.
 Design: §8.10.
 Gate: §10's localization list — `"zh-TW"` and only `"zh-TW"` resolves to `Locale::ZhTw`; `"zh-CN"`, empty, and
 an unrecognized code all fall back to `Locale::En`; every retrofitted message renders correctly in both.

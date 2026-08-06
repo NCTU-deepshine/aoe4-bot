@@ -808,6 +808,10 @@ category: Relic Cup                 <- the invoking channel's parent_id
 - **Split of concerns:** `#…-register` holds the *interactive* panels and is where players act; the announcement
   channel holds narration (check-in is open, set results, bracket updates) and links to the panels. This keeps a
   busy panel channel from burying announcements.
+- **Teardown is asymmetric with creation.** `/tournament delete` removes only the four channels the bot made.
+  The announce channel and the category were not created by it — the category is just the invoking channel's
+  `parent_id` — so neither is touched, and a category shared by several tournaments survives any one of them
+  being deleted.
 - **Set threads are created lazily**, when a set reaches `ready`: all of round 1 at start, later rounds as
   results land. A 32-player bracket has 31 sets, so creating them up front would be wasteful and would clutter
   the thread list; this keeps threads near the active frontier.
@@ -819,8 +823,9 @@ category: Relic Cup                 <- the invoking channel's parent_id
 New table `tournament_admins` (§8.7); the creator is inserted at create time, and `tournaments.created_by`
 remains the authority over the admin list.
 
-- **Creator only:** `/tournament admin add|remove`.
-- **Any admin:** open/close check-in, seed, start, cancel, draft, manual report, schedule.
+- **Creator only:** `/tournament admin add|remove`, and `/tournament delete` — irreversible and destructive of
+  channel history, so it stays one tier tighter than running the event.
+- **Any admin:** open/close check-in, reopen registration, seed, start, cancel, draft, manual report, schedule.
 - **Anyone:** register, withdraw, check in, view bracket.
 - **Guild `MANAGE_GUILD` bypasses the admin check.** This is a policy choice, not a technical necessity: without
   it, a tournament whose creator has left the server is unrecoverable. The cost is that any server admin can act
@@ -843,6 +848,9 @@ seeding ──/tournament start──▶ running
     │  requires seeds 1..n contiguous; generates the bracket;
     │  creates round-1 threads; posts the bracket
 running ──(final set completes)──▶ completed
+checkin | seeding ──/tournament reopen-registration──▶ registration
+    │  no_show entries → status 'active'; every checked_in_at cleared
+    │  the check-in panel is deleted; checkin_message_id and checkin_closes_at nulled
 any ──/tournament cancel──▶ canceled
 ```
 
@@ -850,6 +858,16 @@ any ──/tournament cancel──▶ canceled
 
 **Check-in gates the bracket**: the field is whoever checked in, not whoever registered, so no-shows never
 occupy a slot.
+
+**One backward edge, and it is a full reset.** `reopen-registration` exists for admin mistakes — check-in opened
+too early, or closed before a late entrant arrived. It rewinds the whole check-in round rather than partially
+undoing it: no-shows go back to `active`, every `checked_in_at` is cleared, and the check-in panel message is
+deleted so a later `open-checkin` starts from a clean `0/N`. Past `seeding` there is no rewind — the recovery is
+`/tournament cancel`.
+
+**`delete` is not a status.** `canceled` is the terminal state for an event that happened and was called off; it
+stays in the database and its channels stay readable. `/tournament delete` is the inverse of `create` — the row
+and its channels stop existing — and so appears nowhere in this graph.
 
 ### 8.4 Commands
 
@@ -866,10 +884,12 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament open-checkin [minutes]` | admin | Posts the check-in panel |
 | `/tournament checkin` | anyone | Self check-in · also a button |
 | `/tournament close-checkin` | admin | Marks no-shows, runs suggested seeding |
+| `/tournament reopen-registration` | admin | Reverts to `registration`; clears check-ins and no-shows |
 | `/tournament seed list\|set` | admin | Review and override seeds |
 | `/tournament start` | admin | Generates the bracket, opens round 1 |
 | `/tournament bracket [round]` | anyone | Reposts/refreshes the bracket |
 | `/tournament cancel` | admin | Cancels the event |
+| `/tournament delete confirm:<slug>` | creator | Deletes the tournament and the four channels it created |
 | `/set draft` | admin | Creates the draft if a set somehow has none, and reposts the links |
 | `/set redraft` | either player, or admin | Abandons the current draft and creates a fresh one · also a button |
 | `/set done` | either player, or admin | Syncs the draft, imports, advances · also a button |
@@ -878,6 +898,11 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 
 `/set *` resolves the set from the **current thread id**, so nobody types a set id. Outside a set thread they
 take an explicit argument.
+
+`/tournament delete` carries two guards the others don't. `confirm` must match the tournament's slug exactly —
+every other command resolves its tournament silently from the channel, and that is too quiet for an
+irreversible one. And it must be run **from the announce channel**, the only one of the five that survives:
+run from `#…-register` it would delete the channel it is replying in.
 
 Follow the `subcommands(...) + subcommand_required` pattern from `bind` (`src/commands.rs`) and register in
 the single `commands: vec![…]` at `src/main.rs`. Note that list's quirk — `bind`'s subcommands `id` and
@@ -1256,6 +1281,13 @@ than panicking (buttons from an older deploy will be pressed).
   `running` tournament, registering after start, starting with non-contiguous seeds;
 - **check-in**: a second check-in is idempotent; an unregistered user is rejected; closing marks exactly the
   non-checked-in entrants `no_show` and seeds only the rest;
+- **reopening registration**: refused from `running`/`completed`/`canceled` and a no-op from `registration`,
+  with the database untouched in both; from `checkin`, the status and both check-in columns reset and every
+  `checked_in_at` cleared; from `seeding`, `no_show` entries return to `active` while a `withdrawn` entry stays
+  withdrawn;
+- **deletion cascades and stops**: deleting a tournament removes its entries, admins, stages, rounds, sets,
+  games and bracket messages, leaves `tournament_players` intact, and leaves a second tournament's rows
+  untouched; a `confirm` argument that doesn't match the slug deletes nothing;
 - **registration**: a first sign-up writes the player row and the entry in one transaction, and neither survives
   if the other fails; a second registration is idempotent; a later tournament needs no profile argument;
   withdrawal works only before start;
@@ -1277,6 +1309,10 @@ leftover `Secrets.toml` from the removed Shuttle setup — have since been done,
   `aoe4world_game_id` is a one-line `alter table`.
 - **Autocomplete.** The `bind` autocomplete in `src/commands.rs` calls `players/search` on every keystroke with
   no caching; `GET /api/v0/players/autocomplete` is purpose-built for it.
+- **Registration is never actually closed.** `/tournament register` is gated only negatively, by "has the event
+  started" (`running|completed|canceled`), so registration stays open through `checkin` and `seeding` —
+  `open-checkin` doesn't close it — and the registration panel has no CLOSED state, unlike the check-in panel.
+  That makes `reopen-registration` (§8.3) cheaper than it looks, but the positive gate is missing.
 
 ## 12. Open questions
 
