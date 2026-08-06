@@ -1147,6 +1147,152 @@ pub(crate) async fn insert_set(
     Ok(result.last_insert_rowid())
 }
 
+/// Writes a whole generated bracket — stage, rounds, sets and their advancement
+/// links — in **one transaction**, so a tournament is never left half-bracketed.
+///
+/// Assembled here rather than from `insert_stage`/`insert_round`/`insert_set`,
+/// which each take a `&SqlitePool` and would therefore each commit on their own.
+///
+/// Two passes over the sets are unavoidable: a set's `winner_advances_to_set_id`
+/// points at a row in the *next* round, whose id does not exist until that round
+/// has been inserted. So every set is written first, ids collected by
+/// (round, position), then the links filled in.
+///
+/// `seed_to_user` maps a seed to the entrant holding it; a seed with no entrant
+/// is a bye slot and is simply absent.
+pub(crate) async fn insert_bracket(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    bracket: &crate::tournament::bracket::Bracket,
+    seed_to_user: &std::collections::HashMap<u32, i64>,
+) -> Result<(), sqlx::Error> {
+    use crate::tournament::bracket::Slot;
+
+    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
+
+    let stage = sqlx::query(
+        r"
+        insert into tournament_stages (tournament_id, ordinal, name, format)
+        values (?1, 1, 'Main Bracket', 'single_elim')
+        ",
+    )
+    .bind(tournament_id)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?
+    .last_insert_rowid();
+
+    // (round ordinal, position) -> set id, for the linking pass below.
+    let mut set_ids: std::collections::HashMap<(usize, usize), i64> = std::collections::HashMap::new();
+
+    for round in &bracket.rounds {
+        let round_id = sqlx::query(
+            r"
+            insert into tournament_rounds (stage_id, ordinal, name, best_of)
+            values (?1, ?2, ?3, ?4)
+            ",
+        )
+        .bind(stage)
+        .bind(i64::try_from(round.ordinal).unwrap())
+        .bind(&round.name)
+        .bind(i64::from(round.best_of))
+        .execute(&mut *tx)
+        .await
+        .inspect_err(log_db_error)?
+        .last_insert_rowid();
+
+        for set in &round.sets {
+            let slot1 = set.slot1.and_then(|seed| seed_to_user.get(&seed)).copied();
+            let slot2 = set.slot2.and_then(|seed| seed_to_user.get(&seed)).copied();
+            let set_id = sqlx::query(
+                r"
+                insert into tournament_sets (tournament_id, round_id, position, slot1_user_id, slot2_user_id, status)
+                values (?1, ?2, ?3, ?4, ?5, 'pending')
+                ",
+            )
+            .bind(tournament_id)
+            .bind(round_id)
+            .bind(i64::try_from(set.position).unwrap())
+            .bind(slot1)
+            .bind(slot2)
+            .execute(&mut *tx)
+            .await
+            .inspect_err(log_db_error)?
+            .last_insert_rowid();
+            set_ids.insert((round.ordinal, set.position), set_id);
+        }
+    }
+
+    for round in &bracket.rounds {
+        for set in &round.sets {
+            let Some(advancement) = set.winner_advances_to else {
+                continue; // the final
+            };
+            let Some(target) = set_ids.get(&(advancement.round, advancement.position)) else {
+                continue;
+            };
+            let slot = match advancement.slot {
+                Slot::One => 1,
+                Slot::Two => 2,
+            };
+            sqlx::query(
+                r"
+                update tournament_sets
+                set
+                    winner_advances_to_set_id = ?1,
+                    winner_advances_to_slot = ?2
+                where id = ?3
+                ",
+            )
+            .bind(target)
+            .bind(slot)
+            .bind(set_ids[&(round.ordinal, set.position)])
+            .execute(&mut *tx)
+            .await
+            .inspect_err(log_db_error)?;
+        }
+    }
+
+    tx.commit().await.inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// When the event actually began, as opposed to when it was scheduled to.
+pub(crate) async fn set_tournament_started_at(
+    pool: &SqlitePool,
+    id: i64,
+    started_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set started_at = ?1 where id = ?2")
+        .bind(started_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Every set in a tournament, ordered so a caller can walk the bracket forwards.
+pub(crate) async fn list_sets_for_tournament(
+    pool: &SqlitePool,
+    tournament_id: i64,
+) -> Result<Vec<TournamentSet>, sqlx::Error> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        r"
+        select {TOURNAMENT_SET_COLUMNS}
+        from tournament_sets
+        where tournament_id = ?1
+        -- Ordered via a correlated subquery rather than a join: the shared
+        -- column list is unqualified, and both tables have an `id`.
+        order by (select ordinal from tournament_rounds where id = round_id), position
+        "
+    )))
+    .bind(tournament_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
 pub(crate) async fn get_set(pool: &SqlitePool, id: i64) -> Result<Option<TournamentSet>, sqlx::Error> {
     sqlx::query_as(AssertSqlSafe(format!(
         r"

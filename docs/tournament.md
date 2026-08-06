@@ -884,8 +884,9 @@ checkin ──/tournament close-checkin──▶ seeding
     │  suggested seeding runs over checked-in entrants only
 seeding ──/tournament start──▶ running
     │  requires a draft preset, seeds 1..n contiguous, and
-    │  scheduled_start_at reached; generates the bracket;
-    │  creates round-1 threads; posts the bracket
+    │  scheduled_start_at reached; generates the bracket in one
+    │  transaction; resolves byes; opens every playable set
+    │  (threads follow in chunk 16)
 running ──(final set completes)──▶ completed
 checkin | seeding ──/tournament reopen-registration──▶ registration
     │  no_show entries → status 'active'; every checked_in_at cleared
@@ -903,6 +904,13 @@ the panel's buttons go with it; `/tournament reopen-registration` is the way bac
 broader and stays open until the event begins (§8.4) — leaving late and joining late are different. One
 consequence: a withdrawal during `seeding` leaves a gap in the seed order, and `start` refuses until
 `/tournament seed refresh` renumbers.
+
+**Opening a bracket is decided by slots, not by round number.** Round one's real sets become `ready` at
+start, and a bye — one occupant, which §5 places against the top seeds — is settled there and then, recorded
+`bye` with its occupant advanced. Any set whose two slots are then both filled is also `ready`, which is not a
+defensive extra: with 5 entrants in an 8-bracket, round two's lower set is fed by two byes and is playable
+immediately. Byes never cascade further, because `next_power_of_two` leaves under half the slots empty and
+reflection puts each against a distinct seed, so no set is ever fully empty.
 
 **The schedule is enforced, and has no override.** A new tournament's `scheduled_start_at` defaults to a week
 out, which is a tripwire rather than a convenience: check-in cannot open until an hour before it, and the event
@@ -943,7 +951,7 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament setup [cap] [start_time]` | admin | Configure the event; with no options, reports what's missing. The start time gates check-in and start |
 | `/tournament preset preset_id [from_round]` | admin | Set a round's draft preset, and so its `best_of` |
 | `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
-| `/tournament start` | admin | Generates the bracket, opens round 1 |
+| `/tournament start` | admin | Generates the bracket, resolves byes, opens every playable set |
 | `/tournament bracket [round]` | anyone | Reposts/refreshes the bracket |
 | `/tournament cancel` | admin | Cancels the event |
 | `/tournament delete confirm:<slug>` | creator | Deletes the tournament and the four channels it created |

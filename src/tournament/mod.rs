@@ -49,6 +49,9 @@ pub(crate) mod seeding;
 // The seeding panel (chunk 11, §8.5): the seeded field, rendered into
 // `#{slug}-bracket` and edited in place as an organizer overrides seeds.
 pub(crate) mod seed_panel;
+// `/tournament start` (chunk 12, §8.3, §5): the gates, then the generated
+// bracket persisted and round one opened.
+pub(crate) mod start;
 // `/tournament delete`'s guards (chunk 26, §8.4) — pure, like `access::decide`.
 pub(crate) mod teardown;
 // The panel-edit throttle (§8.5, "Edits must be throttled"). Consumed by

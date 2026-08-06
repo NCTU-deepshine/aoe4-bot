@@ -139,9 +139,9 @@ intact, a reorder that does not trip the unique index, and esports-leaderboard d
 payload including its nullable `profile_id` rows.
 
 **12. `/tournament start`**
-Generate the bracket in one transaction from finalized seeds, publish it (chunked, ids in
-`tournament_bracket_messages`), and open round 1. Consumes chunks 4 and 5, and chunk 27 for the gate and for
-each round's `best_of` — which comes from its draft preset, not from an option on this command.
+Generate the bracket in one transaction from finalized seeds and open every playable set. Consumes chunks 4
+and 5, chunk 27 for the gate and each round's `best_of` (from its draft preset, not an option here), and chunk
+29 for publication — the preview messages become the real bracket in place, so nothing is posted afresh.
 Design: §8.3, §5, §8.6.
 Gate: §10's lifecycle list — starting before check-in closes, non-contiguous seeds, registering after start all
 rejected.

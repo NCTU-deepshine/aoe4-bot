@@ -12,7 +12,7 @@ use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
     audit, bracket_view, checkin, checkin_panel, panel, registration, seed_panel, seeding, setup as tournament_setup,
-    teardown,
+    start as tournament_start, teardown,
 };
 use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
@@ -244,6 +244,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "check_in",
         "close_checkin",
         "reopen_registration",
+        "start",
         "setup",
         "preset",
         "seed",
@@ -1346,6 +1347,40 @@ async fn delete_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournam
             tournament.id
         );
     }
+}
+
+// Turns the seeded field into a bracket and opens round one (§8.3, §5). No
+// confirmation: setup, status, seeds and the clock are four gates already, and
+// `/tournament cancel` is the way back.
+/// Starts the tournament: generates the bracket and opens round one.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    description_localized("zh-TW", "開賽：產生賽程表並開放第一輪。")
+)]
+pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let outcome = tournament_start::start(pool, &tournament).await?;
+    audit::log_action("start", tournament.id, &tournament.slug, ctx.author(), &outcome);
+
+    if matches!(outcome, tournament_start::StartOutcome::Started { .. }) {
+        // The preview messages become the real bracket in place — re-read so the
+        // status is `running` and the provisional label comes off.
+        let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
+        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+        panel::refresh_now(ctx.http(), pool, &tournament).await?;
+    }
+
+    ctx.say(outcome.message(&tournament.name, locale)).await?;
+    Ok(())
 }
 
 // The inverse of `create` (docs/tournament.md §8.4): removes the four channels it

@@ -1385,6 +1385,225 @@ mod tests {
         assert_eq!(entries[0].elo, Some(1234));
     }
 
+    // Bracket persistence and start (chunk 12).
+
+    /// A seeded, checked-in field of `n`, configured enough to start.
+    async fn setup_startable(pool: &SqlitePool, n: i64) -> crate::tournament::db::Tournament {
+        let tournament = setup_tournament(pool, "seeding").await;
+        for user_id in 1..=n {
+            crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+                .await
+                .unwrap();
+            crate::tournament::db::insert_entry(pool, tournament.id, user_id, user_id * 100, "P", None)
+                .await
+                .unwrap();
+        }
+        let order: Vec<i64> = (1..=n).collect();
+        crate::tournament::db::set_seed_order(pool, tournament.id, &order, true)
+            .await
+            .unwrap();
+        crate::tournament::db::upsert_round_preset(pool, tournament.id, 0, "preset", 3)
+            .await
+            .unwrap();
+        crate::tournament::db::set_scheduled_start_at(pool, tournament.id, chrono::Utc::now())
+            .await
+            .unwrap();
+        crate::tournament::db::get_tournament(pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn starting_persists_the_whole_bracket_and_links_advancement() {
+        let pool = test_pool().await;
+        let tournament = setup_startable(&pool, 8).await;
+
+        let outcome = crate::tournament::start::start(&pool, &tournament).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::start::StartOutcome::Started { entrants: 8, rounds: 3 }
+        );
+
+        let sets = crate::tournament::db::list_sets_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert_eq!(sets.len(), 7, "an 8-bracket is 4 + 2 + 1 sets");
+
+        // Exactly one set has nowhere to advance to: the final.
+        let finals: Vec<_> = sets.iter().filter(|s| s.winner_advances_to_set_id.is_none()).collect();
+        assert_eq!(finals.len(), 1, "advancement should form a single-rooted tree");
+
+        // And every link points at a set that exists, in a slot that is 1 or 2.
+        let ids: Vec<i64> = sets.iter().map(|s| s.id).collect();
+        for set in sets.iter().filter(|s| s.winner_advances_to_set_id.is_some()) {
+            assert!(ids.contains(&set.winner_advances_to_set_id.unwrap()));
+            assert!(matches!(set.winner_advances_to_slot, Some(1) | Some(2)));
+        }
+    }
+
+    #[tokio::test]
+    async fn starting_moves_the_tournament_to_running_and_stamps_it() {
+        let pool = test_pool().await;
+        let tournament = setup_startable(&pool, 4).await;
+
+        crate::tournament::start::start(&pool, &tournament).await.unwrap();
+
+        let after = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "running");
+        assert!(after.started_at.is_some(), "started_at should be stamped");
+    }
+
+    #[tokio::test]
+    async fn a_full_bracket_opens_every_first_round_set_and_no_others() {
+        let pool = test_pool().await;
+        let tournament = setup_startable(&pool, 4).await;
+
+        crate::tournament::start::start(&pool, &tournament).await.unwrap();
+
+        let sets = crate::tournament::db::list_sets_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        // Ordered by round then position, so the first two are round one.
+        assert_eq!(sets[0].status, "ready");
+        assert_eq!(sets[1].status, "ready");
+        assert_eq!(sets[2].status, "pending", "the final waits on its feeders");
+    }
+
+    #[tokio::test]
+    async fn byes_are_decided_at_start_and_their_occupant_advances() {
+        let pool = test_pool().await;
+        // 3 entrants in a 4-bracket: seed 1 is unopposed.
+        let tournament = setup_startable(&pool, 3).await;
+
+        crate::tournament::start::start(&pool, &tournament).await.unwrap();
+
+        let sets = crate::tournament::db::list_sets_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        let bye = sets
+            .iter()
+            .find(|s| s.status == "bye")
+            .expect("seed 1 should have a bye");
+        assert_eq!(bye.winner_user_id, Some(1), "the occupant wins it");
+        assert!(bye.completed_at.is_some());
+
+        // And seed 1 is already sitting in the final.
+        let final_set = sets.last().unwrap();
+        assert_eq!(final_set.slot1_user_id, Some(1));
+        assert_eq!(final_set.status, "pending", "still waiting on the other half");
+    }
+
+    #[tokio::test]
+    async fn a_set_fed_by_two_byes_is_playable_immediately() {
+        let pool = test_pool().await;
+        // 5 in an 8-bracket: seeds 1, 2 and 3 are unopposed, and round two's
+        // lower set is fed by two of those byes.
+        let tournament = setup_startable(&pool, 5).await;
+
+        crate::tournament::start::start(&pool, &tournament).await.unwrap();
+
+        let sets = crate::tournament::db::list_sets_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        let byes = sets.iter().filter(|s| s.status == "bye").count();
+        assert_eq!(byes, 3);
+
+        let round_two_ready = sets
+            .iter()
+            .filter(|s| s.status == "ready" && s.slot1_user_id.is_some() && s.slot2_user_id.is_some())
+            .count();
+        assert!(
+            round_two_ready >= 2,
+            "the real round-one set and the two-bye round-two set should both be ready: {sets:?}",
+            sets = sets
+                .iter()
+                .map(|s| (&s.status, s.slot1_user_id, s.slot2_user_id))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_is_refused_outside_seeding_and_writes_nothing() {
+        let pool = test_pool().await;
+        let tournament = setup_startable(&pool, 4).await;
+        crate::tournament::db::update_tournament_status(&pool, tournament.id, "registration")
+            .await
+            .unwrap();
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let outcome = crate::tournament::start::start(&pool, &tournament).await.unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::start::StartOutcome::NotSeeding { .. }
+        ));
+        assert!(
+            crate::tournament::db::list_sets_for_tournament(&pool, tournament.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused start must not persist a bracket"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_is_refused_without_a_preset() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "seeding").await;
+        crate::tournament::db::set_scheduled_start_at(&pool, tournament.id, chrono::Utc::now())
+            .await
+            .unwrap();
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let outcome = crate::tournament::start::start(&pool, &tournament).await.unwrap();
+        assert_eq!(outcome, crate::tournament::start::StartOutcome::NotConfigured);
+    }
+
+    #[tokio::test]
+    async fn starting_is_refused_before_the_scheduled_time() {
+        let pool = test_pool().await;
+        let tournament = setup_startable(&pool, 4).await;
+        crate::tournament::db::set_scheduled_start_at(
+            &pool,
+            tournament.id,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await
+        .unwrap();
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let outcome = crate::tournament::start::start(&pool, &tournament).await.unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::start::StartOutcome::TooEarly { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn starting_is_refused_when_a_withdrawal_left_a_seed_gap() {
+        let pool = test_pool().await;
+        let tournament = setup_startable(&pool, 4).await;
+        // Withdrawal stays open through seeding (§8.4), which is how a gap happens.
+        crate::tournament::db::update_entry_status(&pool, tournament.id, 2, "withdrawn")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::start::start(&pool, &tournament).await.unwrap();
+        assert_eq!(outcome, crate::tournament::start::StartOutcome::SeedsNotContiguous);
+    }
+
     // Bracket message reconciliation (chunk 29).
 
     #[tokio::test]
