@@ -4,6 +4,9 @@
 // lands, only this module's own tests exercise it — remove the allow then.
 #[allow(dead_code)]
 pub(crate) mod bracket;
+// The bracket as Discord sees it (chunk 29, §8.6): a preview from the first two
+// entrants, becoming the real thing in place once the event starts.
+pub(crate) mod bracket_view;
 // `/tournament admin add|remove|list` (§8.2) — the codebase's first access control.
 pub(crate) mod access;
 // The interaction dispatcher's custom_id parsing (chunk 8, §8.5): consumed

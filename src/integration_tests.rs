@@ -1385,6 +1385,79 @@ mod tests {
         assert_eq!(entries[0].elo, Some(1234));
     }
 
+    // Bracket message reconciliation (chunk 29).
+
+    #[tokio::test]
+    async fn deleting_the_bracket_tail_removes_exactly_the_surplus() {
+        // The field shrinking past a power of two leaves fewer chunks than last
+        // time, and the leftovers are the bottom of a bracket that no longer
+        // exists.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        for ordinal in 0..4 {
+            crate::tournament::db::upsert_bracket_message(&pool, tournament.id, ordinal, 1000 + ordinal)
+                .await
+                .unwrap();
+        }
+
+        crate::tournament::db::delete_bracket_messages_from(&pool, tournament.id, 2)
+            .await
+            .unwrap();
+
+        let left = crate::tournament::db::list_bracket_messages(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert_eq!(left.iter().map(|m| m.ordinal).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn deleting_from_zero_clears_every_chunk() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::upsert_bracket_message(&pool, tournament.id, 0, 1000)
+            .await
+            .unwrap();
+
+        crate::tournament::db::delete_bracket_messages_from(&pool, tournament.id, 0)
+            .await
+            .unwrap();
+
+        assert!(
+            crate::tournament::db::list_bracket_messages(&pool, tournament.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bracket_message_belongs_to_its_own_tournament() {
+        let pool = test_pool().await;
+        let mine = setup_tournament(&pool, "registration").await;
+        let theirs = crate::tournament::db::insert_tournament(&pool, "other-cup", "Other", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::upsert_bracket_message(&pool, mine.id, 0, 1000)
+            .await
+            .unwrap();
+        crate::tournament::db::upsert_bracket_message(&pool, theirs, 0, 2000)
+            .await
+            .unwrap();
+
+        crate::tournament::db::delete_bracket_messages_from(&pool, mine.id, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            crate::tournament::db::list_bracket_messages(&pool, theirs)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "another tournament's bracket must be untouched"
+        );
+    }
+
     // Entrant cap gate tests (chunk 27).
 
     async fn register_nth(

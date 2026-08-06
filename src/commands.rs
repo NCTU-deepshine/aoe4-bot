@@ -11,7 +11,8 @@ use crate::tournament::access::{
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
-    audit, checkin, checkin_panel, panel, registration, seed_panel, seeding, setup as tournament_setup, teardown,
+    audit, bracket_view, checkin, checkin_panel, panel, registration, seed_panel, seeding, setup as tournament_setup,
+    teardown,
 };
 use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
@@ -609,7 +610,11 @@ pub async fn register(
     ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
 
     if outcome.changed_state() {
+        if let Some(entry) = tournament_db::get_entry(pool, tournament.id, user_id).await? {
+            registration::snapshot_entry_elo(pool, tournament.id, user_id, entry.aoe4_id).await;
+        }
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
     }
     Ok(())
 }
@@ -688,6 +693,7 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
 
     if outcome.changed_state() {
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
     }
     Ok(())
 }
@@ -1295,6 +1301,7 @@ pub async fn seed_set(
 
     let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
     seed_panel::refresh(ctx.http(), pool, &tournament).await?;
+    bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
     ctx.say(outcome.message(locale)).await?;
     Ok(())
 }
@@ -1317,6 +1324,7 @@ pub async fn seed_refresh(ctx: Context<'_>) -> Result<(), Error> {
     // Discards any override — that is the point of asking for a refresh, and
     // `seed set` is how you put one back.
     let message = seed_and_post_panel(ctx, &tournament, locale).await?;
+    bracket_view::reconcile(ctx.http(), &ctx.data().database, &tournament).await?;
     ctx.say(message).await?;
     Ok(())
 }

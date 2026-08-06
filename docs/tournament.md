@@ -1072,6 +1072,20 @@ by the bracket itself (§8.6). Bilingual, like the other panels and for the same
 
 An ASCII bracket in a code block, posted in `#…-bracket` and edited in place as results land.
 
+**It exists from the first two entrants**, as a labelled *preview* of the draw the current field
+implies, and the same messages become the real bracket once the event starts. Generation is pure and
+cheap, so redrawing on every sign-up costs nothing worth counting — what costs is Discord, which is
+why the redraw is throttled with the panels.
+
+**The message count is not fixed.** It follows the bracket size, which jumps at powers of two: 8
+entrants render to one message and 9 to three. A redraw therefore edits the chunk that already has a
+message, posts one where it does not, and deletes any surplus tail — otherwise the bottom of a larger
+bracket lingers beneath a smaller one. Ordinals in `tournament_bracket_messages` are what make that
+reconciliation possible.
+
+The preview needs no draft preset: `bracket::build` wants one `best_of` per round, but match length
+appears nowhere in the drawing, so a filler serves.
+
 ```
 MarineLorD   2 ─┐
                 ├─ MarineLorD     ─┐

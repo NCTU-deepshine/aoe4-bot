@@ -14,7 +14,7 @@ use crate::tournament::action::{self, Action};
 use crate::tournament::checkin::CheckinOutcome;
 use crate::tournament::registration::{RegisterOutcome, WithdrawOutcome};
 use crate::tournament::throttle::EditThrottle;
-use crate::tournament::{audit, checkin, checkin_panel, db, panel, registration};
+use crate::tournament::{audit, bracket_view, checkin, checkin_panel, db, panel, registration};
 use serenity::all::{
     ComponentInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
     Interaction,
@@ -115,6 +115,7 @@ impl Dispatcher {
                 registration::snapshot_entry_elo(&self.pool, tournament.id, user_id, entry.aoe4_id).await;
             }
             self.refresh_panel(ctx, &tournament).await;
+            self.reconcile_bracket(ctx, &tournament).await;
         }
     }
 
@@ -153,6 +154,7 @@ impl Dispatcher {
 
         if matches!(outcome, WithdrawOutcome::Success) {
             self.refresh_panel(ctx, &tournament).await;
+            self.reconcile_bracket(ctx, &tournament).await;
         }
     }
 
@@ -221,6 +223,14 @@ impl Dispatcher {
                 "failed to refresh the registration panel for tournament {}: {err:?}",
                 tournament.id
             );
+        }
+    }
+
+    /// The draw follows the field, and the preview exists from the first two
+    /// entrants (§8.6), so a sign-up or withdrawal redraws it.
+    async fn reconcile_bracket(&self, ctx: &Context, tournament: &db::Tournament) {
+        if let Err(err) = bracket_view::reconcile(&ctx.http, &self.pool, tournament).await {
+            error!("failed to redraw the bracket for tournament {}: {err:?}", tournament.id);
         }
     }
 

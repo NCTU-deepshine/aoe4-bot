@@ -185,6 +185,17 @@ Design: §3.3, §8.3, §4.
 Gate: the preset cascade resolved at every depth; the cap refusing at the boundary, freed by a withdrawal, and
 not leaking via rejoin; preset validation against a saved payload; a local wall time stored as the right UTC.
 
+**29. The live bracket preview**
+The bracket drawn into `#…-bracket` from the first two entrants, labelled provisional, redrawn as the field
+and the seeding change. `bracket_view::preview_rounds` orders by `seeding::suggested_order` and feeds chunk 5's
+renderer; chunk 12 then reuses the same messages for the real thing rather than publishing its own. The
+awkward part is that the message count follows the bracket size, so a redraw reconciles — edit, post, and
+delete the surplus tail via `delete_bracket_messages_from`.
+Design: §8.6.
+Gate: no draw below two entrants; byes on the top seeds for a non-power-of-two field; the order following
+suggested seeding rather than registration; the tail delete removing exactly the surplus and nothing from
+another tournament.
+
 ## Phase E — the draft tool
 
 **14. Draft-tool client**

@@ -1621,6 +1621,32 @@ pub(crate) async fn upsert_bracket_message(
     Ok(())
 }
 
+/// Drops every chunk from `ordinal` onwards.
+///
+/// The bracket's message count is not fixed: it follows the field size, which
+/// jumps at powers of two — 8 entrants render to one message, 9 to three. When
+/// the field shrinks the surplus has to go, or a stale tail of a bigger bracket
+/// sits below the current one.
+pub(crate) async fn delete_bracket_messages_from(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    ordinal: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        delete from tournament_bracket_messages
+        where tournament_id = ?1
+          and ordinal >= ?2
+        ",
+    )
+    .bind(tournament_id)
+    .bind(ordinal)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 pub(crate) async fn list_bracket_messages(
     pool: &SqlitePool,
     tournament_id: i64,
