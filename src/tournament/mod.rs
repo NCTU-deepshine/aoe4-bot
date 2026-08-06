@@ -19,7 +19,7 @@ pub(crate) mod audit;
 #[allow(dead_code)]
 pub(crate) mod db;
 // `/tournament open-checkin|checkin|close-checkin`'s business logic (chunk 10,
-// §8.3, §8.5).
+// §8.3, §8.5), plus `reopen-registration`'s backward edge (chunk 25).
 pub(crate) mod checkin;
 // The check-in panel (chunk 10, §8.5): rendering plus the Discord/DB glue
 // `commands.rs` and `dispatch::Dispatcher` call into.

@@ -11,7 +11,7 @@ use crate::tournament::{audit, checkin, checkin_panel, panel, registration};
 use crate::{Context, Data, Error};
 use regex::Regex;
 use serenity::all::{
-    AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, PermissionOverwrite,
+    AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, MessageId, PermissionOverwrite,
     PermissionOverwriteType, Permissions, User,
 };
 use serenity::json::json;
@@ -188,7 +188,8 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "withdraw",
         "open_checkin",
         "check_in",
-        "close_checkin"
+        "close_checkin",
+        "reopen_registration"
     ),
     subcommand_required
 )]
@@ -583,7 +584,8 @@ pub async fn open_checkin(
             closes_at,
         )
         .await?;
-        tournament_db::set_checkin_message_id(pool, tournament.id, i64::try_from(message_id.get()).unwrap()).await?;
+        tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
+            .await?;
     }
 
     ctx.say(outcome.message(&tournament.name)).await?;
@@ -637,6 +639,65 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
 
     ctx.say(outcome.message(&tournament.name)).await?;
     Ok(())
+}
+
+// The one backward lifecycle edge (docs/tournament.md §8.3), for a check-in
+// opened too early or closed too soon. A full reset rather than a partial undo:
+// the check-in panel is deleted outright, so the next `/tournament open-checkin`
+// posts a fresh one instead of orphaning the old message behind a new id.
+/// Reopens registration: undoes check-in and puts the tournament back in registration.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    rename = "reopen-registration"
+)]
+pub async fn reopen_registration(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let outcome = checkin::reopen_registration(pool, &tournament).await?;
+    audit::log_action(
+        "reopen-registration",
+        tournament.id,
+        &tournament.slug,
+        ctx.author(),
+        &outcome,
+    );
+
+    if outcome.changed_state() {
+        // `tournament` is the pre-reset snapshot, so it still carries the
+        // message id the row no longer does.
+        delete_checkin_panel(ctx, &tournament).await;
+        panel::refresh_now(ctx.http(), pool, &tournament).await?;
+    }
+
+    ctx.say(outcome.message(&tournament.name)).await?;
+    Ok(())
+}
+
+/// Best-effort: the database reset has already committed, and an admin who
+/// deleted the panel by hand should not turn a successful reopen into a failure.
+async fn delete_checkin_panel(ctx: Context<'_>, tournament: &tournament_db::Tournament) {
+    let (Some(checkin_message_id), Some(register_channel_id)) =
+        (tournament.checkin_message_id, tournament.register_channel_id)
+    else {
+        return;
+    };
+
+    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+    let message_id = MessageId::new(u64::try_from(checkin_message_id).unwrap());
+    if let Err(err) = channel_id.delete_message(ctx.http(), message_id).await {
+        error!(
+            "failed to delete the check-in panel for tournament {}: {err:?}",
+            tournament.id
+        );
+    }
 }
 
 #[cfg(test)]

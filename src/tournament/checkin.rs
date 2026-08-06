@@ -15,6 +15,13 @@ pub(crate) fn checkin_is_open(status: &str) -> bool {
     status == "checkin"
 }
 
+/// The one backward edge in the lifecycle (§8.3) starts from exactly these:
+/// before them there is no check-in round to undo, after them the field is
+/// locked in and the recovery is `/tournament cancel` instead.
+pub(crate) fn registration_is_reopenable(status: &str) -> bool {
+    matches!(status, "checkin" | "seeding")
+}
+
 /// `(checked_in, total)` over the entrants check-in ever applied to — `active`
 /// plus `no_show`, since a no-show was `active` for the whole time check-in was
 /// running. `withdrawn` entries never entered that pool and are excluded
@@ -205,6 +212,78 @@ pub(crate) async fn close(pool: &SqlitePool, tournament: &Tournament) -> Result<
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ReopenRegistrationOutcome {
+    Reopened { restored_count: u64, cleared_count: u64 },
+    AlreadyInRegistration,
+    NotReopenable { current_status: String },
+}
+
+impl ReopenRegistrationOutcome {
+    pub(crate) fn message(&self, tournament_name: &str) -> String {
+        match self {
+            ReopenRegistrationOutcome::Reopened {
+                restored_count,
+                cleared_count,
+            } => {
+                format!(
+                    "Registration is open again for **{tournament_name}** — check-in was reset \
+                     ({cleared_count} check-ins cleared, {restored_count} no-shows restored). \
+                     Use `/tournament open-checkin` when you're ready to run check-in again."
+                )
+            },
+            ReopenRegistrationOutcome::AlreadyInRegistration => {
+                format!("**{tournament_name}** is already in registration — nothing to reopen.")
+            },
+            ReopenRegistrationOutcome::NotReopenable { current_status } => {
+                format!(
+                    "Registration can only be reopened while **{tournament_name}** is in check-in or seeding \
+                     (currently {current_status})."
+                )
+            },
+        }
+    }
+
+    /// Whether anything actually changed — the caller's signal for whether to
+    /// delete the check-in panel and re-render the registration one.
+    pub(crate) fn changed_state(&self) -> bool {
+        matches!(self, ReopenRegistrationOutcome::Reopened { .. })
+    }
+}
+
+/// Walks `checkin`/`seeding` back to `registration` as a full reset of the
+/// check-in round (§8.3): no-shows return to `active`, every `checked_in_at`
+/// clears, and the check-in panel's handles are dropped so `open` posts a fresh
+/// one rather than overwriting a live id. Deleting that message is the caller's
+/// job — this module stays Discord-free.
+///
+/// Not transactional, for the same reason `close` isn't (see its doc comment):
+/// each statement is independently atomic and nothing else races these rows.
+pub(crate) async fn reopen_registration(
+    pool: &SqlitePool,
+    tournament: &Tournament,
+) -> Result<ReopenRegistrationOutcome, sqlx::Error> {
+    if tournament.status == "registration" {
+        return Ok(ReopenRegistrationOutcome::AlreadyInRegistration);
+    }
+    if !registration_is_reopenable(&tournament.status) {
+        return Ok(ReopenRegistrationOutcome::NotReopenable {
+            current_status: tournament.status.clone(),
+        });
+    }
+
+    let restored_count = db::revert_no_shows(pool, tournament.id).await?;
+    let cleared_count = db::clear_checkins(pool, tournament.id).await?;
+    db::update_tournament_status(pool, tournament.id, "registration").await?;
+    db::set_checkin_closes_at(pool, tournament.id, None).await?;
+    db::set_checkin_message_id(pool, tournament.id, None).await?;
+
+    Ok(ReopenRegistrationOutcome::Reopened {
+        restored_count,
+        cleared_count,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +328,33 @@ mod tests {
     #[test]
     fn counts_are_zero_with_no_entries() {
         assert_eq!(checkin_counts(&[]), (0, 0));
+    }
+
+    #[test]
+    fn registration_is_reopenable_only_from_checkin_and_seeding() {
+        assert!(registration_is_reopenable("checkin"));
+        assert!(registration_is_reopenable("seeding"));
+        for status in ["registration", "running", "completed", "canceled"] {
+            assert!(!registration_is_reopenable(status), "{status} should not be reopenable");
+        }
+    }
+
+    #[test]
+    fn only_reopened_changes_panel_state() {
+        assert!(
+            ReopenRegistrationOutcome::Reopened {
+                restored_count: 1,
+                cleared_count: 2
+            }
+            .changed_state()
+        );
+        assert!(!ReopenRegistrationOutcome::AlreadyInRegistration.changed_state());
+        assert!(
+            !ReopenRegistrationOutcome::NotReopenable {
+                current_status: "running".to_string()
+            }
+            .changed_state()
+        );
     }
 
     #[test]

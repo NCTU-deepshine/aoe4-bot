@@ -1115,4 +1115,161 @@ mod tests {
             .unwrap();
         assert_eq!(tournament.status, "seeding");
     }
+
+    // Chunk 25 (/tournament reopen-registration) gate tests.
+
+    /// A tournament in `status` with three entrants and a check-in round already
+    /// run over them: 1 checked in, 2 was marked no-show, 3 withdrew beforehand.
+    /// Panel handles are set so a reopen has something to clear.
+    async fn setup_reopenable_tournament(pool: &SqlitePool, status: &str) -> crate::tournament::db::Tournament {
+        let tournament = setup_tournament(pool, "checkin").await;
+        for (user_id, aoe4_id) in [(1, 100), (2, 200), (3, 300)] {
+            crate::tournament::db::insert_player_if_absent(pool, user_id, aoe4_id, "P")
+                .await
+                .unwrap();
+            crate::tournament::db::insert_entry(pool, tournament.id, user_id, aoe4_id, "P")
+                .await
+                .unwrap();
+        }
+        crate::tournament::db::update_entry_status(pool, tournament.id, 3, "withdrawn")
+            .await
+            .unwrap();
+        crate::tournament::checkin::checkin(pool, &tournament, 1).await.unwrap();
+        crate::tournament::db::mark_no_shows(pool, tournament.id).await.unwrap();
+        crate::tournament::db::set_checkin_message_id(pool, tournament.id, Some(999))
+            .await
+            .unwrap();
+        crate::tournament::db::set_checkin_closes_at(pool, tournament.id, Some(chrono::Utc::now()))
+            .await
+            .unwrap();
+
+        crate::tournament::db::update_tournament_status(pool, tournament.id, status)
+            .await
+            .unwrap();
+        crate::tournament::db::get_tournament(pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reopen_registration_is_refused_once_the_field_is_locked_in() {
+        for status in ["running", "completed", "canceled"] {
+            let pool = test_pool().await;
+            let tournament = setup_reopenable_tournament(&pool, status).await;
+
+            let outcome = crate::tournament::checkin::reopen_registration(&pool, &tournament)
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                crate::tournament::checkin::ReopenRegistrationOutcome::NotReopenable {
+                    current_status: status.to_string()
+                }
+            );
+
+            // Refused means untouched, not merely unreported.
+            let after = crate::tournament::db::get_tournament(&pool, tournament.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.status, status);
+            assert_eq!(after.checkin_message_id, Some(999));
+            let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+                .await
+                .unwrap();
+            assert!(entries.iter().any(|e| e.status == "no_show"));
+        }
+    }
+
+    #[tokio::test]
+    async fn reopen_registration_is_a_no_op_when_already_in_registration() {
+        let pool = test_pool().await;
+        let tournament = setup_reopenable_tournament(&pool, "registration").await;
+
+        let outcome = crate::tournament::checkin::reopen_registration(&pool, &tournament)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::checkin::ReopenRegistrationOutcome::AlreadyInRegistration
+        );
+
+        let after = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.checkin_message_id, Some(999));
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert!(entries.iter().any(|e| e.checked_in_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn reopen_registration_from_checkin_clears_the_whole_checkin_round() {
+        let pool = test_pool().await;
+        let tournament = setup_reopenable_tournament(&pool, "checkin").await;
+
+        let outcome = crate::tournament::checkin::reopen_registration(&pool, &tournament)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::checkin::ReopenRegistrationOutcome::Reopened {
+                restored_count: 1,
+                cleared_count: 1
+            }
+        );
+
+        let after = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "registration");
+        assert_eq!(after.checkin_message_id, None);
+        assert_eq!(after.checkin_closes_at, None);
+
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert!(entries.iter().all(|e| e.checked_in_at.is_none()));
+    }
+
+    #[tokio::test]
+    async fn reopen_registration_from_seeding_restores_no_shows_but_not_withdrawals() {
+        let pool = test_pool().await;
+        let tournament = setup_reopenable_tournament(&pool, "seeding").await;
+
+        crate::tournament::checkin::reopen_registration(&pool, &tournament)
+            .await
+            .unwrap();
+
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        let status_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().status.clone();
+        assert_eq!(status_of(1), "active");
+        assert_eq!(status_of(2), "active", "the no-show should be back in the field");
+        assert_eq!(status_of(3), "withdrawn", "a withdrawal is not a no-show");
+    }
+
+    #[tokio::test]
+    async fn reopen_registration_clears_seeds() {
+        let pool = test_pool().await;
+        let tournament = setup_reopenable_tournament(&pool, "seeding").await;
+        // Nothing writes these before chunk 11, so seed them by hand.
+        crate::tournament::db::set_entry_seed(&pool, tournament.id, 1, Some(1), Some(2))
+            .await
+            .unwrap();
+
+        crate::tournament::checkin::reopen_registration(&pool, &tournament)
+            .await
+            .unwrap();
+
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert!(entries.iter().all(|e| e.seed.is_none() && e.suggested_seed.is_none()));
+    }
 }

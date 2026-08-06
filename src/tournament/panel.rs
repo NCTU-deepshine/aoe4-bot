@@ -102,6 +102,31 @@ pub(crate) async fn refresh(
         return Ok(());
     }
 
+    edit(http, pool, register_channel_id, message_id, tournament).await
+}
+
+/// The unconditional edit on a phase change — bypasses the throttle, since this
+/// fires once per admin command rather than once per button press. Used by
+/// `/tournament reopen-registration`, which restores no-shows to the roster and
+/// so must not have its re-render coalesced away.
+pub(crate) async fn refresh_now(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> Result<(), Error> {
+    let (Some(register_message_id), Some(register_channel_id)) =
+        (tournament.register_message_id, tournament.register_channel_id)
+    else {
+        return Ok(());
+    };
+
+    let message_id = MessageId::new(u64::try_from(register_message_id).unwrap());
+    edit(http, pool, register_channel_id, message_id, tournament).await
+}
+
+async fn edit(
+    http: impl CacheHttp,
+    pool: &SqlitePool,
+    register_channel_id: i64,
+    message_id: MessageId,
+    tournament: &Tournament,
+) -> Result<(), Error> {
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
     let (content, components) = render(tournament.id, &tournament.name, &entries);
 

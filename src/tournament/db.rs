@@ -169,12 +169,13 @@ pub(crate) async fn set_register_message_id(
     Ok(())
 }
 
-/// The check-in panel's message id (docs/tournament.md §8.5) — set once, right
-/// after `/tournament open-checkin` posts the panel to the register channel.
+/// The check-in panel's message id (docs/tournament.md §8.5) — set right after
+/// `/tournament open-checkin` posts the panel to the register channel, and back
+/// to `None` by `/tournament reopen-registration`, which deletes that message.
 pub(crate) async fn set_checkin_message_id(
     pool: &SqlitePool,
     id: i64,
-    checkin_message_id: i64,
+    checkin_message_id: Option<i64>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(r"update tournaments set checkin_message_id = ?1 where id = ?2")
         .bind(checkin_message_id)
@@ -714,6 +715,48 @@ pub(crate) async fn mark_no_shows(pool: &SqlitePool, tournament_id: i64) -> Resu
         where tournament_id = ?1
           and status = 'active'
           and checked_in_at is null
+        ",
+    )
+    .bind(tournament_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.rows_affected())
+}
+
+/// `mark_no_shows`'s exact inverse, for `/tournament reopen-registration`
+/// (docs/tournament.md §8.3). Only `no_show` is touched, and only `mark_no_shows`
+/// ever writes that status, so every row this restores was `active` before —
+/// `withdrawn` and `eliminated` entries are deliberately left alone.
+pub(crate) async fn revert_no_shows(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        update tournament_entries
+        set status = 'active'
+        where tournament_id = ?1
+          and status = 'no_show'
+        ",
+    )
+    .bind(tournament_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.rows_affected())
+}
+
+/// Wipes the whole check-in round for `/tournament reopen-registration` (§8.3).
+/// The seed columns go too: nothing writes them before chunk 11, but a reopen
+/// out of `seeding` is precisely when they would be stale, and the
+/// `unique (tournament_id, seed)` index tolerates repeated nulls.
+pub(crate) async fn clear_checkins(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        update tournament_entries
+        set checked_in_at = null,
+            seed = null,
+            suggested_seed = null
+        where tournament_id = ?1
+          and (checked_in_at is not null or seed is not null or suggested_seed is not null)
         ",
     )
     .bind(tournament_id)

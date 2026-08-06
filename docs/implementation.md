@@ -145,9 +145,10 @@ Design: §8.4, §8.6.
 
 **25. `/tournament reopen-registration`**
 The one backward lifecycle edge, for admin mistakes. Reverts `checkin` or `seeding` to `registration`:
-`no_show` entries back to `active`, every `checked_in_at` cleared, `checkin_closes_at` and
-`checkin_message_id` nulled, and the check-in panel message deleted so a later `open-checkin` posts a clean
-one. Needs `set_checkin_message_id` widened to `Option<i64>` (mirroring `set_checkin_closes_at`), an inverse of
+`no_show` entries back to `active`, every `checked_in_at` cleared along with `seed`/`suggested_seed` (null
+until chunk 11 writes them, but a reopen out of `seeding` is exactly when they would be stale),
+`checkin_closes_at` and `checkin_message_id` nulled, and the check-in panel message deleted so a later
+`open-checkin` posts a clean one. Needs `set_checkin_message_id` widened to `Option<i64>` (mirroring `set_checkin_closes_at`), an inverse of
 `mark_no_shows`, and an unthrottled `panel::refresh_now` mirroring `checkin_panel::close` — restoring no-shows
 changes the registration roster, and a phase change deserves a guaranteed edit rather than a throttled one. No
 migration: the `check` constraints already permit both target values.
