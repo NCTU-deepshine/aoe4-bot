@@ -249,8 +249,11 @@ after 24 must use it for new text from the start.
 **24. Localization (zh-TW, English default)**
 A `Locale` enum and `from_discord_locale`, resolved per-interaction from `Context::locale()`
 (slash commands) / `ComponentInteraction.locale` (buttons) — never `guild_locale`. Retrofits the outcome
-messages of chunks 7–10, 25 and 26, both panels' content and button labels, and `access.rs`'s ephemeral
-refusals to take a `Locale` and render accordingly.
+messages of chunks 7–10, 25 and 26, `access.rs`'s refusals, `commands.rs`'s own replies, and the shared
+`errors.rs`/`guilds.rs` notices (neither is home-guild-only) to take a `Locale`. Both panels go **bilingual**
+instead, keeping no `locale` parameter: they are shared messages that re-render on every button press, so a
+per-reader language would flip. Collapses the ten identical wrong-channel refusals into
+`resolve_tournament_by_channel`, which would otherwise have become ten two-language pairs.
 Design: §8.10.
 Gate: §10's localization list — `"zh-TW"` and only `"zh-TW"` resolves to `Locale::ZhTw`; `"zh-CN"`, empty, and
 an unrecognized code all fall back to `Locale::En`; every retrofitted message renders correctly in both.

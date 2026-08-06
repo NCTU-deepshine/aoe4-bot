@@ -23,6 +23,7 @@ mod errors;
 mod guilds;
 #[cfg(test)]
 mod integration_tests;
+mod locale;
 mod ranked;
 mod refresh;
 mod reply;

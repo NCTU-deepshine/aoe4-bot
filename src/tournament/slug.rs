@@ -7,6 +7,7 @@
 /// `-register` is the longest of the four suffixes (`-register`/`-bracket`/
 /// `-draft`/`-matches`), so bounding the slug to leave room for it bounds every
 /// created channel name under the platform's 100-character limit.
+use crate::locale::Locale;
 const LONGEST_SUFFIX_LEN: usize = "-register".len();
 const MAX_SLUG_LEN: usize = 100 - LONGEST_SUFFIX_LEN;
 
@@ -19,13 +20,20 @@ pub(crate) enum SlugError {
 
 impl SlugError {
     /// User-facing text for the ephemeral refusal in `commands::create`.
-    pub(crate) fn message(self) -> String {
+    pub(crate) fn message(self, locale: Locale) -> String {
         match self {
-            SlugError::Empty => "Slug cannot be empty.".to_string(),
-            SlugError::TooLong => format!("Slug must be at most {MAX_SLUG_LEN} characters."),
-            SlugError::InvalidCharacters => "Slug must be lowercase letters, digits and hyphens only \
+            SlugError::Empty => locale.pick("簡稱不能是空的。", "Slug cannot be empty.").to_string(),
+            SlugError::TooLong => locale.pick(
+                format!("簡稱最多 {MAX_SLUG_LEN} 個字元。"),
+                format!("Slug must be at most {MAX_SLUG_LEN} characters."),
+            ),
+            SlugError::InvalidCharacters => locale.pick(
+                "簡稱只能使用小寫英文字母、數字和連字號（例如 `relic-cup`），開頭與結尾不能是連字號，也不能連續兩個。"
+                    .to_string(),
+                "Slug must be lowercase letters, digits and hyphens only \
                  (e.g. `relic-cup`), with no leading, trailing or doubled hyphen."
-                .to_string(),
+                    .to_string(),
+            ),
         }
     }
 }

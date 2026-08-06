@@ -1,3 +1,4 @@
+use crate::locale::Locale;
 use crate::reply::ephemeral;
 use crate::{Context, Data, Error};
 use poise::FrameworkError;
@@ -15,18 +16,34 @@ pub(crate) async fn on_error(err: FrameworkError<'_, Data, Error>) {
         // the user only what they can act on.
         FrameworkError::Command { error, ctx, .. } => {
             error!("command `{}` failed: {error:?}", ctx.command().qualified_name);
-            notify(ctx, "指令執行失敗，請稍後再試。").await;
+            notify(ctx, command_failed(ctx)).await;
         },
         FrameworkError::CommandPanic { payload, ctx, .. } => {
             error!("command `{}` panicked: {payload:?}", ctx.command().qualified_name);
-            notify(ctx, "指令執行失敗，請稍後再試。").await;
+            notify(ctx, command_failed(ctx)).await;
         },
 
         // Gating. Nothing declares these requirements yet; the tournament commands
         // will, and they should not each have to word the refusal.
-        FrameworkError::GuildOnly { ctx, .. } => notify(ctx, "這個指令只能在伺服器中使用。").await,
+        FrameworkError::GuildOnly { ctx, .. } => {
+            notify(
+                ctx,
+                Locale::from_context(ctx).pick(
+                    "這個指令只能在伺服器中使用。",
+                    "This command can only be used in a server.",
+                ),
+            )
+            .await
+        },
         FrameworkError::NotAnOwner { ctx, .. } | FrameworkError::MissingUserPermissions { ctx, .. } => {
-            notify(ctx, "你沒有權限使用這個指令。").await
+            notify(
+                ctx,
+                Locale::from_context(ctx).pick(
+                    "你沒有權限使用這個指令。",
+                    "You don't have permission to use this command.",
+                ),
+            )
+            .await
         },
         FrameworkError::MissingBotPermissions {
             missing_permissions,
@@ -37,7 +54,14 @@ pub(crate) async fn on_error(err: FrameworkError<'_, Data, Error>) {
                 "bot lacks {missing_permissions} in guild {:?}",
                 ctx.guild_id().map(|id| id.get())
             );
-            notify(ctx, "我在這個伺服器缺少必要的權限，請聯絡管理員。").await
+            notify(
+                ctx,
+                Locale::from_context(ctx).pick(
+                    "我在這個伺服器缺少必要的權限，請聯絡管理員。",
+                    "I'm missing a permission I need in this server — please contact an admin.",
+                ),
+            )
+            .await
         },
 
         // A check that wants to explain itself replies before returning false, so
@@ -46,7 +70,7 @@ pub(crate) async fn on_error(err: FrameworkError<'_, Data, Error>) {
         FrameworkError::CommandCheckFailed { error, ctx, .. } => match error {
             Some(error) => {
                 error!("check for `{}` errored: {error:?}", ctx.command().qualified_name);
-                notify(ctx, "指令執行失敗，請稍後再試。").await;
+                notify(ctx, command_failed(ctx)).await;
             },
             None => info!(
                 "check refused `{}` for user {}",
@@ -63,6 +87,15 @@ pub(crate) async fn on_error(err: FrameworkError<'_, Data, Error>) {
             }
         },
     }
+}
+
+/// The one "something broke on our side" wording, shared by the three arms that
+/// mean exactly that: a returned `Err`, a panic, and a check that itself errored.
+fn command_failed(ctx: Context<'_>) -> &'static str {
+    Locale::from_context(ctx).pick(
+        "指令執行失敗，請稍後再試。",
+        "That command failed — please try again shortly.",
+    )
 }
 
 /// Best-effort ephemeral notice from an error path. If even this fails there is

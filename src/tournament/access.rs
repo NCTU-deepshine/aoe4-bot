@@ -5,6 +5,7 @@
 //! functions around them do the one DB lookup and/or Discord permission fetch
 //! each decision actually needs.
 
+use crate::locale::Locale;
 use crate::reply::ephemeral;
 use crate::tournament::db;
 use crate::{Context, Error};
@@ -64,12 +65,7 @@ pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Erro
     let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
 
     let Some(tournament) = db::get_tournament_by_any_channel_id(pool, channel_id).await? else {
-        ephemeral(
-            ctx,
-            "This command must be run in one of the tournament's own channels \
-             (its announce, register, bracket, draft or matches channel).",
-        )
-        .await?;
+        ephemeral(ctx, wrong_channel_message(Locale::from_context(ctx))).await?;
         return Ok(false);
     };
 
@@ -82,7 +78,10 @@ pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Erro
     }
     ephemeral(
         ctx,
-        "Only the tournament's creator (or a member with Manage Guild) can do that.",
+        Locale::from_context(ctx).pick(
+            "只有賽事建立者（或擁有管理伺服器權限的成員）才能執行這個操作。",
+            "Only the tournament's creator (or a member with Manage Guild) can do that.",
+        ),
     )
     .await?;
     Ok(false)
@@ -96,12 +95,7 @@ pub(crate) async fn tournament_manage_only(ctx: Context<'_>) -> Result<bool, Err
     let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
 
     let Some(tournament) = db::get_tournament_by_any_channel_id(pool, channel_id).await? else {
-        ephemeral(
-            ctx,
-            "This command must be run in one of the tournament's own channels \
-             (its announce, register, bracket, draft or matches channel).",
-        )
-        .await?;
+        ephemeral(ctx, wrong_channel_message(Locale::from_context(ctx))).await?;
         return Ok(false);
     };
 
@@ -114,10 +108,24 @@ pub(crate) async fn tournament_manage_only(ctx: Context<'_>) -> Result<bool, Err
     }
     ephemeral(
         ctx,
-        "Only the tournament's creator, an admin, or a member with Manage Guild can do that.",
+        Locale::from_context(ctx).pick(
+            "只有賽事建立者、賽事管理員，或擁有管理伺服器權限的成員才能執行這個操作。",
+            "Only the tournament's creator, an admin, or a member with Manage Guild can do that.",
+        ),
     )
     .await?;
     Ok(false)
+}
+
+/// The one wording for "you're not in a tournament channel", shared by the two
+/// checks here and by `commands::resolve_tournament_by_channel` — ten call sites
+/// before this existed, which localizing would have turned into ten pairs.
+pub(crate) fn wrong_channel_message(locale: Locale) -> &'static str {
+    locale.pick(
+        "這個指令必須在賽事自己的頻道中執行（公告、報名、賽表、地圖選用或對戰頻道）。",
+        "This command must be run in one of the tournament's own channels \
+         (its announce, register, bracket, draft or matches channel).",
+    )
 }
 
 async fn author_has_manage_guild(ctx: Context<'_>) -> Result<bool, Error> {
@@ -149,7 +157,10 @@ pub(crate) async fn create_tournament_only(ctx: Context<'_>) -> Result<bool, Err
     }
     ephemeral(
         ctx,
-        "You need Manage Guild or the tournament organizer role to create a tournament.",
+        Locale::from_context(ctx).pick(
+            "你需要管理伺服器權限或賽事主辦身分組才能建立賽事。",
+            "You need Manage Guild or the tournament organizer role to create a tournament.",
+        ),
     )
     .await?;
     Ok(false)
@@ -168,6 +179,15 @@ mod tests {
 
     const CREATOR: i64 = 1;
     const OTHER: i64 = 2;
+
+    #[test]
+    fn the_wrong_channel_message_renders_in_both_locales() {
+        let zh = wrong_channel_message(Locale::ZhTw);
+        let en = wrong_channel_message(Locale::En);
+        assert_ne!(zh, en);
+        assert!(zh.contains("賽事自己的頻道"), "{zh}");
+        assert!(en.contains("tournament's own channels"), "{en}");
+    }
 
     #[test]
     fn the_creator_always_wins_regardless_of_the_other_flags() {

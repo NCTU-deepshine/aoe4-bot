@@ -30,13 +30,13 @@ pub(crate) fn render(tournament_id: i64, name: &str, entries: &[TournamentEntry]
     let active: Vec<&TournamentEntry> = entries.iter().filter(|e| e.status == "active").collect();
 
     let roster = if active.is_empty() {
-        "*No one has registered yet.*".to_string()
+        "*還沒有人報名。 / No one has registered yet.*".to_string()
     } else {
         let mut names: Vec<&str> = active.iter().map(|e| e.display_name.as_str()).collect();
         if names.len() > ROSTER_DISPLAY_CAP {
             let remaining = names.len() - ROSTER_DISPLAY_CAP;
             names.truncate(ROSTER_DISPLAY_CAP);
-            format!("{} · … and {remaining} more", names.join(" · "))
+            format!("{} · …等 {remaining} 人 / and {remaining} more", names.join(" · "))
         } else {
             names.join(" · ")
         }
@@ -46,18 +46,24 @@ pub(crate) fn render(tournament_id: i64, name: &str, entries: &[TournamentEntry]
     // exist until chunk 12 generates the bracket, so there's nothing true to say
     // about format yet. "Single elimination" itself is a fixed design decision
     // (§1), not per-round data, so it stays.
+    //
+    // Bilingual rather than per-reader (§8.10): one message, many readers, and it
+    // re-renders on every button press — picking any one of their languages would
+    // make it flip. Only the chrome doubles; the roster appears once.
     let content = format!(
-        "**{name} — registration is OPEN**\nSingle elimination · check-in required before start\n\n\
-         **Registered ({})**\n{roster}",
+        "**{name} — 報名進行中 / registration is OPEN**\n\
+         單淘汰 · 開賽前需簽到\n\
+         Single elimination · check-in required before start\n\n\
+         **已報名 / Registered ({})**\n{roster}",
         active.len()
     );
 
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new(Action::Register.custom_id(tournament_id))
-            .label("Register")
+            .label("報名 / Register")
             .style(ButtonStyle::Primary),
         CreateButton::new(Action::Withdraw.custom_id(tournament_id))
-            .label("Withdraw")
+            .label("退賽 / Withdraw")
             .style(ButtonStyle::Danger),
     ])];
 
@@ -164,10 +170,20 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_is_bilingual_rather_than_picking_a_reader() {
+        // §8.10: a shared message re-rendered by whoever presses a button, so it
+        // carries both languages instead of flipping between them.
+        let (content, _) = render(1, "Relic Cup", &[entry(1, "MarineLorD", "active")]);
+        assert!(content.contains("報名進行中"));
+        assert!(content.contains("registration is OPEN"));
+        assert!(content.contains("已報名 / Registered (1)"));
+    }
+
+    #[test]
     fn renders_a_placeholder_when_nobody_has_registered() {
         let (content, _) = render(1, "Relic Cup", &[]);
         assert!(content.contains("Registered (0)"));
-        assert!(content.contains("No one has registered yet."));
+        assert!(content.contains("還沒有人報名。 / No one has registered yet."));
     }
 
     #[test]
@@ -189,7 +205,7 @@ mod tests {
         let entries: Vec<TournamentEntry> = (1..=12).map(|i| entry(i, &format!("Player{i}"), "active")).collect();
         let (content, _) = render(1, "Relic Cup", &entries);
         assert!(content.contains("Registered (12)"));
-        assert!(content.contains("… and 2 more"));
+        assert!(content.contains("…等 2 人 / and 2 more"));
         assert!(!content.contains("Player11"));
     }
 
@@ -203,13 +219,13 @@ mod tests {
         assert_eq!(
             buttons[0],
             CreateButton::new(Action::Register.custom_id(42))
-                .label("Register")
+                .label("報名 / Register")
                 .style(ButtonStyle::Primary)
         );
         assert_eq!(
             buttons[1],
             CreateButton::new(Action::Withdraw.custom_id(42))
-                .label("Withdraw")
+                .label("退賽 / Withdraw")
                 .style(ButtonStyle::Danger)
         );
     }

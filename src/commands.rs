@@ -1,10 +1,13 @@
 use crate::aoe4world::search_players;
 use crate::db::{bind_account, to_db_id};
 use crate::guilds::{home_only, tournament_only};
+use crate::locale::Locale;
 use crate::ranked::try_create_ranked_without_account;
 use crate::refresh::do_refresh;
 use crate::reply::ephemeral;
-use crate::tournament::access::{create_tournament_only, tournament_admin_only, tournament_manage_only};
+use crate::tournament::access::{
+    create_tournament_only, tournament_admin_only, tournament_manage_only, wrong_channel_message,
+};
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{audit, checkin, checkin_panel, panel, registration, teardown};
@@ -215,6 +218,7 @@ pub async fn create(
     #[description = "Display name (defaults to this channel's category name)"] name: Option<String>,
     #[description = "Channel prefix (defaults to a slug derived from the name)"] slug: Option<String>,
 ) -> Result<(), Error> {
+    let locale = Locale::from_context(ctx);
     ctx.defer().await?;
 
     // guild_only + tournament_only already guarantee a real guild text channel,
@@ -229,7 +233,10 @@ pub async fn create(
             None => {
                 ephemeral(
                     ctx,
-                    "This channel has no category to name the tournament after — please provide a name.",
+                    locale.pick(
+                        "這個頻道沒有分類可以用來命名賽事 — 請直接提供名稱。",
+                        "This channel has no category to name the tournament after — please provide a name.",
+                    ),
                 )
                 .await?;
                 return Ok(());
@@ -244,7 +251,10 @@ pub async fn create(
             None => {
                 ephemeral(
                     ctx,
-                    "Couldn't derive a slug from that name — please provide one explicitly.",
+                    locale.pick(
+                        "無法從這個名稱產生簡稱 — 請自行指定一個。",
+                        "Couldn't derive a slug from that name — please provide one explicitly.",
+                    ),
                 )
                 .await?;
                 return Ok(());
@@ -253,13 +263,20 @@ pub async fn create(
     };
 
     if let Err(err) = validate_slug(&slug) {
-        ephemeral(ctx, err.message()).await?;
+        ephemeral(ctx, err.message(locale)).await?;
         return Ok(());
     }
 
     let pool = &ctx.data().database;
     if tournament_db::get_tournament_by_slug(pool, &slug).await?.is_some() {
-        ephemeral(ctx, format!("A tournament with slug `{slug}` already exists.")).await?;
+        ephemeral(
+            ctx,
+            locale.pick(
+                format!("簡稱 `{slug}` 已經有其他賽事在使用。"),
+                format!("A tournament with slug `{slug}` already exists."),
+            ),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -330,13 +347,22 @@ pub async fn create(
     );
 
     let category_note = if category_id.is_none() {
-        "\n(This channel has no category, so the new channels are uncategorized.)"
+        locale.pick(
+            "\n（這個頻道沒有分類，所以新頻道不屬於任何分類。）",
+            "\n(This channel has no category, so the new channels are uncategorized.)",
+        )
     } else {
         ""
     };
-    ctx.say(format!(
-        "Created **{name}** (`{slug}`): <#{}> <#{}> <#{}> <#{}>{category_note}",
-        register.id, bracket.id, draft.id, matches.id,
+    ctx.say(locale.pick(
+        format!(
+            "已建立 **{name}**（`{slug}`）：<#{}> <#{}> <#{}> <#{}>{category_note}",
+            register.id, bracket.id, draft.id, matches.id,
+        ),
+        format!(
+            "Created **{name}** (`{slug}`): <#{}> <#{}> <#{}> <#{}>{category_note}",
+            register.id, bracket.id, draft.id, matches.id,
+        ),
     ))
     .await?;
     Ok(())
@@ -381,9 +407,16 @@ pub async fn admin(_: Context<'_>) -> Result<(), Error> {
 /// Resolves the tournament for `/tournament admin *` from the invoking channel —
 /// the same lookup `tournament_admin_only` already did to authorize the call, but
 /// poise checks don't hand their result forward to the command body.
+/// Resolves the tournament from the invoking channel, **and answers when there
+/// isn't one** — every caller refused identically, so the reply lives here rather
+/// than in eight copies. `None` therefore means "already handled, just return".
 async fn resolve_tournament_by_channel(ctx: Context<'_>) -> Result<Option<tournament_db::Tournament>, Error> {
     let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
-    Ok(tournament_db::get_tournament_by_any_channel_id(&ctx.data().database, channel_id).await?)
+    let tournament = tournament_db::get_tournament_by_any_channel_id(&ctx.data().database, channel_id).await?;
+    if tournament.is_none() {
+        ephemeral(ctx, wrong_channel_message(Locale::from_context(ctx))).await?;
+    }
+    Ok(tournament)
 }
 
 #[poise::command(
@@ -393,8 +426,8 @@ async fn resolve_tournament_by_channel(ctx: Context<'_>) -> Result<Option<tourna
     check = "tournament_admin_only"
 )]
 pub async fn add(ctx: Context<'_>, user: User) -> Result<(), Error> {
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -410,7 +443,10 @@ pub async fn add(ctx: Context<'_>, user: User) -> Result<(), Error> {
     );
     ephemeral(
         ctx,
-        format!("Added {} as an admin for **{}**.", user.name, tournament.name),
+        locale.pick(
+            format!("已將 {} 加入成為 **{}** 的管理員。", user.name, tournament.name),
+            format!("Added {} as an admin for **{}**.", user.name, tournament.name),
+        ),
     )
     .await?;
     Ok(())
@@ -423,8 +459,8 @@ pub async fn add(ctx: Context<'_>, user: User) -> Result<(), Error> {
     check = "tournament_admin_only"
 )]
 pub async fn remove(ctx: Context<'_>, user: User) -> Result<(), Error> {
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -440,7 +476,10 @@ pub async fn remove(ctx: Context<'_>, user: User) -> Result<(), Error> {
     );
     ephemeral(
         ctx,
-        format!("Removed {} as an admin for **{}**.", user.name, tournament.name),
+        locale.pick(
+            format!("已將 {} 從 **{}** 的管理員列表中移除。", user.name, tournament.name),
+            format!("Removed {} as an admin for **{}**.", user.name, tournament.name),
+        ),
     )
     .await?;
     Ok(())
@@ -453,14 +492,14 @@ pub async fn remove(ctx: Context<'_>, user: User) -> Result<(), Error> {
     check = "tournament_admin_only"
 )]
 pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
     let admins = tournament_db::list_admins(&ctx.data().database, tournament.id).await?;
     let body = if admins.is_empty() {
-        "No admins yet.".to_string()
+        locale.pick("目前沒有管理員。", "No admins yet.").to_string()
     } else {
         admins
             .iter()
@@ -468,7 +507,14 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    ephemeral(ctx, format!("Admins for **{}**:\n{body}", tournament.name)).await?;
+    ephemeral(
+        ctx,
+        locale.pick(
+            format!("**{}** 的管理員：\n{body}", tournament.name),
+            format!("Admins for **{}**:\n{body}", tournament.name),
+        ),
+    )
+    .await?;
     Ok(())
 }
 
@@ -486,8 +532,8 @@ pub async fn register(
     aoe4_id: Option<i32>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -495,7 +541,7 @@ pub async fn register(
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = registration::register(pool, &tournament, user_id, aoe4_id.map(i64::from)).await?;
     audit::log_action("register", tournament.id, &tournament.slug, ctx.author(), &outcome);
-    ephemeral(ctx, outcome.message(&tournament.name)).await?;
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
 
     if outcome.changed_state() {
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
@@ -513,6 +559,7 @@ pub async fn rebind(
     #[autocomplete = "auto_complete_id"]
     aoe4_id: i32,
 ) -> Result<(), Error> {
+    let locale = Locale::from_context(ctx);
     ctx.defer_ephemeral().await?;
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = registration::rebind(&ctx.data().database, user_id, i64::from(aoe4_id)).await?;
@@ -521,15 +568,15 @@ pub async fn rebind(
         "rebind by {} ({user_id}) to aoe4 id {aoe4_id}: {outcome:?}",
         ctx.author().name
     );
-    ephemeral(ctx, outcome.message()).await?;
+    ephemeral(ctx, outcome.message(locale)).await?;
     Ok(())
 }
 
 /// Withdraws you from the tournament, before it has started.
 #[poise::command(slash_command, guild_only, check = "tournament_only")]
 pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -537,7 +584,7 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = registration::withdraw(pool, &tournament, user_id).await?;
     audit::log_action("withdraw", tournament.id, &tournament.slug, ctx.author(), &outcome);
-    ephemeral(ctx, outcome.message(&tournament.name)).await?;
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
 
     if outcome.changed_state() {
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
@@ -564,8 +611,8 @@ pub async fn open_checkin(
     minutes: Option<i64>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -589,7 +636,7 @@ pub async fn open_checkin(
             .await?;
     }
 
-    ctx.say(outcome.message(&tournament.name)).await?;
+    ctx.say(outcome.message(&tournament.name, locale)).await?;
     Ok(())
 }
 
@@ -598,8 +645,8 @@ pub async fn open_checkin(
 /// Checks you in, once check-in has opened.
 #[poise::command(slash_command, guild_only, check = "tournament_only", rename = "checkin")]
 pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -607,7 +654,7 @@ pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = checkin::checkin(pool, &tournament, user_id).await?;
     audit::log_action("checkin", tournament.id, &tournament.slug, ctx.author(), &outcome);
-    ephemeral(ctx, outcome.message(&tournament.name)).await?;
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
 
     if outcome.changed_state() {
         checkin_panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
@@ -625,8 +672,8 @@ pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
 )]
 pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -638,7 +685,7 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
         checkin_panel::close(ctx.http(), pool, &tournament).await?;
     }
 
-    ctx.say(outcome.message(&tournament.name)).await?;
+    ctx.say(outcome.message(&tournament.name, locale)).await?;
     Ok(())
 }
 
@@ -656,8 +703,8 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
 )]
 pub async fn reopen_registration(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -678,7 +725,7 @@ pub async fn reopen_registration(ctx: Context<'_>) -> Result<(), Error> {
         panel::refresh_now(ctx.http(), pool, &tournament).await?;
     }
 
-    ctx.say(outcome.message(&tournament.name)).await?;
+    ctx.say(outcome.message(&tournament.name, locale)).await?;
     Ok(())
 }
 
@@ -718,8 +765,8 @@ pub async fn delete(
     #[description = "Type the tournament's slug to confirm — this cannot be undone"] confirm: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
-        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
         return Ok(());
     };
 
@@ -727,7 +774,7 @@ pub async fn delete(
     let check = teardown::check_delete(&tournament, &confirm, channel_id);
     audit::log_action("delete", tournament.id, &tournament.slug, ctx.author(), &check);
     if check != teardown::DeleteCheck::Ok {
-        ephemeral(ctx, check.message(&tournament)).await?;
+        ephemeral(ctx, check.message(&tournament, locale)).await?;
         return Ok(());
     }
 
@@ -749,11 +796,15 @@ pub async fn delete(
     );
 
     let leftover = if failed > 0 {
-        format!(" ({failed} channel(s) couldn't be deleted — remove them by hand.)")
+        locale.pick(
+            format!("（有 {failed} 個頻道無法刪除，請手動移除。）"),
+            format!(" ({failed} channel(s) couldn't be deleted — remove them by hand.)"),
+        )
     } else {
         String::new()
     };
-    ctx.say(format!("{}{leftover}", check.message(&tournament))).await?;
+    ctx.say(format!("{}{leftover}", check.message(&tournament, locale)))
+        .await?;
     Ok(())
 }
 

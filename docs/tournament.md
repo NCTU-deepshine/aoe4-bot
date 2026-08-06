@@ -1184,9 +1184,10 @@ so the design needs no DM path and no closed-DM fallback.
 
 ### 8.10 Localization
 
-Two locales, on purpose: **Traditional Chinese (`zh-TW`) and English**, the fallback for everything else —
-including `zh-CN` and any locale Discord adds later. This is not "detect Chinese and guess a variant"; it is one
-exact string match, with English underneath everything unmatched. This is a **different, narrower** mechanism
+Two locales, on purpose: **Traditional Chinese (`zh-TW`) and English**, the fallback for everything else. This
+is not "detect Chinese and guess a variant"; it is one exact string match, with English underneath everything
+unmatched — no prefix matching and no case folding, so the set of codes that get Chinese is closed and
+obvious. This is a **different, narrower** mechanism
 from the home guild's existing approach of hardcoding Chinese into individual commands (`/查分`, `bind`'s
 subcommands) — those are untouched; this adds per-user detection for the tournament feature's own text only.
 
@@ -1195,24 +1196,41 @@ invoking user's own client-locale setting as `locale: String`, "the selected lan
 (verified against the vendored serenity 0.12.5 source, `command_interaction.rs`/`component_interaction.rs`); poise
 exposes the slash-command side as `Context::locale() -> Option<&str>`. There is a separate `guild_locale:
 Option<String>`, "the guild's preferred locale" — deliberately not used: it is the guild's own default, not any
-one member's language, and every reply this applies to (an outcome message, a panel) is already either ephemeral
-to one user or a shared panel where a language pick has to be made anyway — the invoking user's own setting is
-the only signal that is actually about *them*.
+one member's language, and the invoking user's own setting is the only signal that is actually about *them*.
 
-**Scope: the tournament feature's own dynamic reply text.** Outcome messages (`RegisterOutcome`,
-`WithdrawOutcome`, `RebindOutcome`, `CheckinOutcome`, `OpenCheckinOutcome`, `CloseCheckinOutcome`), both panels'
-content and button labels, and `access.rs`'s ephemeral refusals. **Not** in scope:
+**Shared surfaces are bilingual; private ones follow their reader.** Per-interaction detection only works when a
+message has exactly one reader. A panel does not: it is one persistent message that many people read, and it
+re-renders on every button press, so keying it to whoever interacted last would make it visibly change language
+— a bug, not a feature. So the rule splits by surface. **Ephemeral replies** (outcome messages, refusals, error
+notices) use the reader's own locale. **Panels** — content and button labels alike — carry both languages, e.g.
+`報名 / Register`. Only their fixed chrome doubles; rosters, counts and timestamps appear once. A consequence
+worth noting: `panel::render` and `checkin_panel::render` take no `locale` parameter at all, so no locale has to
+be threaded down the panel-refresh paths.
+
+**Scope: the tournament feature's own dynamic reply text, plus the shared plumbing behind it.** Outcome
+messages (`RegisterOutcome`, `WithdrawOutcome`, `RebindOutcome`, `CheckinOutcome`, `OpenCheckinOutcome`,
+`CloseCheckinOutcome`, `ReopenRegistrationOutcome`, `DeleteCheck`, `SlugError`), both panels' content and button
+labels, `access.rs`'s ephemeral refusals, and `commands.rs`'s own replies.
+
+`errors.rs` and `guilds.rs` are in scope too, despite holding what looks like home-guild Chinese: neither is
+home-only. `errors.rs` answers *any* failed command in either guild, and `guilds.rs`'s wrong-guild refusal fires
+in both. Leaving them would mean an English-speaking entrant getting a Chinese error from a bilingual feature.
+**Not** in scope:
 
 - Slash command names and descriptions — Discord has its own static localization for these
   (`name_localizations`/`description_localizations`), a different code path from runtime reply text, and out of
   scope here.
-- The home guild's existing hardcoded Chinese (`/查分`, `bind`'s subcommands) — untouched.
+- The home guild's own commands and their hardcoded Chinese (`/查分`, `/rebuild`, `/refresh`, `bind`'s
+  subcommands) — untouched. The distinction from `errors.rs`/`guilds.rs` above is which guilds the text can
+  actually appear in, not which file it happens to live in.
 
 **Mechanism.** A `Locale` enum (`ZhTw`, `En`) and a pure `from_discord_locale(code: &str) -> Locale` — anything
 other than the exact string `"zh-TW"` maps to `En`. Every message-producing function this applies to gains a
 `locale: Locale` parameter and picks its template accordingly. This is retroactive: chunks 7–10 already shipped
 without it, so their outcome/panel/refusal messages are retrofitted rather than written fresh — and every chunk
 from here on writing new user-facing text follows the same shape from the start rather than adding it later.
+`Locale::pick(zh, en)` is the house form for a two-language message: it keeps a message's two renderings adjacent,
+which is what makes them stay in sync.
 
 ## 9. Delivery notes
 
@@ -1292,9 +1310,10 @@ than panicking (buttons from an older deploy will be pressed).
   if the other fails; a second registration is idempotent; a later tournament needs no profile argument;
   withdrawal works only before start;
 - **`setdone` on an unfinished draft** imports nothing and leaves the set untouched;
-- **localization**: `from_discord_locale` maps `"zh-TW"` and only `"zh-TW"` to `Locale::ZhTw` — `"zh-CN"`, an
-  empty string, and an unrecognized future locale code all fall back to `Locale::En`; every retrofitted
-  outcome/panel/refusal message renders correctly in both locales.
+- **localization**: `from_discord_locale` maps `"zh-TW"` and only `"zh-TW"` to `Locale::ZhTw` — near-misses
+  differing by case, separator or prefix, an empty string, and an unrecognized future code all fall back to
+  `Locale::En`; one representative message per module renders differently in the two locales while preserving
+  the data interpolated into it; both panels render both languages.
 
 ## 11. Follow-ups
 

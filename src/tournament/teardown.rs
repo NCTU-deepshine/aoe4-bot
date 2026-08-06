@@ -6,6 +6,7 @@
 //! `/tournament cancel` (chunk 13) is the other half of teardown and belongs here
 //! when it lands.
 
+use crate::locale::Locale;
 use crate::tournament::db::Tournament;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,28 +19,27 @@ pub(crate) enum DeleteCheck {
 impl DeleteCheck {
     /// Takes the whole tournament rather than just its name: both refusals have to
     /// tell the admin what to type or where to go, and the slug is the answer.
-    pub(crate) fn message(&self, tournament: &Tournament) -> String {
+    pub(crate) fn message(&self, tournament: &Tournament, locale: Locale) -> String {
+        let (name, slug) = (&tournament.name, &tournament.slug);
         match self {
-            DeleteCheck::Ok => {
+            DeleteCheck::Ok => locale.pick(
+                format!("已刪除 **{name}**（`{slug}`）以及它建立的頻道。"),
+                format!("Deleted **{name}** (`{slug}`) and the channels it created."),
+            ),
+            DeleteCheck::NotAnnounceChannel => locale.pick(
+                format!("請在 **{name}** 的公告頻道執行 — 那是唯一不會被刪除的頻道，在其他地方執行的話這則回覆會跟著頻道一起消失。"),
                 format!(
-                    "Deleted **{}** (`{}`) and the channels it created.",
-                    tournament.name, tournament.slug
-                )
-            },
-            DeleteCheck::NotAnnounceChannel => {
+                    "Run this in **{name}**'s announce channel — it's the only one that survives the delete, \
+                     so anywhere else this reply would vanish with its own channel."
+                ),
+            ),
+            DeleteCheck::ConfirmMismatch => locale.pick(
+                format!("不符合。要刪除 **{name}** 和它的頻道，請執行 `/tournament delete confirm:{slug}`。此操作無法復原。"),
                 format!(
-                    "Run this in **{}**'s announce channel — it's the only one that survives the delete, \
-                     so anywhere else this reply would vanish with its own channel.",
-                    tournament.name
-                )
-            },
-            DeleteCheck::ConfirmMismatch => {
-                format!(
-                    "That doesn't match. To delete **{}** and its channels, run \
-                     `/tournament delete confirm:{}`. This cannot be undone.",
-                    tournament.name, tournament.slug
-                )
-            },
+                    "That doesn't match. To delete **{name}** and its channels, run \
+                     `/tournament delete confirm:{slug}`. This cannot be undone."
+                ),
+            ),
         }
     }
 }
@@ -87,6 +87,17 @@ mod tests {
             started_at: None,
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn messages_render_in_both_locales() {
+        let t = tournament();
+        let zh = DeleteCheck::ConfirmMismatch.message(&t, Locale::ZhTw);
+        let en = DeleteCheck::ConfirmMismatch.message(&t, Locale::En);
+        assert_ne!(zh, en);
+        // Both must still tell the admin exactly what to type.
+        assert!(zh.contains("confirm:relic-cup"), "{zh}");
+        assert!(en.contains("confirm:relic-cup"), "{en}");
     }
 
     #[test]

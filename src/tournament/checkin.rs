@@ -4,6 +4,7 @@
 //! `commands.rs` (the slash commands) and `dispatch.rs` (the check-in button)
 //! both call into this module rather than duplicating any of it.
 
+use crate::locale::Locale;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
@@ -48,29 +49,33 @@ pub(crate) enum CheckinOutcome {
 }
 
 impl CheckinOutcome {
-    pub(crate) fn message(&self, tournament_name: &str) -> String {
+    pub(crate) fn message(&self, tournament_name: &str, locale: Locale) -> String {
         match self {
             CheckinOutcome::CheckedIn {
                 checked_in_count,
                 total_count,
-            } => {
-                format!("You're checked in for **{tournament_name}** ({checked_in_count}/{total_count} checked in).")
-            },
+            } => locale.pick(
+                format!("你已完成 **{tournament_name}** 的簽到（{checked_in_count}/{total_count} 已簽到）。"),
+                format!("You're checked in for **{tournament_name}** ({checked_in_count}/{total_count} checked in)."),
+            ),
             CheckinOutcome::AlreadyCheckedIn {
                 checked_in_count,
                 total_count,
-            } => {
+            } => locale.pick(
+                format!("你已經簽到過 **{tournament_name}** 了（{checked_in_count}/{total_count} 已簽到）。"),
                 format!(
                     "You're already checked in for **{tournament_name}** \
                      ({checked_in_count}/{total_count} checked in)."
-                )
-            },
-            CheckinOutcome::NotRegistered => {
-                format!("You're not registered for **{tournament_name}** — use `/tournament register` first.")
-            },
-            CheckinOutcome::CheckinNotOpen => {
-                format!("Check-in isn't open for **{tournament_name}** right now.")
-            },
+                ),
+            ),
+            CheckinOutcome::NotRegistered => locale.pick(
+                format!("你沒有報名 **{tournament_name}** — 請先用 `/tournament register`。"),
+                format!("You're not registered for **{tournament_name}** — use `/tournament register` first."),
+            ),
+            CheckinOutcome::CheckinNotOpen => locale.pick(
+                format!("**{tournament_name}** 目前沒有開放簽到。"),
+                format!("Check-in isn't open for **{tournament_name}** right now."),
+            ),
         }
     }
 
@@ -124,25 +129,31 @@ pub(crate) enum OpenCheckinOutcome {
 }
 
 impl OpenCheckinOutcome {
-    pub(crate) fn message(&self, tournament_name: &str) -> String {
+    pub(crate) fn message(&self, tournament_name: &str, locale: Locale) -> String {
         match self {
             OpenCheckinOutcome::Opened {
                 closes_at: Some(closes_at),
-            } => {
+            } => locale.pick(
+                format!(
+                    "**{tournament_name}** 的簽到已開放，<t:{}:R> 截止。",
+                    closes_at.timestamp()
+                ),
                 format!(
                     "Check-in is now open for **{tournament_name}**, closing <t:{}:R>.",
                     closes_at.timestamp()
-                )
-            },
-            OpenCheckinOutcome::Opened { closes_at: None } => {
-                format!("Check-in is now open for **{tournament_name}**.")
-            },
-            OpenCheckinOutcome::NotInRegistration { current_status } => {
+                ),
+            ),
+            OpenCheckinOutcome::Opened { closes_at: None } => locale.pick(
+                format!("**{tournament_name}** 的簽到已開放。"),
+                format!("Check-in is now open for **{tournament_name}**."),
+            ),
+            OpenCheckinOutcome::NotInRegistration { current_status } => locale.pick(
+                format!("只有在 **{tournament_name}** 還在報名階段時才能開放簽到（目前為 {current_status}）。"),
                 format!(
                     "Check-in can only be opened while **{tournament_name}** is still in registration \
                      (currently {current_status})."
-                )
-            },
+                ),
+            ),
         }
     }
 }
@@ -171,20 +182,22 @@ pub(crate) enum CloseCheckinOutcome {
 }
 
 impl CloseCheckinOutcome {
-    pub(crate) fn message(&self, tournament_name: &str) -> String {
+    pub(crate) fn message(&self, tournament_name: &str, locale: Locale) -> String {
         match self {
             CloseCheckinOutcome::Closed {
                 checked_in_count,
                 no_show_count,
-            } => {
+            } => locale.pick(
+                format!("**{tournament_name}** 的簽到已結束 — {checked_in_count} 人簽到，{no_show_count} 人未到。"),
                 format!(
                     "Check-in closed for **{tournament_name}** — {checked_in_count} checked in, \
                      {no_show_count} marked no-show."
-                )
-            },
-            CloseCheckinOutcome::NotOpen { current_status } => {
-                format!("Check-in isn't open for **{tournament_name}** (currently {current_status}).")
-            },
+                ),
+            ),
+            CloseCheckinOutcome::NotOpen { current_status } => locale.pick(
+                format!("**{tournament_name}** 目前沒有開放簽到（目前為 {current_status}）。"),
+                format!("Check-in isn't open for **{tournament_name}** (currently {current_status})."),
+            ),
         }
     }
 }
@@ -220,27 +233,34 @@ pub(crate) enum ReopenRegistrationOutcome {
 }
 
 impl ReopenRegistrationOutcome {
-    pub(crate) fn message(&self, tournament_name: &str) -> String {
+    pub(crate) fn message(&self, tournament_name: &str, locale: Locale) -> String {
         match self {
             ReopenRegistrationOutcome::Reopened {
                 restored_count,
                 cleared_count,
-            } => {
+            } => locale.pick(
+                format!(
+                    "**{tournament_name}** 重新開放報名 — 簽到已重置\
+                     （清除 {cleared_count} 筆簽到，恢復 {restored_count} 位未到者）。\
+                     要重新簽到時請用 `/tournament open-checkin`。"
+                ),
                 format!(
                     "Registration is open again for **{tournament_name}** — check-in was reset \
                      ({cleared_count} check-ins cleared, {restored_count} no-shows restored). \
                      Use `/tournament open-checkin` when you're ready to run check-in again."
-                )
-            },
-            ReopenRegistrationOutcome::AlreadyInRegistration => {
-                format!("**{tournament_name}** is already in registration — nothing to reopen.")
-            },
-            ReopenRegistrationOutcome::NotReopenable { current_status } => {
+                ),
+            ),
+            ReopenRegistrationOutcome::AlreadyInRegistration => locale.pick(
+                format!("**{tournament_name}** 已經在報名階段 — 沒有需要重開的東西。"),
+                format!("**{tournament_name}** is already in registration — nothing to reopen."),
+            ),
+            ReopenRegistrationOutcome::NotReopenable { current_status } => locale.pick(
+                format!("只有在 **{tournament_name}** 處於簽到或排種子階段時才能重開報名（目前為 {current_status}）。"),
                 format!(
                     "Registration can only be reopened while **{tournament_name}** is in check-in or seeding \
                      (currently {current_status})."
-                )
-            },
+                ),
+            ),
         }
     }
 
@@ -303,6 +323,21 @@ mod tests {
             registered_at: Utc::now(),
             checked_in_at,
         }
+    }
+
+    #[test]
+    fn messages_render_in_both_locales() {
+        let outcome = CheckinOutcome::CheckedIn {
+            checked_in_count: 1,
+            total_count: 2,
+        };
+        let zh = outcome.message("Relic Cup", Locale::ZhTw);
+        let en = outcome.message("Relic Cup", Locale::En);
+        assert_ne!(zh, en);
+        assert!(zh.contains("已完成"), "{zh}");
+        assert!(en.contains("checked in"), "{en}");
+        // Counts are data and must survive both renderings.
+        assert!(zh.contains("1/2") && en.contains("1/2"));
     }
 
     #[test]

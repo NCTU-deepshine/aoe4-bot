@@ -1,3 +1,4 @@
+use crate::locale::Locale;
 use crate::reply::ephemeral;
 use crate::{Context, Error};
 use serenity::model::id::{GuildId, RoleId};
@@ -120,7 +121,14 @@ async fn allowed_here(ctx: Context<'_>, feature: Feature) -> Result<bool, Error>
     // Answer before refusing. A check that returns false without replying leaves
     // the interaction unacknowledged, and Discord shows "the application did not
     // respond" — see the CommandCheckFailed arm in errors.rs.
-    ephemeral(ctx, "這個指令不能在這個伺服器使用。").await?;
+    ephemeral(
+        ctx,
+        Locale::from_context(ctx).pick(
+            "這個指令不能在這個伺服器使用。",
+            "This command can't be used in this server.",
+        ),
+    )
+    .await?;
     Ok(false)
 }
 

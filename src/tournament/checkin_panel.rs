@@ -28,20 +28,30 @@ pub(crate) fn render(
     open: bool,
 ) -> (String, Vec<CreateActionRow>) {
     let (checked_in, total) = checkin_counts(entries);
-    let heading = if open { "OPEN" } else { "CLOSED" };
+    // Bilingual for the same reason as the registration panel (§8.10): shared
+    // message, re-rendered by whoever presses the button.
+    let heading = if open {
+        "簽到開放中 / check-in is OPEN"
+    } else {
+        "簽到已結束 / check-in is CLOSED"
+    };
 
     let closes_line = match (open, closes_at) {
-        (true, Some(closes_at)) => format!("Closes <t:{}:R>.\n", closes_at.timestamp()),
+        (true, Some(closes_at)) => format!("<t:{0}:R> 截止 / Closes <t:{0}:R>.\n", closes_at.timestamp()),
         _ => String::new(),
     };
-    let footer = if open { "\n(or use `/tournament checkin`)" } else { "" };
+    let footer = if open {
+        "\n(或使用 / or use `/tournament checkin`)"
+    } else {
+        ""
+    };
 
     let content =
-        format!("**{name} — check-in is {heading}**\n{closes_line}\n**{checked_in}/{total} checked in**{footer}");
+        format!("**{name} — {heading}**\n{closes_line}\n**{checked_in}/{total} 已簽到 / checked in**{footer}");
 
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new(Action::Checkin.custom_id(tournament_id))
-            .label("Check In")
+            .label("簽到 / Check In")
             .style(ButtonStyle::Success)
             .disabled(!open),
     ])];
@@ -160,8 +170,10 @@ mod tests {
     fn renders_open_with_counts_and_the_slash_command_hint() {
         let entries = vec![entry(1, "active", Some(Utc::now())), entry(2, "active", None)];
         let (content, _) = render(1, "Relic Cup", &entries, None, true);
+        // Bilingual for the same reason as the registration panel (§8.10).
+        assert!(content.contains("簽到開放中"));
         assert!(content.contains("check-in is OPEN"));
-        assert!(content.contains("1/2 checked in"));
+        assert!(content.contains("1/2 已簽到 / checked in"));
         assert!(content.contains("/tournament checkin"));
     }
 
@@ -177,6 +189,7 @@ mod tests {
         let closes_at = Utc::now();
         let (content, _) = render(1, "Relic Cup", &[], Some(closes_at), false);
         assert!(!content.contains(":R>"));
+        assert!(content.contains("簽到已結束"));
         assert!(content.contains("check-in is CLOSED"));
         assert!(!content.contains("/tournament checkin"));
     }
@@ -190,7 +203,7 @@ mod tests {
         assert_eq!(
             buttons[0],
             CreateButton::new(Action::Checkin.custom_id(42))
-                .label("Check In")
+                .label("簽到 / Check In")
                 .style(ButtonStyle::Success)
                 .disabled(true)
         );
@@ -205,7 +218,7 @@ mod tests {
         assert_eq!(
             buttons[0],
             CreateButton::new(Action::Checkin.custom_id(42))
-                .label("Check In")
+                .label("簽到 / Check In")
                 .style(ButtonStyle::Success)
                 .disabled(false)
         );

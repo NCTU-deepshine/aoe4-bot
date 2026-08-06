@@ -9,6 +9,7 @@
 //! channel.
 
 use crate::guilds::{Feature, Guilds};
+use crate::locale::Locale;
 use crate::tournament::action::{self, Action};
 use crate::tournament::checkin::CheckinOutcome;
 use crate::tournament::registration::{RegisterOutcome, WithdrawOutcome};
@@ -97,10 +98,11 @@ impl Dispatcher {
             &component.user,
             &outcome,
         );
+        let locale = Locale::from_discord_locale(&component.locale);
 
         // Deferred (Action::Register.requires_defer() == true), so the reply
         // edits the initial deferred response rather than creating a new one.
-        let response = EditInteractionResponse::new().content(outcome.message(&tournament.name));
+        let response = EditInteractionResponse::new().content(outcome.message(&tournament.name, locale));
         if let Err(err) = component.edit_response(&ctx.http, response).await {
             error!("failed to edit the register response for tournament {tournament_id}: {err:?}");
         }
@@ -133,13 +135,14 @@ impl Dispatcher {
             &component.user,
             &outcome,
         );
+        let locale = Locale::from_discord_locale(&component.locale);
 
         // Never deferred (Action::Withdraw.requires_defer() == false), so the
         // reply is a fresh ephemeral message, not an edit of a deferred one.
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new()
                 .ephemeral(true)
-                .content(outcome.message(&tournament.name)),
+                .content(outcome.message(&tournament.name, locale)),
         );
         if let Err(err) = component.create_response(&ctx.http, response).await {
             error!("failed to respond to a withdraw interaction for tournament {tournament_id}: {err:?}");
@@ -170,13 +173,14 @@ impl Dispatcher {
             &component.user,
             &outcome,
         );
+        let locale = Locale::from_discord_locale(&component.locale);
 
         // Never deferred (Action::Checkin.requires_defer() == false), so the
         // reply is a fresh ephemeral message, not an edit of a deferred one.
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new()
                 .ephemeral(true)
-                .content(outcome.message(&tournament.name)),
+                .content(outcome.message(&tournament.name, locale)),
         );
         if let Err(err) = component.create_response(&ctx.http, response).await {
             error!("failed to respond to a checkin interaction for tournament {tournament_id}: {err:?}");

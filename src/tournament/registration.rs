@@ -6,6 +6,7 @@
 //! buttons) both call into this module rather than duplicating any of it.
 
 use crate::aoe4world;
+use crate::locale::Locale;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use sqlx::SqlitePool;
 
@@ -73,7 +74,7 @@ pub(crate) enum RegisterOutcome {
 }
 
 impl RegisterOutcome {
-    pub(crate) fn message(&self, tournament_name: &str) -> String {
+    pub(crate) fn message(&self, tournament_name: &str, locale: Locale) -> String {
         match self {
             RegisterOutcome::Registered {
                 display_name,
@@ -81,55 +82,71 @@ impl RegisterOutcome {
                 entrant_number,
             } => {
                 let elo_suffix = elo.map(|e| format!(" (ELO {e})")).unwrap_or_default();
-                format!("Registered as **{display_name}**{elo_suffix}. You are entrant #{entrant_number}.")
+                locale.pick(
+                    format!("以 **{display_name}**{elo_suffix} 報名成功，你是第 {entrant_number} 位參賽者。"),
+                    format!("Registered as **{display_name}**{elo_suffix}. You are entrant #{entrant_number}."),
+                )
             },
             RegisterOutcome::AlreadyRegistered {
                 display_name,
                 entrant_number,
-            } => {
+            } => locale.pick(
+                format!("你已經報名過 **{tournament_name}**，身分是 **{display_name}**（第 {entrant_number} 位參賽者）。"),
                 format!(
                     "You're already registered for **{tournament_name}** as **{display_name}** \
                      (entrant #{entrant_number})."
-                )
-            },
+                ),
+            ),
             RegisterOutcome::Reactivated {
                 display_name,
                 entrant_number,
-            } => {
+            } => locale.pick(
+                format!(
+                    "歡迎回來 — 你重新報名了 **{tournament_name}**，身分是 **{display_name}**\
+                     （第 {entrant_number} 位）。"
+                ),
                 format!(
                     "Welcome back — you're registered again for **{tournament_name}** as **{display_name}** \
                      (entrant #{entrant_number})."
-                )
-            },
-            RegisterOutcome::NeedsProfileArgument => {
-                "You haven't registered a profile yet — use `/tournament register aoe4_id:<profile>` to sign up."
-                    .to_string()
-            },
-            RegisterOutcome::AlreadyBoundToDifferentProfile { display_name } => {
+                ),
+            ),
+            RegisterOutcome::NeedsProfileArgument => locale.pick(
+                "你還沒有綁定任何帳號 — 第一次報名請用 `/tournament register aoe4_id:<profile>` 指定綁定aoe4帳號進行報名。".to_string(),
+                "You haven't registered a profile yet — please use `/tournament register aoe4_id:<profile>` only for the first time to bind your aoe4 account and sign up."
+                    .to_string(),
+            ),
+            RegisterOutcome::AlreadyBoundToDifferentProfile { display_name } => locale.pick(
+                format!("你已經綁定 **{display_name}**。想更換帳號請用 `/tournament rebind`。"),
                 format!(
                     "You're already bound to **{display_name}**. Use `/tournament rebind` if you want to change \
                      your profile."
-                )
-            },
+                ),
+            ),
             RegisterOutcome::ProfileClaimedByAnother {
                 other_user_id,
                 other_display_name,
-            } => {
+            } => locale.pick(
                 format!(
-                    "That aoe4world profile is already registered to <@{other_user_id}> \
+                    "這個 aoe4 帳號已經綁定給 <@{other_user_id}>（**{other_display_name}**）。如果有誤請找管理員。"
+                ),
+                format!(
+                    "That aoe4 profile is already registered to <@{other_user_id}> \
                      (**{other_display_name}**). If this is a mistake, ask an admin."
-                )
-            },
-            RegisterOutcome::ProfileClaimRace => {
-                "That aoe4world profile was just claimed by someone else — try again with a different profile."
-                    .to_string()
-            },
-            RegisterOutcome::LookupFailed => {
-                "Couldn't find that aoe4world profile — double-check the id and try again.".to_string()
-            },
-            RegisterOutcome::RegistrationClosed => {
-                format!("Registration is closed for **{tournament_name}**.")
-            },
+                ),
+            ),
+            RegisterOutcome::ProfileClaimRace => locale.pick(
+                "這個 aoe4 帳號剛剛被別人綁走了 — 請換一個帳號再試一次。".to_string(),
+                "That aoe4 profile was just claimed by someone else — try again with a different profile."
+                    .to_string(),
+            ),
+            RegisterOutcome::LookupFailed => locale.pick(
+                "找不到這個 aoe4 帳號 — 請確認 id 後再試一次。".to_string(),
+                "Couldn't find that aoe4 profile — double-check the id and try again.".to_string(),
+            ),
+            RegisterOutcome::RegistrationClosed => locale.pick(
+                format!("**{tournament_name}** 的報名已經結束。"),
+                format!("Registration is closed for **{tournament_name}**."),
+            ),
         }
     }
 
@@ -238,14 +255,26 @@ pub(crate) enum WithdrawOutcome {
 }
 
 impl WithdrawOutcome {
-    pub(crate) fn message(&self, tournament_name: &str) -> String {
+    pub(crate) fn message(&self, tournament_name: &str, locale: Locale) -> String {
         match self {
-            WithdrawOutcome::Success => format!("You've withdrawn from **{tournament_name}**."),
-            WithdrawOutcome::NotRegistered => format!("You're not registered for **{tournament_name}**."),
-            WithdrawOutcome::AlreadyWithdrawn => format!("You're already withdrawn from **{tournament_name}**."),
-            WithdrawOutcome::TournamentAlreadyStarted => format!(
-                "**{tournament_name}** has already started — withdrawal is no longer possible. Contact an admin \
-                 if you need to drop out."
+            WithdrawOutcome::Success => locale.pick(
+                format!("你已退出 **{tournament_name}**。"),
+                format!("You've withdrawn from **{tournament_name}**."),
+            ),
+            WithdrawOutcome::NotRegistered => locale.pick(
+                format!("你並沒有報名 **{tournament_name}**。"),
+                format!("You're not registered for **{tournament_name}**."),
+            ),
+            WithdrawOutcome::AlreadyWithdrawn => locale.pick(
+                format!("你原本便已經退出 **{tournament_name}** 了。"),
+                format!("You're already withdrawn from **{tournament_name}**."),
+            ),
+            WithdrawOutcome::TournamentAlreadyStarted => locale.pick(
+                format!("**{tournament_name}** 已經開賽 — 無法再退賽。需要退出請聯絡管理員。"),
+                format!(
+                    "**{tournament_name}** has already started — withdrawal is no longer possible. Contact an \
+                     admin if you need to drop out."
+                ),
             ),
         }
     }
@@ -285,24 +314,31 @@ pub(crate) enum RebindOutcome {
 impl RebindOutcome {
     /// Tournament-independent — the player list is global (§4), so unlike
     /// register/withdraw's messages this needs no tournament name.
-    pub(crate) fn message(&self) -> String {
+    pub(crate) fn message(&self, locale: Locale) -> String {
         match self {
             RebindOutcome::Success { display_name, elo } => {
                 let elo_suffix = elo.map(|e| format!(" (ELO {e})")).unwrap_or_default();
-                format!("Rebound to **{display_name}**{elo_suffix}.")
+                locale.pick(
+                    format!("已改綁到 **{display_name}**{elo_suffix}。"),
+                    format!("Rebound to **{display_name}**{elo_suffix}."),
+                )
             },
-            RebindOutcome::NoExistingProfile => {
-                "You haven't registered anywhere yet — use `/tournament register aoe4_id:<profile>` first.".to_string()
-            },
-            RebindOutcome::ProfileClaimedByAnother { other_user_id } => {
-                format!("That profile is already bound to <@{other_user_id}>.")
-            },
-            RebindOutcome::RefusedRunningTournament => {
-                "You can't rebind while you have an entry in a running tournament. Ask an admin for help.".to_string()
-            },
-            RebindOutcome::LookupFailed => {
-                "Couldn't find that aoe4world profile — double-check the id and try again.".to_string()
-            },
+            RebindOutcome::NoExistingProfile => locale.pick(
+                "你還沒有在任何賽事報名過 — 請先用 `/tournament register aoe4_id:<profile>`。".to_string(),
+                "You haven't registered anywhere yet — use `/tournament register aoe4_id:<profile>` first.".to_string(),
+            ),
+            RebindOutcome::ProfileClaimedByAnother { other_user_id } => locale.pick(
+                format!("這個帳號已經綁定給 <@{other_user_id}>。"),
+                format!("That profile is already bound to <@{other_user_id}>."),
+            ),
+            RebindOutcome::RefusedRunningTournament => locale.pick(
+                "你在進行中的賽事還有參賽紀錄，無法改綁。請聯絡管理員。".to_string(),
+                "You can't rebind while you have an entry in a running tournament. Ask an admin for help.".to_string(),
+            ),
+            RebindOutcome::LookupFailed => locale.pick(
+                "找不到這個 aoe4 帳號 — 請確認 id 後再試一次。".to_string(),
+                "Couldn't find that aoe4 profile — double-check the id and try again.".to_string(),
+            ),
         }
     }
 }
@@ -352,6 +388,18 @@ mod tests {
             registered_at,
             checked_in_at: None,
         }
+    }
+
+    #[test]
+    fn messages_render_in_both_locales() {
+        let outcome = WithdrawOutcome::Success;
+        let zh = outcome.message("Relic Cup", Locale::ZhTw);
+        let en = outcome.message("Relic Cup", Locale::En);
+        assert_ne!(zh, en);
+        assert!(zh.contains("你已退出"), "{zh}");
+        assert!(en.contains("You've withdrawn"), "{en}");
+        // The tournament name is data, not text — it is not translated.
+        assert!(zh.contains("Relic Cup") && en.contains("Relic Cup"));
     }
 
     #[test]
