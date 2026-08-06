@@ -429,7 +429,10 @@ create table if not exists tournaments (
   draft_base_url text,                      -- per-tournament override; normally null, the
                                             -- instance comes from env (§3, chunk 14)
   entrant_cap integer not null default 32,  -- registration refuses a sign-up past this (§8.3)
-  scheduled_start_at timestamp,             -- when the event is meant to begin; stored utc
+  scheduled_start_at timestamp,             -- when the event is meant to begin; stored utc.
+                                            -- defaults to a week out, set by insert_tournament in the
+                                            -- same statement as created_at so the two share a clock and
+                                            -- an untouched placeholder is exactly detectable (§8.3)
   -- discord wiring; see §8.1. announce_channel_id is the channel /tournament create ran in.
   announce_channel_id bigint,
   category_id bigint,
@@ -874,12 +877,14 @@ callable by anyone.
 
 ```
 registration ──/tournament open-checkin──▶ checkin
+    │  refused until an hour before scheduled_start_at
+    │  registration closes here; the panel goes CLOSED
 checkin ──/tournament close-checkin──▶ seeding
     │  entries without checked_in_at → status 'no_show'
     │  suggested seeding runs over checked-in entrants only
 seeding ──/tournament start──▶ running
-    │  requires setup complete (a draft preset and a start time) and
-    │  seeds 1..n contiguous; generates the bracket;
+    │  requires a draft preset, seeds 1..n contiguous, and
+    │  scheduled_start_at reached; generates the bracket;
     │  creates round-1 threads; posts the bracket
 running ──(final set completes)──▶ completed
 checkin | seeding ──/tournament reopen-registration──▶ registration
@@ -892,6 +897,17 @@ any ──/tournament cancel──▶ canceled
 
 **Check-in gates the bracket**: the field is whoever checked in, not whoever registered, so no-shows never
 occupy a slot.
+
+**Registration closes at check-in, not at start.** `/tournament register` is refused from `checkin` onwards and
+the panel's buttons go with it; `/tournament reopen-registration` is the way back. Withdrawal is deliberately
+broader and stays open until the event begins (§8.4) — leaving late and joining late are different. One
+consequence: a withdrawal during `seeding` leaves a gap in the seed order, and `start` refuses until
+`/tournament seed refresh` renumbers.
+
+**The schedule is enforced, and has no override.** A new tournament's `scheduled_start_at` defaults to a week
+out, which is a tripwire rather than a convenience: check-in cannot open until an hour before it, and the event
+cannot start until it passes. The only way past either is to set the real time, which keeps the schedule honest
+instead of letting a stale one drift alongside the event.
 
 **Seeding at close-checkin is best-effort.** Ratings come from aoe4world (§6), so the fetch can fail after the
 status has already moved to `seeding`. It never fails the command: the field is seeded from whatever ratings are
@@ -924,7 +940,7 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament checkin` | anyone | Self check-in · also a button |
 | `/tournament close-checkin` | admin | Marks no-shows, runs suggested seeding |
 | `/tournament reopen-registration` | admin | Reverts to `registration`; clears check-ins and no-shows |
-| `/tournament setup [cap] [start_time]` | admin | Configure the event; with no options, reports what's missing |
+| `/tournament setup [cap] [start_time]` | admin | Configure the event; with no options, reports what's missing. The start time gates check-in and start |
 | `/tournament preset preset_id [from_round]` | admin | Set a round's draft preset, and so its `best_of` |
 | `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
 | `/tournament start` | admin | Generates the bracket, opens round 1 |
@@ -1392,10 +1408,6 @@ Tracked separately; not part of this design.
   `aoe4world_game_id` is a one-line `alter table`.
 - **Autocomplete.** The `bind` autocomplete in `src/commands.rs` calls `players/search` on every keystroke with
   no caching; `GET /api/v0/players/autocomplete` is purpose-built for it.
-- **Registration is never actually closed.** `/tournament register` is gated only negatively, by "has the event
-  started" (`running|completed|canceled`), so registration stays open through `checkin` and `seeding` —
-  `open-checkin` doesn't close it — and the registration panel has no CLOSED state, unlike the check-in panel.
-  That makes `reopen-registration` (§8.3) cheaper than it looks, but the positive gate is missing.
 
 ## 12. Open questions
 

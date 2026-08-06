@@ -734,6 +734,11 @@ pub async fn open_checkin(
         .await?;
         tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
             .await?;
+
+        // Registration closes here (§8.3), so the panel must stop inviting
+        // sign-ups the gate would now refuse. Re-read: the status has moved.
+        let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
+        panel::refresh_now(ctx.http(), pool, &tournament).await?;
     }
 
     ctx.say(outcome.message(&tournament.name, locale)).await?;
@@ -1048,7 +1053,20 @@ fn setup_summary(
             .join("\n")
     };
 
-    let missing = tournament_setup::missing(tournament, presets);
+    // The start time always has a value, so it can never be "missing" — but an
+    // untouched placeholder blocks check-in, and saying so here beats letting
+    // someone discover it when open-checkin refuses.
+    let placeholder = if tournament_setup::start_time_is_default(tournament) {
+        locale.pick(
+            "\n⚠️ 開賽時間還是預設值（建立後一週）。簽到要到開賽前一小時才會開放，請先設定正確時間。",
+            "\n⚠️ The start time is still the default (a week after creation). Check-in won't open until an \
+             hour before it, so set the real one.",
+        )
+    } else {
+        ""
+    };
+
+    let missing = tournament_setup::missing(presets);
     let still_needed = if missing.is_empty() {
         locale
             .pick(
@@ -1069,7 +1087,7 @@ fn setup_summary(
     };
 
     format!(
-        "**{} — {}**\n{}: {} / {}\n{}: {start}\n{}:\n{preset_lines}{still_needed}",
+        "**{} — {}**\n{}: {} / {}\n{}: {start}{placeholder}\n{}:\n{preset_lines}{still_needed}",
         tournament.name,
         locale.pick("賽事設定", "setup"),
         locale.pick("人數上限", "Entrant cap"),

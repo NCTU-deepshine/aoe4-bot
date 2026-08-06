@@ -9,6 +9,7 @@ use crate::aoe4world;
 use crate::locale::Locale;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use sqlx::SqlitePool;
+use tracing::error;
 
 /// Blocks registration and withdrawal alike once a tournament has moved past the
 /// point either could still matter — the only literal lifecycle statements in the
@@ -20,6 +21,17 @@ use sqlx::SqlitePool;
 /// frozen entry, but registering/withdrawing from one makes no sense either way.
 pub(crate) fn tournament_has_started(status: &str) -> bool {
     matches!(status, "running" | "completed" | "canceled")
+}
+
+/// Sign-ups are open only while the tournament is still gathering a field
+/// (§8.3). Positive rather than "has not started": registration closes at
+/// `/tournament open-checkin`, well before the event begins, and
+/// `/tournament reopen-registration` is what opens it again.
+///
+/// Withdrawal deliberately uses the broader `tournament_has_started` instead —
+/// joining late and leaving late are not the same thing (§8.4).
+pub(crate) fn registration_is_open(status: &str) -> bool {
+    status == "registration"
 }
 
 /// 1-based rank of `user_id`'s entry by `registered_at` (ties broken by `user_id`
@@ -172,6 +184,28 @@ impl RegisterOutcome {
     }
 }
 
+/// Records the entrant's current 1v1 ELO, after the fact.
+///
+/// Separate from `register` on purpose. A returning player's sign-up is
+/// otherwise pure database work, and folding an aoe4world call into it would put
+/// the network on the commonest path in the codebase — and into every test that
+/// exercises it (§10). This mirrors `seeding::refresh_ratings`, which is also a
+/// distinct step rather than something a state change does invisibly.
+///
+/// Best-effort: a missing or unreachable rating leaves the column null, which
+/// seeding already tolerates (§6). The entrant is registered either way.
+pub(crate) async fn snapshot_entry_elo(pool: &SqlitePool, tournament_id: i64, user_id: i64, aoe4_id: i64) {
+    let Some(profile) = aoe4world::fetch_profile(aoe4_id).await else {
+        return;
+    };
+    let Some(elo) = profile.modes.rm_1v1_elo.map(|e| i64::from(e.rating)) else {
+        return;
+    };
+    if let Err(err) = db::set_entry_elo(pool, tournament_id, user_id, elo).await {
+        error!("failed to snapshot elo for user {user_id} in tournament {tournament_id}: {err:?}");
+    }
+}
+
 /// `Some(FieldFull)` when the field is at its cap. Counts `active` entries only,
 /// so a withdrawal really does free a place.
 async fn field_full(pool: &SqlitePool, tournament: &Tournament) -> Result<Option<RegisterOutcome>, sqlx::Error> {
@@ -189,7 +223,7 @@ pub(crate) async fn register(
     user_id: i64,
     aoe4_id: Option<i64>,
 ) -> Result<RegisterOutcome, sqlx::Error> {
-    if tournament_has_started(&tournament.status) {
+    if !registration_is_open(&tournament.status) {
         return Ok(RegisterOutcome::RegistrationClosed);
     }
 
@@ -228,7 +262,9 @@ pub(crate) async fn register(
                     display_name: player.display_name,
                 });
             }
-            db::insert_entry(pool, tournament.id, user_id, player.aoe4_id, &player.display_name).await?;
+            // No rating here: `snapshot_entry_elo` fetches it after the fact, so
+            // this path stays database-only and testable without network.
+            db::insert_entry(pool, tournament.id, user_id, player.aoe4_id, &player.display_name, None).await?;
             let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
             Ok(RegisterOutcome::Registered {
                 entrant_number: entrant_number(&entries, user_id),
@@ -558,6 +594,28 @@ mod tests {
 
         assert_eq!(entrant_number(&entries, 2), 1);
         assert_eq!(entrant_number(&entries, 5), 2);
+    }
+
+    #[test]
+    fn registration_is_open_only_while_gathering_a_field() {
+        assert!(registration_is_open("registration"));
+        // Closes at open-checkin, not at start — the whole point of the change.
+        for status in ["checkin", "seeding", "running", "completed", "canceled"] {
+            assert!(!registration_is_open(status), "{status} should be closed");
+        }
+    }
+
+    #[test]
+    fn withdrawal_outlives_registration() {
+        // Joining late and leaving late are different (§8.4): you can still
+        // withdraw during check-in and seeding, when you could not join.
+        for status in ["checkin", "seeding"] {
+            assert!(!registration_is_open(status));
+            assert!(
+                !tournament_has_started(status),
+                "{status} should still allow withdrawal"
+            );
+        }
     }
 
     #[test]

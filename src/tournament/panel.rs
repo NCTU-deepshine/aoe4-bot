@@ -7,6 +7,7 @@
 use crate::Error;
 use crate::tournament::action::Action;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
+use crate::tournament::registration::registration_is_open;
 use crate::tournament::throttle::EditThrottle;
 use chrono::{DateTime, Utc};
 use serenity::all::{
@@ -33,6 +34,7 @@ pub(crate) fn render(
     entries: &[TournamentEntry],
     entrant_cap: i64,
     scheduled_start_at: Option<DateTime<Utc>>,
+    open: bool,
 ) -> (String, Vec<CreateActionRow>) {
     let active: Vec<&TournamentEntry> = entries.iter().filter(|e| e.status == "active").collect();
 
@@ -51,6 +53,13 @@ pub(crate) fn render(
 
     // Shown so entrants can see the field filling up — registration refuses a
     // sign-up past the cap (§8.3), which is confusing without a visible count.
+    let first_time = if open {
+        "第一次報名？請用 `/tournament register` 並輸入你的遊戲名稱。\n\
+         First time? Use `/tournament register` and type your in-game name.\n\n"
+    } else {
+        "\n"
+    };
+
     let starts = scheduled_start_at.map_or_else(String::new, |at| {
         format!("開賽 / Starts <t:{0}:F> (<t:{0}:R>)\n\n", at.timestamp())
     });
@@ -63,12 +72,17 @@ pub(crate) fn render(
     // Bilingual rather than per-reader (§8.10): one message, many readers, and it
     // re-renders on every button press — picking any one of their languages would
     // make it flip. Only the chrome doubles; the roster appears once.
+    let heading = if open {
+        "報名進行中 / registration is OPEN"
+    } else {
+        "報名已結束 / registration is CLOSED"
+    };
+
     let content = format!(
-        "**{name} — 報名進行中 / registration is OPEN**\n\
+        "**{name} — {heading}**\n\
          單淘汰 · 開賽前需簽到\n\
          Single elimination · check-in required before start\n\
-         第一次報名？請用 `/tournament register` 並輸入你的遊戲名稱。\n\
-         First time? Use `/tournament register` and type your in-game name.\n\n\
+         {first_time}\
          {starts}**已報名 / Registered ({}/{entrant_cap})**\n{roster}",
         active.len()
     );
@@ -76,10 +90,15 @@ pub(crate) fn render(
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new(Action::Register.custom_id(tournament_id))
             .label("報名 / Register")
-            .style(ButtonStyle::Primary),
+            .style(ButtonStyle::Primary)
+            .disabled(!open),
+        // Withdrawal stays possible until the event starts (§8.4), but once
+        // registration has closed the panel is a historical record and both
+        // buttons go together; `/tournament withdraw` is still there.
         CreateButton::new(Action::Withdraw.custom_id(tournament_id))
             .label("退賽 / Withdraw")
-            .style(ButtonStyle::Danger),
+            .style(ButtonStyle::Danger)
+            .disabled(!open),
     ])];
 
     (content, components)
@@ -96,7 +115,7 @@ pub(crate) async fn post_initial(
     entrant_cap: i64,
 ) -> Result<MessageId, Error> {
     // No start time yet: `create` runs before `/tournament setup` can.
-    let (content, components) = render(tournament_id, name, &[], entrant_cap, None);
+    let (content, components) = render(tournament_id, name, &[], entrant_cap, None, true);
     let message = channel_id
         .send_message(http, CreateMessage::new().content(content).components(components))
         .await?;
@@ -157,6 +176,7 @@ async fn edit(
         &entries,
         tournament.entrant_cap,
         tournament.scheduled_start_at,
+        registration_is_open(&tournament.status),
     );
 
     let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
@@ -196,7 +216,7 @@ mod tests {
     fn the_panel_is_bilingual_rather_than_picking_a_reader() {
         // §8.10: a shared message re-rendered by whoever presses a button, so it
         // carries both languages instead of flipping between them.
-        let (content, _) = render(1, "Relic Cup", &[entry(1, "MarineLorD", "active")], 32, None);
+        let (content, _) = render(1, "Relic Cup", &[entry(1, "MarineLorD", "active")], 32, None, true);
         assert!(content.contains("報名進行中"));
         assert!(content.contains("registration is OPEN"));
         assert!(content.contains("已報名 / Registered (1/32)"));
@@ -207,14 +227,14 @@ mod tests {
         // The cap is only fair if entrants can watch the field fill up — a
         // sign-up past it is refused (§8.3).
         let at = Utc::now();
-        let (content, _) = render(1, "Relic Cup", &[entry(1, "A", "active")], 8, Some(at));
+        let (content, _) = render(1, "Relic Cup", &[entry(1, "A", "active")], 8, Some(at), true);
         assert!(content.contains("Registered (1/8)"), "{content}");
         assert!(content.contains(&format!("<t:{}:F>", at.timestamp())), "{content}");
     }
 
     #[test]
     fn omits_the_start_line_entirely_when_unscheduled() {
-        let (content, _) = render(1, "Relic Cup", &[], 32, None);
+        let (content, _) = render(1, "Relic Cup", &[], 32, None, true);
         assert!(!content.contains("Starts"), "{content}");
     }
 
@@ -223,7 +243,7 @@ mod tests {
         // The Register button cannot serve a first-timer — it carries no name —
         // so the panel has to say so up front rather than let them hit the
         // refusal and go hunting for a command.
-        let (content, _) = render(1, "Relic Cup", &[], 32, None);
+        let (content, _) = render(1, "Relic Cup", &[], 32, None, true);
         assert!(content.contains("第一次報名？"), "{content}");
         assert!(content.contains("First time?"), "{content}");
         assert!(content.contains("/tournament register"));
@@ -231,7 +251,7 @@ mod tests {
 
     #[test]
     fn renders_a_placeholder_when_nobody_has_registered() {
-        let (content, _) = render(1, "Relic Cup", &[], 32, None);
+        let (content, _) = render(1, "Relic Cup", &[], 32, None, true);
         assert!(content.contains("Registered (0/32)"));
         assert!(content.contains("還沒有人報名。 / No one has registered yet."));
     }
@@ -243,7 +263,7 @@ mod tests {
             entry(2, "Beasty", "withdrawn"),
             entry(3, "Anotand", "active"),
         ];
-        let (content, _) = render(1, "Relic Cup", &entries, 32, None);
+        let (content, _) = render(1, "Relic Cup", &entries, 32, None, true);
         assert!(content.contains("Registered (2/32)"));
         assert!(content.contains("MarineLorD"));
         assert!(content.contains("Anotand"));
@@ -253,15 +273,45 @@ mod tests {
     #[test]
     fn truncates_the_roster_beyond_the_display_cap() {
         let entries: Vec<TournamentEntry> = (1..=12).map(|i| entry(i, &format!("Player{i}"), "active")).collect();
-        let (content, _) = render(1, "Relic Cup", &entries, 32, None);
+        let (content, _) = render(1, "Relic Cup", &entries, 32, None, true);
         assert!(content.contains("Registered (12/32)"));
         assert!(content.contains("…等 2 人 / and 2 more"));
         assert!(!content.contains("Player11"));
     }
 
     #[test]
+    fn a_closed_panel_says_so_and_stops_inviting_presses() {
+        let (content, components) = render(1, "Relic Cup", &[entry(1, "A", "active")], 32, None, false);
+        assert!(content.contains("報名已結束"), "{content}");
+        assert!(content.contains("registration is CLOSED"), "{content}");
+        // The first-timer hint would send someone to a command that refuses.
+        assert!(!content.contains("First time?"), "{content}");
+
+        let CreateActionRow::Buttons(buttons) = &components[0] else {
+            panic!("expected a button row");
+        };
+        assert!(
+            buttons.iter().all(|b| b == &b.clone().disabled(true)),
+            "both buttons should be disabled"
+        );
+    }
+
+    #[test]
+    fn the_roster_survives_closing() {
+        // The panel becomes a record of who is in the field, so it must still
+        // list them.
+        let entries = vec![entry(1, "MarineLorD", "active"), entry(2, "Beasty", "active")];
+        let (content, _) = render(1, "Relic Cup", &entries, 32, None, false);
+        assert!(
+            content.contains("MarineLorD") && content.contains("Beasty"),
+            "{content}"
+        );
+        assert!(content.contains("Registered (2/32)"), "{content}");
+    }
+
+    #[test]
     fn buttons_carry_the_tournament_id_in_their_custom_id() {
-        let (_, components) = render(42, "Relic Cup", &[], 32, None);
+        let (_, components) = render(42, "Relic Cup", &[], 32, None, true);
         let CreateActionRow::Buttons(buttons) = &components[0] else {
             panic!("expected a button row");
         };

@@ -111,6 +111,9 @@ impl Dispatcher {
             outcome,
             RegisterOutcome::Registered { .. } | RegisterOutcome::Reactivated { .. }
         ) {
+            if let Ok(Some(entry)) = db::get_entry(&self.pool, tournament.id, user_id).await {
+                registration::snapshot_entry_elo(&self.pool, tournament.id, user_id, entry.aoe4_id).await;
+            }
             self.refresh_panel(ctx, &tournament).await;
         }
     }

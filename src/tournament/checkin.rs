@@ -6,6 +6,7 @@
 
 use crate::locale::Locale;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
+use crate::tournament::setup;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
 
@@ -124,8 +125,18 @@ pub(crate) async fn checkin(
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum OpenCheckinOutcome {
-    Opened { closes_at: Option<DateTime<Utc>> },
-    NotInRegistration { current_status: String },
+    Opened {
+        closes_at: Option<DateTime<Utc>>,
+    },
+    NotInRegistration {
+        current_status: String,
+    },
+    /// Too far ahead of the scheduled start (§8.3). There is deliberately no
+    /// force flag: the way past this is to set the real start time, which keeps
+    /// the schedule honest instead of letting it drift.
+    TooEarly {
+        opens_at: DateTime<Utc>,
+    },
 }
 
 impl OpenCheckinOutcome {
@@ -147,6 +158,18 @@ impl OpenCheckinOutcome {
                 format!("**{tournament_name}** 的簽到已開放。"),
                 format!("Check-in is now open for **{tournament_name}**."),
             ),
+            OpenCheckinOutcome::TooEarly { opens_at } => locale.pick(
+                format!(
+                    "簽到會在開賽前一小時開放，也就是 <t:{0}:F>（<t:{0}:R>）。\
+                     如果開賽時間不對，請用 `/tournament setup start_time:` 更新。",
+                    opens_at.timestamp()
+                ),
+                format!(
+                    "Check-in opens an hour before the scheduled start, at <t:{0}:F> (<t:{0}:R>). If that's \
+                     wrong, set the real time with `/tournament setup start_time:`.",
+                    opens_at.timestamp()
+                ),
+            ),
             OpenCheckinOutcome::NotInRegistration { current_status } => locale.pick(
                 format!("只有在 **{tournament_name}** 還在報名階段時才能開放簽到（目前為 {current_status}）。"),
                 format!(
@@ -167,6 +190,13 @@ pub(crate) async fn open(
         return Ok(OpenCheckinOutcome::NotInRegistration {
             current_status: tournament.status.clone(),
         });
+    }
+
+    if let Some(scheduled) = tournament.scheduled_start_at {
+        let opens_at = setup::checkin_opens_at(scheduled);
+        if Utc::now() < opens_at {
+            return Ok(OpenCheckinOutcome::TooEarly { opens_at });
+        }
     }
 
     let closes_at = minutes.map(|m| Utc::now() + Duration::minutes(m));

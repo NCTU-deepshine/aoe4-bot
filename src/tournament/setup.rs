@@ -12,6 +12,35 @@
 use crate::drafttool;
 use crate::locale::Locale;
 use crate::tournament::db::{RoundPreset, Tournament};
+use chrono::{DateTime, Duration, Utc};
+
+/// Check-in opens this long before the scheduled start (§8.3).
+pub(crate) const CHECKIN_LEAD: Duration = Duration::hours(1);
+
+/// How far out a new tournament's start time is placed. Deliberately far: it is
+/// a tripwire, not a convenience. An organizer running an event tomorrow cannot
+/// open check-in until they correct it, which is the point.
+pub(crate) const DEFAULT_START_LEAD: Duration = Duration::days(7);
+
+pub(crate) fn checkin_opens_at(scheduled_start_at: DateTime<Utc>) -> DateTime<Utc> {
+    scheduled_start_at - CHECKIN_LEAD
+}
+
+/// Whether the start time is still the untouched placeholder `insert_tournament`
+/// wrote. Both timestamps come from one statement's clock, so this is an exact
+/// comparison rather than a tolerance.
+pub(crate) fn start_time_is_default(tournament: &Tournament) -> bool {
+    tournament.scheduled_start_at == Some(tournament.created_at + DEFAULT_START_LEAD)
+}
+
+/// Whether the event may begin. Consumed by chunk 12.
+//
+// Until `/tournament start` lands only this module's tests exercise it — remove
+// the allow then.
+#[allow(dead_code)]
+pub(crate) fn may_start_at(scheduled_start_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    scheduled_start_at.is_none_or(|at| now >= at)
+}
 
 /// The depth that means "every round", as opposed to a real distance from the
 /// final. Rounds are numbered 1 = final, 2 = semi, 3 = Ro8, so 0 is free.
@@ -59,7 +88,6 @@ pub(crate) fn best_of_per_round(assignments: &[RoundPreset], round_count: usize)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Missing {
     Preset,
-    StartTime,
 }
 
 impl Missing {
@@ -68,10 +96,6 @@ impl Missing {
             Missing::Preset => locale.pick(
                 "抽選預設 (`/tournament preset`)",
                 "a draft preset (`/tournament preset`)",
-            ),
-            Missing::StartTime => locale.pick(
-                "開賽時間 (`/tournament setup start_time:`)",
-                "a start time (`/tournament setup start_time:`)",
             ),
         }
     }
@@ -82,13 +106,10 @@ impl Missing {
 /// The entrant cap is never listed: it is `not null default 32`, so it is always
 /// answered. Consumed both by `/tournament setup`'s reply and by chunk 12's gate,
 /// so the two cannot disagree about what "configured" means.
-pub(crate) fn missing(tournament: &Tournament, assignments: &[RoundPreset]) -> Vec<Missing> {
+pub(crate) fn missing(assignments: &[RoundPreset]) -> Vec<Missing> {
     let mut missing = Vec::new();
     if preset_for_depth(assignments, DEFAULT_DEPTH).is_none() && assignments.is_empty() {
         missing.push(Missing::Preset);
-    }
-    if tournament.scheduled_start_at.is_none() {
-        missing.push(Missing::StartTime);
     }
     missing
 }
@@ -301,16 +322,41 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_tournament_is_missing_a_preset_and_a_start_time() {
-        assert_eq!(
-            missing(&tournament(false), &[]),
-            vec![Missing::Preset, Missing::StartTime]
-        );
+    fn a_fresh_tournament_is_missing_only_a_preset() {
+        // The cap and the start time both always have values, so neither can be
+        // absent; an untouched start time is warned about, not blocked on.
+        assert_eq!(missing(&[]), vec![Missing::Preset]);
+    }
+
+    #[test]
+    fn checkin_opens_an_hour_before_the_start() {
+        let start = Utc::now() + Duration::days(1);
+        assert_eq!(checkin_opens_at(start), start - Duration::hours(1));
+    }
+
+    #[test]
+    fn the_placeholder_start_time_is_recognised_and_an_edited_one_is_not() {
+        let mut t = tournament(false);
+        t.created_at = Utc::now();
+        t.scheduled_start_at = Some(t.created_at + DEFAULT_START_LEAD);
+        assert!(start_time_is_default(&t), "the untouched default should be spotted");
+
+        t.scheduled_start_at = Some(t.created_at + Duration::days(2));
+        assert!(!start_time_is_default(&t), "an edited time is not the default");
+    }
+
+    #[test]
+    fn starting_waits_for_the_scheduled_time() {
+        let now = Utc::now();
+        assert!(!may_start_at(Some(now + Duration::minutes(1)), now));
+        assert!(may_start_at(Some(now), now), "the boundary itself is allowed");
+        assert!(may_start_at(Some(now - Duration::hours(1)), now));
+        assert!(may_start_at(None, now), "an unscheduled tournament is not blocked");
     }
 
     #[test]
     fn the_cap_is_never_missing_because_it_always_has_a_default() {
-        let configured = missing(&tournament(true), &[assignment(DEFAULT_DEPTH, "A", 3)]);
+        let configured = missing(&[assignment(DEFAULT_DEPTH, "A", 3)]);
         assert!(configured.is_empty(), "{configured:?}");
     }
 
@@ -318,7 +364,7 @@ mod tests {
     fn a_preset_that_does_not_cover_every_round_still_counts_as_configured() {
         // `missing` only asks whether any preset exists; whether it covers every
         // round depends on the field size, which start checks via best_of_per_round.
-        assert_eq!(missing(&tournament(true), &[assignment(1, "C", 7)]), vec![]);
+        assert_eq!(missing(&[assignment(1, "C", 7)]), vec![]);
     }
 
     #[test]

@@ -52,10 +52,16 @@ pub(crate) async fn insert_tournament(
     name: &str,
     created_by: i64,
 ) -> Result<i64, sqlx::Error> {
+    // The start time defaults a week out, and is set here rather than as a column
+    // default because SQLite rejects a non-constant default on `alter table add
+    // column`. Same statement as created_at's own default means one clock, so
+    // `scheduled_start_at == created_at + 7 days` holds exactly — which is how
+    // `setup::start_time_is_default` spots an untouched placeholder without a
+    // column recording whether anyone edited it.
     let result = sqlx::query(
         r"
-        insert into tournaments (slug, name, created_by)
-        values (?1, ?2, ?3)
+        insert into tournaments (slug, name, created_by, scheduled_start_at)
+        values (?1, ?2, ?3, datetime('now', '+7 days'))
         ",
     )
     .bind(slug)
@@ -763,23 +769,28 @@ pub(crate) struct TournamentEntry {
     pub checked_in_at: Option<DateTime<Utc>>,
 }
 
+/// `elo` is snapshotted at sign-up so the bracket preview has something real to
+/// order by before seeding runs (§6). ATR is not: it is one bulk request for the
+/// whole field, so it stays a seeding-time fetch rather than a per-entrant one.
 pub(crate) async fn insert_entry(
     pool: &SqlitePool,
     tournament_id: i64,
     user_id: i64,
     aoe4_id: i64,
     display_name: &str,
+    elo: Option<i64>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r"
-        insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name)
-        values (?1, ?2, ?3, ?4)
+        insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name, elo)
+        values (?1, ?2, ?3, ?4, ?5)
         ",
     )
     .bind(tournament_id)
     .bind(user_id)
     .bind(aoe4_id)
     .bind(display_name)
+    .bind(elo)
     .execute(pool)
     .await
     .inspect_err(log_db_error)?;
@@ -932,6 +943,31 @@ pub(crate) async fn clear_checkins(pool: &SqlitePool, tournament_id: i64) -> Res
     .await
     .inspect_err(log_db_error)?;
     Ok(result.rows_affected())
+}
+
+/// Just the ELO, unlike `set_entry_ratings`, which would blank an `atr` the
+/// seeding pass had already written.
+pub(crate) async fn set_entry_elo(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    elo: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_entries
+        set elo = ?1
+        where tournament_id = ?2
+          and user_id = ?3
+        ",
+    )
+    .bind(elo)
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
 }
 
 pub(crate) async fn set_entry_ratings(
