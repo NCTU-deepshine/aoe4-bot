@@ -1385,6 +1385,107 @@ mod tests {
         assert_eq!(entries[0].elo, Some(1234));
     }
 
+    #[tokio::test]
+    async fn the_first_entrant_in_a_fresh_tournament_is_number_one() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 42, 4200, "Me")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 42, None)
+            .await
+            .unwrap();
+
+        match outcome {
+            crate::tournament::registration::RegisterOutcome::Registered { entrant_number, .. } => {
+                let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    entries.len(),
+                    1,
+                    "rows: {:?}",
+                    entries.iter().map(|e| e.user_id).collect::<Vec<_>>()
+                );
+                assert_eq!(entrant_number, 1);
+            },
+            other => panic!("expected Registered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_entrant_still_occupies_an_entrant_number() {
+        // Why someone can be the only entrant in the field and still be told
+        // they are #2: entries are never deleted (§4), and the number is a rank
+        // by registration time over every row, not a count of the live field.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        for (user_id, aoe4_id) in [(1, 100), (2, 200)] {
+            crate::tournament::db::insert_player_if_absent(&pool, user_id, aoe4_id, "P")
+                .await
+                .unwrap();
+        }
+
+        crate::tournament::registration::register(&pool, &tournament, 1, None)
+            .await
+            .unwrap();
+        crate::tournament::registration::withdraw(&pool, &tournament, 1)
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, None)
+            .await
+            .unwrap();
+        let crate::tournament::registration::RegisterOutcome::Registered { entrant_number, .. } = outcome else {
+            panic!("expected Registered");
+        };
+        assert_eq!(
+            entrant_number, 2,
+            "the withdrawn entrant keeps their place, so the only active entrant is #2"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_registration_writes_nothing() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        // No binding and no profile given.
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::NeedsProfileArgument
+        );
+
+        // A profile someone else already holds.
+        crate::tournament::db::insert_player_if_absent(&pool, 2, 200, "Other")
+            .await
+            .unwrap();
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 3, Some(200))
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::ProfileClaimedByAnother { .. }
+        ));
+
+        assert!(
+            crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused registration must leave no entry behind"
+        );
+        assert!(
+            crate::tournament::db::get_player(&pool, 1).await.unwrap().is_none(),
+            "nor a half-written player binding"
+        );
+        assert!(crate::tournament::db::get_player(&pool, 3).await.unwrap().is_none());
+    }
+
     // Bracket persistence and start (chunk 12).
 
     /// A seeded, checked-in field of `n`, configured enough to start.
@@ -2013,6 +2114,9 @@ mod tests {
         crate::tournament::db::upsert_bracket_message(pool, tournament_id, 1, 555)
             .await
             .unwrap();
+        crate::tournament::db::upsert_round_preset(pool, tournament_id, 0, "preset", 3)
+            .await
+            .unwrap();
 
         let stage_id = crate::tournament::db::insert_stage(pool, tournament_id, 1, "Main Bracket", "single_elim")
             .await
@@ -2052,7 +2156,10 @@ mod tests {
             .unwrap()
     }
 
-    const TOURNAMENT_SCOPED_TABLES: [&str; 8] = [
+    /// Every table that hangs off a tournament. **Add to this when a migration
+    /// adds one** — the cascade test is only as complete as this list, and a
+    /// missing entry is a table that silently survives a delete.
+    const TOURNAMENT_SCOPED_TABLES: [&str; 9] = [
         "tournaments",
         "tournament_admins",
         "tournament_entries",
@@ -2061,6 +2168,7 @@ mod tests {
         "tournament_rounds",
         "tournament_sets",
         "tournament_games",
+        "tournament_round_presets",
     ];
 
     #[tokio::test]
