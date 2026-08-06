@@ -10,6 +10,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
@@ -39,7 +40,11 @@ struct Data {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    // Not `fmt::init()`: that reads RUST_LOG only with the env-filter feature, and
+    // silently pins the level at INFO without it. Same default, but overridable.
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .init();
     info!("starting app");
 
     let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set");

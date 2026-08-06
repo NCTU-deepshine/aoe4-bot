@@ -13,7 +13,7 @@ use crate::tournament::action::{self, Action};
 use crate::tournament::checkin::CheckinOutcome;
 use crate::tournament::registration::{RegisterOutcome, WithdrawOutcome};
 use crate::tournament::throttle::EditThrottle;
-use crate::tournament::{checkin, checkin_panel, db, panel, registration};
+use crate::tournament::{audit, checkin, checkin_panel, db, panel, registration};
 use serenity::all::{
     ComponentInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
     Interaction,
@@ -90,6 +90,13 @@ impl Dispatcher {
                 return;
             },
         };
+        audit::log_action(
+            "register button",
+            tournament.id,
+            &tournament.slug,
+            &component.user,
+            &outcome,
+        );
 
         // Deferred (Action::Register.requires_defer() == true), so the reply
         // edits the initial deferred response rather than creating a new one.
@@ -119,6 +126,13 @@ impl Dispatcher {
                 return;
             },
         };
+        audit::log_action(
+            "withdraw button",
+            tournament.id,
+            &tournament.slug,
+            &component.user,
+            &outcome,
+        );
 
         // Never deferred (Action::Withdraw.requires_defer() == false), so the
         // reply is a fresh ephemeral message, not an edit of a deferred one.
@@ -149,6 +163,13 @@ impl Dispatcher {
                 return;
             },
         };
+        audit::log_action(
+            "checkin button",
+            tournament.id,
+            &tournament.slug,
+            &component.user,
+            &outcome,
+        );
 
         // Never deferred (Action::Checkin.requires_defer() == false), so the
         // reply is a fresh ephemeral message, not an edit of a deferred one.

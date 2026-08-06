@@ -11,7 +11,9 @@ use sqlx::{FromRow, SqlitePool};
 use tracing::error;
 
 fn log_db_error(err: &sqlx::Error) {
-    error!("database operation failed with error {}", err.to_string());
+    // Debug, not Display: `sqlx::Error`'s Display drops the constraint name and
+    // the SQLite extended code, which is usually the whole answer.
+    error!("database operation failed with error {err:?}");
 }
 
 // 1. tournaments

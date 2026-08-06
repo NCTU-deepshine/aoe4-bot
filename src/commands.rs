@@ -7,7 +7,7 @@ use crate::reply::ephemeral;
 use crate::tournament::access::{create_tournament_only, tournament_admin_only, tournament_manage_only};
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
-use crate::tournament::{checkin, checkin_panel, panel, registration};
+use crate::tournament::{audit, checkin, checkin_panel, panel, registration};
 use crate::{Context, Data, Error};
 use regex::Regex;
 use serenity::all::{
@@ -314,6 +314,19 @@ pub async fn create(
     tournament_db::set_register_message_id(pool, tournament_id, i64::try_from(register_message_id.get()).unwrap())
         .await?;
 
+    // The record a later `/tournament delete` is audited against: what existed,
+    // and which channels were ours to remove.
+    info!(
+        "created tournament {tournament_id} ({slug}) \"{name}\" by {} ({}) \
+         with channels register={} bracket={} draft={} matches={}",
+        ctx.author().name,
+        ctx.author().id,
+        register.id,
+        bracket.id,
+        draft.id,
+        matches.id,
+    );
+
     let category_note = if category_id.is_none() {
         "\n(This channel has no category, so the new channels are uncategorized.)"
     } else {
@@ -386,6 +399,13 @@ pub async fn add(ctx: Context<'_>, user: User) -> Result<(), Error> {
     let added_by = i64::try_from(ctx.author().id.get()).unwrap();
     let target = i64::try_from(user.id.get()).unwrap();
     tournament_db::add_admin(&ctx.data().database, tournament.id, target, added_by).await?;
+    info!(
+        "admin add on tournament {} ({}) by {} ({added_by}): added {} ({target})",
+        tournament.id,
+        tournament.slug,
+        ctx.author().name,
+        user.name
+    );
     ephemeral(
         ctx,
         format!("Added {} as an admin for **{}**.", user.name, tournament.name),
@@ -406,8 +426,16 @@ pub async fn remove(ctx: Context<'_>, user: User) -> Result<(), Error> {
         return Ok(());
     };
 
+    let removed_by = i64::try_from(ctx.author().id.get()).unwrap();
     let target = i64::try_from(user.id.get()).unwrap();
     tournament_db::remove_admin(&ctx.data().database, tournament.id, target).await?;
+    info!(
+        "admin remove on tournament {} ({}) by {} ({removed_by}): removed {} ({target})",
+        tournament.id,
+        tournament.slug,
+        ctx.author().name,
+        user.name
+    );
     ephemeral(
         ctx,
         format!("Removed {} as an admin for **{}**.", user.name, tournament.name),
@@ -464,6 +492,7 @@ pub async fn register(
     let pool = &ctx.data().database;
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = registration::register(pool, &tournament, user_id, aoe4_id.map(i64::from)).await?;
+    audit::log_action("register", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(&tournament.name)).await?;
 
     if outcome.changed_state() {
@@ -485,6 +514,11 @@ pub async fn rebind(
     ctx.defer_ephemeral().await?;
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = registration::rebind(&ctx.data().database, user_id, i64::from(aoe4_id)).await?;
+    // No tournament to name — the player list is global (see the note above).
+    info!(
+        "rebind by {} ({user_id}) to aoe4 id {aoe4_id}: {outcome:?}",
+        ctx.author().name
+    );
     ephemeral(ctx, outcome.message()).await?;
     Ok(())
 }
@@ -500,6 +534,7 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
     let pool = &ctx.data().database;
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = registration::withdraw(pool, &tournament, user_id).await?;
+    audit::log_action("withdraw", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(&tournament.name)).await?;
 
     if outcome.changed_state() {
@@ -534,6 +569,7 @@ pub async fn open_checkin(
 
     let pool = &ctx.data().database;
     let outcome = checkin::open(pool, &tournament, minutes).await?;
+    audit::log_action("open-checkin", tournament.id, &tournament.slug, ctx.author(), &outcome);
 
     if let checkin::OpenCheckinOutcome::Opened { closes_at } = outcome {
         // Always set by `create()` when the tournament was made.
@@ -567,6 +603,7 @@ pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
     let pool = &ctx.data().database;
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let outcome = checkin::checkin(pool, &tournament, user_id).await?;
+    audit::log_action("checkin", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(&tournament.name)).await?;
 
     if outcome.changed_state() {
@@ -592,6 +629,7 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
 
     let pool = &ctx.data().database;
     let outcome = checkin::close(pool, &tournament).await?;
+    audit::log_action("close-checkin", tournament.id, &tournament.slug, ctx.author(), &outcome);
 
     if matches!(outcome, checkin::CloseCheckinOutcome::Closed { .. }) {
         checkin_panel::close(ctx.http(), pool, &tournament).await?;

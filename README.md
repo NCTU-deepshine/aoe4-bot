@@ -26,6 +26,9 @@ DISCORD_TOKEN=<bot token>
 GUILD_ID=<discord guild id>
 ```
 
+`RUST_LOG` is optional and defaults to `info` — the usual `tracing` syntax, so
+`RUST_LOG=aoe4_bot=debug,serenity=warn` works.
+
 ```sh
 cargo run
 ```

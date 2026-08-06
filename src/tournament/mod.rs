@@ -9,6 +9,9 @@ pub(crate) mod access;
 // The interaction dispatcher's custom_id parsing (chunk 8, §8.5): consumed
 // immediately by `dispatch::Dispatcher`.
 pub(crate) mod action;
+// One log line per tournament action, shared by the slash-command and button
+// surfaces so a destructive one leaves the same record either way.
+pub(crate) mod audit;
 // Chunk 7 (`/tournament create`, the admin list) is the first caller, but only of
 // a fraction of this file — everything else is consumed starting with chunk 9
 // (registration) through chunk 22 (result import); see the per-section notes in
