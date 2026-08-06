@@ -1273,6 +1273,120 @@ mod tests {
         assert!(entries.iter().all(|e| e.seed.is_none() && e.suggested_seed.is_none()));
     }
 
+    // Chunk 11 (seeding) gate tests.
+
+    /// A checked-in field of `n` entrants, unseeded.
+    async fn setup_seedable_field(pool: &SqlitePool, n: i64) -> crate::tournament::db::Tournament {
+        let tournament = setup_tournament(pool, "seeding").await;
+        for user_id in 1..=n {
+            crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+                .await
+                .unwrap();
+            crate::tournament::db::insert_entry(pool, tournament.id, user_id, user_id * 100, "P")
+                .await
+                .unwrap();
+        }
+        tournament
+    }
+
+    async fn seeds_by_user(pool: &SqlitePool, tournament_id: i64) -> Vec<(i64, Option<i64>)> {
+        let mut entries = crate::tournament::db::list_entries_for_tournament(pool, tournament_id)
+            .await
+            .unwrap();
+        entries.sort_by_key(|e| e.user_id);
+        entries.iter().map(|e| (e.user_id, e.seed)).collect()
+    }
+
+    #[tokio::test]
+    async fn set_seed_order_writes_one_to_n_in_the_given_order() {
+        let pool = test_pool().await;
+        let tournament = setup_seedable_field(&pool, 4).await;
+
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[3, 1, 4, 2], true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            seeds_by_user(&pool, tournament.id).await,
+            vec![(1, Some(2)), (2, Some(4)), (3, Some(1)), (4, Some(3))]
+        );
+    }
+
+    #[tokio::test]
+    async fn reordering_an_already_seeded_field_does_not_trip_the_unique_index() {
+        // The regression the null-first transaction exists for: shifting everyone
+        // down by one collides on the first row without it.
+        let pool = test_pool().await;
+        let tournament = setup_seedable_field(&pool, 4).await;
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[1, 2, 3, 4], true)
+            .await
+            .unwrap();
+
+        let shifted = crate::tournament::seeding::reorder(&[1, 2, 3, 4], 4, 1);
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &shifted, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            seeds_by_user(&pool, tournament.id).await,
+            vec![(1, Some(2)), (2, Some(3)), (3, Some(4)), (4, Some(1))]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_organizer_override_leaves_the_suggestion_intact() {
+        // §10's "an organizer's override survives" — and its converse: the panel
+        // must still be able to show what the tiering proposed.
+        let pool = test_pool().await;
+        let tournament = setup_seedable_field(&pool, 3).await;
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[1, 2, 3], true)
+            .await
+            .unwrap();
+
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[3, 1, 2], false)
+            .await
+            .unwrap();
+
+        let mut entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        entries.sort_by_key(|e| e.user_id);
+        let suggested: Vec<Option<i64>> = entries.iter().map(|e| e.suggested_seed).collect();
+        let actual: Vec<Option<i64>> = entries.iter().map(|e| e.seed).collect();
+        assert_eq!(suggested, vec![Some(1), Some(2), Some(3)], "suggestion must not move");
+        assert_eq!(actual, vec![Some(2), Some(3), Some(1)]);
+    }
+
+    #[tokio::test]
+    async fn seeding_survives_a_reopen_which_clears_every_seed() {
+        // Chunk 25 clears seeds; chunk 11 must be able to write a fresh order
+        // afterwards without colliding with the ones it just removed.
+        let pool = test_pool().await;
+        let tournament = setup_seedable_field(&pool, 3).await;
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[1, 2, 3], true)
+            .await
+            .unwrap();
+
+        crate::tournament::db::clear_checkins(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert!(
+            seeds_by_user(&pool, tournament.id)
+                .await
+                .iter()
+                .all(|(_, s)| s.is_none()),
+            "reopening should have cleared every seed"
+        );
+
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[2, 3, 1], true)
+            .await
+            .unwrap();
+        assert_eq!(
+            seeds_by_user(&pool, tournament.id).await,
+            vec![(1, Some(3)), (2, Some(1)), (3, Some(2))]
+        );
+    }
+
     // Chunk 26 (/tournament delete) gate tests.
 
     /// A tournament with a row in every table that references it, so a delete has

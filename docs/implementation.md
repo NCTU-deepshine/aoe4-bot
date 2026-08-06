@@ -26,9 +26,9 @@ writing the code, and if a chunk seems to contradict them, the design doc wins o
   `panel.rs`, `registration.rs`, `mod.rs`, `dispatch.rs`, `commands.rs` — e.g. "consumed by chunk 12") would
   silently break under renumbering. So the number says where a chunk was written down, and only the phase it
   sits in says where it belongs.
-- **Chunks 25, 26 and 24 land next, in that order**, all before the rest of Phase D. 24 (localization) retrofits
-  the existing messages of chunks 7–10 plus 25 and 26, and every chunk after it must write new user-facing text
-  through it from the start.
+- **Chunks 25, 26 and 24 landed out of numerical order**, in that sequence, right after chunk 10 and before the
+  rest of Phase D. 24 (localization) retrofitted chunks 7–10, 25 and 26; **every chunk from here on writes its
+  user-facing text through `Locale` from the start**, and its shared surfaces bilingual (§8.10).
 
 ## Phase A — foundations
 
@@ -127,10 +127,16 @@ non-checked-in entrants.
 
 **11. Seeding**
 ATR and ELO through the existing `fetch_profile` and shared client (§6 "Reuse" — no new HTTP client), the tiered
-suggestion, `/tournament seed list|set`, and the ratings refresh at seeding time. No ratings cache (§4).
-Design: §6.
-Gate: tiering with only some entrants rated; an organizer's override survives; esports-leaderboard
-deserialization against a saved payload.
+suggestion, `/tournament seed list|set|refresh`, and the ratings refresh at seeding time. No ratings cache (§4).
+Adds a **seeding panel** in `#…-bracket`, posted by `close-checkin` and edited in place afterwards, which is
+what makes `seed set`'s shift-down renumbering safe to watch. Seeding at close-checkin is best-effort: the
+status has already moved, so an aoe4world outage reports the gap and leaves `seed refresh` to retry. One
+migration for the panel's message id. `set_seed_order` nulls every seed before rewriting, or shifting a field
+collides with `unique (tournament_id, seed)`.
+Design: §6, §8.5.
+Gate: §10's seeding list — tiering with only some entrants rated, an override that leaves the suggestion
+intact, a reorder that does not trip the unique index, and esports-leaderboard deserialization against a saved
+payload including its nullable `profile_id` rows.
 
 **12. `/tournament start`**
 Generate the bracket in one transaction from finalized seeds, publish it (chunked, ids in

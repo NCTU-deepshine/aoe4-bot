@@ -37,6 +37,12 @@ pub(crate) mod render;
 pub(crate) mod registration;
 // `/tournament create`'s slug argument (§8.1).
 pub(crate) mod slug;
+// Ratings and suggested seeding (chunk 11, §6): the pure tiering plus the one
+// aoe4world path that snapshots ATR and ELO onto each entry.
+pub(crate) mod seeding;
+// The seeding panel (chunk 11, §8.5): the seeded field, rendered into
+// `#{slug}-bracket` and edited in place as an organizer overrides seeds.
+pub(crate) mod seed_panel;
 // `/tournament delete`'s guards (chunk 26, §8.4) — pure, like `access::decide`.
 pub(crate) mod teardown;
 // The panel-edit throttle (§8.5, "Edits must be throttled"). Consumed by

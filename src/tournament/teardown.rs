@@ -81,6 +81,7 @@ mod tests {
             matches_channel_id: Some(13),
             draft_channel_id: Some(14),
             checkin_message_id: None,
+            seed_message_id: None,
             checkin_closes_at: None,
             created_by: 1,
             created_at: Utc::now(),

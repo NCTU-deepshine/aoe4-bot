@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::error;
 
@@ -42,6 +43,30 @@ pub(crate) async fn search_players(username: &str) -> Option<SearchResult> {
     fetch_json(url, "player search").await
 }
 
+/// ATR for a whole field (docs/tournament.md §6): the esports leaderboard filtered
+/// by `profile_ids`, keyed back by id. Missing entrants are normal and simply
+/// absent from the map — the leaderboard is ~345 professionals, so most guild
+/// entrants will have no ATR at all.
+///
+/// Batched in `ESPORTS_PAGE_SIZE`s: the endpoint ignores a smaller `per_page` and
+/// caps a page at 50, so a field larger than that needs more than one request.
+pub(crate) async fn fetch_esports_ratings(profile_ids: &[i64]) -> HashMap<i64, f64> {
+    let mut ratings = HashMap::new();
+    for batch in profile_ids.chunks(ESPORTS_PAGE_SIZE) {
+        let ids = batch.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let mut url = api_url("esports/leaderboards/1");
+        url.query_pairs_mut().append_pair("profile_ids", &ids);
+
+        let Some(page) = fetch_json::<EsportsLeaderboard>(url, "esports leaderboard").await else {
+            // A failed batch is missing ATR, not a failed seeding — the caller
+            // seeds from whatever it has and reports the gap (§6).
+            continue;
+        };
+        ratings.extend(page.ratings());
+    }
+    ratings
+}
+
 async fn fetch_json<T: serde::de::DeserializeOwned>(url: Url, what: &str) -> Option<T> {
     client()
         .get(url)
@@ -53,6 +78,30 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(url: Url, what: &str) -> Opt
         .await
         .inspect_err(|err| error!("aoe4world {} decode failed: {}", what, err))
         .ok()
+}
+
+/// The esports endpoint caps a page here and ignores a smaller request.
+const ESPORTS_PAGE_SIZE: usize = 50;
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct EsportsLeaderboard {
+    pub players: Vec<EsportsPlayer>,
+}
+
+impl EsportsLeaderboard {
+    fn ratings(&self) -> impl Iterator<Item = (i64, f64)> + '_ {
+        self.players.iter().filter_map(|p| Some((p.profile_id?, p.rating?)))
+    }
+}
+
+/// Both fields are genuinely nullable in the live response: the leaderboard is
+/// mirrored from a name-keyed community sheet (§6), so entries exist for players
+/// aoe4world has not matched to a profile. Those rows are unusable here and are
+/// dropped rather than being allowed to fail the whole batch.
+#[derive(Deserialize, Debug)]
+pub(crate) struct EsportsPlayer {
+    pub profile_id: Option<i64>,
+    pub rating: Option<f64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -208,7 +257,49 @@ impl Ord for SearchedPlayer {
 
 #[cfg(test)]
 mod tests {
-    use super::rank_level_zh;
+    use super::{EsportsLeaderboard, rank_level_zh};
+
+    /// A real response, trimmed to four players (`src/tournament/testdata/`).
+    /// §10: deserialization is tested against a saved payload, never live.
+    fn leaderboard() -> EsportsLeaderboard {
+        serde_json::from_str(include_str!("tournament/testdata/esports_leaderboard.json"))
+            .expect("the saved esports payload should parse")
+    }
+
+    #[test]
+    fn parses_the_saved_payload_into_ratings_by_profile_id() {
+        let ratings: std::collections::HashMap<i64, f64> = leaderboard().ratings().collect();
+        assert_eq!(ratings.get(&1102458), Some(&2292.531382));
+        assert_eq!(ratings.get(&106457), Some(&1315.84451));
+    }
+
+    #[test]
+    fn drops_leaderboard_rows_with_no_profile_id() {
+        // The sheet this mirrors is name-keyed, so unmatched players really do
+        // come back with a null profile_id — they must not fail the batch.
+        let board = leaderboard();
+        assert!(board.players.iter().any(|p| p.profile_id.is_none()));
+        assert_eq!(board.ratings().count(), board.players.len() - 1);
+    }
+
+    /// The one thing the saved payload cannot prove: that the live endpoint still
+    /// has this shape. Opt-in, like `ranked.rs`'s live tests, so CI never depends
+    /// on aoe4world being up.
+    #[tokio::test]
+    #[ignore = "hits the live aoe4world API"]
+    async fn the_live_leaderboard_still_answers_with_ratings() {
+        // MarineLorD, rank 1 at the time of writing — a professional stable enough
+        // to stay on a 345-player leaderboard.
+        let ratings = super::fetch_esports_ratings(&[1102458]).await;
+        let atr = ratings.get(&1102458).copied().expect("expected an ATR");
+        assert!((1000.0..3000.0).contains(&atr), "implausible ATR: {atr}");
+    }
+
+    #[test]
+    fn an_entrant_absent_from_the_response_simply_has_no_atr() {
+        let ratings: std::collections::HashMap<i64, f64> = leaderboard().ratings().collect();
+        assert_eq!(ratings.get(&999_999_999), None);
+    }
 
     #[test]
     fn renders_every_tier() {

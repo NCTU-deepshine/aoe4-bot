@@ -36,6 +36,7 @@ pub(crate) struct Tournament {
     pub matches_channel_id: Option<i64>,
     pub draft_channel_id: Option<i64>,
     pub checkin_message_id: Option<i64>,
+    pub seed_message_id: Option<i64>,
     pub checkin_closes_at: Option<DateTime<Utc>>,
     pub created_by: i64,
     pub created_at: DateTime<Utc>,
@@ -70,7 +71,7 @@ pub(crate) async fn get_tournament(pool: &SqlitePool, id: i64) -> Result<Option<
         r"
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
-               draft_channel_id, checkin_message_id, checkin_closes_at, created_by, created_at,
+               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at, created_by, created_at,
                started_at, completed_at
         from tournaments
         where id = ?1
@@ -87,7 +88,7 @@ pub(crate) async fn get_tournament_by_slug(pool: &SqlitePool, slug: &str) -> Res
         r"
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
-               draft_channel_id, checkin_message_id, checkin_closes_at, created_by, created_at,
+               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at, created_by, created_at,
                started_at, completed_at
         from tournaments
         where slug = ?1
@@ -200,6 +201,24 @@ pub(crate) async fn set_checkin_message_id(
     Ok(())
 }
 
+/// The seeding panel's message id (docs/tournament.md §8.5) — set when
+/// `/tournament close-checkin` posts the panel, and back to `None` by
+/// `/tournament reopen-registration`, which deletes that message along with the
+/// seeds it displayed.
+pub(crate) async fn set_seed_message_id(
+    pool: &SqlitePool,
+    id: i64,
+    seed_message_id: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set seed_message_id = ?1 where id = ?2")
+        .bind(seed_message_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 /// When check-in closes on its own (docs/tournament.md §8.3) — informational
 /// only today; nothing polls this to auto-close (§11 follow-ups).
 pub(crate) async fn set_checkin_closes_at(
@@ -228,7 +247,7 @@ pub(crate) async fn get_tournament_by_any_channel_id(
         r"
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
-               draft_channel_id, checkin_message_id, checkin_closes_at, created_by, created_at,
+               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at, created_by, created_at,
                started_at, completed_at
         from tournaments
         where announce_channel_id = ?1
@@ -807,6 +826,64 @@ pub(crate) async fn set_entry_ratings(
     .execute(pool)
     .await
     .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Writes `ordered_user_ids` as seeds 1..n in one transaction (§6).
+///
+/// **Every seed is nulled first, and that is load-bearing rather than tidy:**
+/// `unique (tournament_id, seed)` is enforced per row as the statement runs, so
+/// shifting a field down by one would collide on the very first row without a
+/// clear pass. Writing the whole order rather than the changed rows also
+/// guarantees the result is contiguous, which is what chunk 12's `start`
+/// requires of a finalized field.
+///
+/// `also_suggested` separates the two callers: `close-checkin` records what the
+/// tiering proposed, an organizer's override touches only `seed`, so the
+/// suggestion stays on the panel to compare against.
+pub(crate) async fn set_seed_order(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    ordered_user_ids: &[i64],
+    also_suggested: bool,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
+
+    sqlx::query(r"update tournament_entries set seed = null where tournament_id = ?1")
+        .bind(tournament_id)
+        .execute(&mut *tx)
+        .await
+        .inspect_err(log_db_error)?;
+
+    for (index, user_id) in ordered_user_ids.iter().enumerate() {
+        let seed = i64::try_from(index + 1).unwrap_or(i64::MAX);
+        let sql = if also_suggested {
+            r"
+            update tournament_entries
+            set
+                seed = ?1,
+                suggested_seed = ?1
+            where tournament_id = ?2
+              and user_id = ?3
+            "
+        } else {
+            r"
+            update tournament_entries
+            set seed = ?1
+            where tournament_id = ?2
+              and user_id = ?3
+            "
+        };
+        sqlx::query(sql)
+            .bind(seed)
+            .bind(tournament_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .inspect_err(log_db_error)?;
+    }
+
+    tx.commit().await.inspect_err(log_db_error)?;
     Ok(())
 }
 

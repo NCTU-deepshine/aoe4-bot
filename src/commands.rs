@@ -10,7 +10,7 @@ use crate::tournament::access::{
 };
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
-use crate::tournament::{audit, checkin, checkin_panel, panel, registration, teardown};
+use crate::tournament::{audit, checkin, checkin_panel, panel, registration, seed_panel, seeding, teardown};
 use crate::{Context, Data, Error};
 use regex::Regex;
 use serenity::all::{
@@ -193,6 +193,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "check_in",
         "close_checkin",
         "reopen_registration",
+        "seed",
         "delete"
     ),
     subcommand_required
@@ -681,12 +682,51 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
     let outcome = checkin::close(pool, &tournament).await?;
     audit::log_action("close-checkin", tournament.id, &tournament.slug, ctx.author(), &outcome);
 
-    if matches!(outcome, checkin::CloseCheckinOutcome::Closed { .. }) {
-        checkin_panel::close(ctx.http(), pool, &tournament).await?;
+    if !matches!(outcome, checkin::CloseCheckinOutcome::Closed { .. }) {
+        ctx.say(outcome.message(&tournament.name, locale)).await?;
+        return Ok(());
     }
 
-    ctx.say(outcome.message(&tournament.name, locale)).await?;
+    checkin_panel::close(ctx.http(), pool, &tournament).await?;
+    let seeded = seed_and_post_panel(ctx, &tournament, locale).await?;
+    ctx.say(format!("{}\n{seeded}", outcome.message(&tournament.name, locale)))
+        .await?;
     Ok(())
+}
+
+/// Fetches ratings, writes the suggested order and posts the seeding panel,
+/// returning the line to append to the caller's reply.
+///
+/// **Best-effort by design.** By the time this runs the tournament has already
+/// advanced to `seeding`, so an aoe4world outage must not fail the command and
+/// strand the lifecycle — it seeds from whatever ratings are stored, says so, and
+/// points at `/tournament seed refresh` (§6).
+async fn seed_and_post_panel(
+    ctx: Context<'_>,
+    tournament: &tournament_db::Tournament,
+    locale: Locale,
+) -> Result<String, Error> {
+    let pool = &ctx.data().database;
+    let outcome = seeding::refresh_ratings(pool, tournament).await?;
+    audit::log_action("seed", tournament.id, &tournament.slug, ctx.author(), &outcome);
+
+    // Always set by `create()`; the panel has nowhere to go without it.
+    let Some(bracket_channel_id) = tournament.bracket_channel_id else {
+        return Ok(String::new());
+    };
+    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+
+    // A tournament reopened and re-closed already has a panel; edit rather than
+    // stacking a second one in the channel.
+    if tournament.seed_message_id.is_some() {
+        seed_panel::refresh(ctx.http(), pool, tournament).await?;
+    } else {
+        let message_id =
+            seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await?;
+        tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap())).await?;
+    }
+
+    Ok(outcome.message(&tournament.name, locale))
 }
 
 // The one backward lifecycle edge (docs/tournament.md §8.3), for a check-in
@@ -720,8 +760,9 @@ pub async fn reopen_registration(ctx: Context<'_>) -> Result<(), Error> {
 
     if outcome.changed_state() {
         // `tournament` is the pre-reset snapshot, so it still carries the
-        // message id the row no longer does.
+        // message ids the row no longer does.
         delete_checkin_panel(ctx, &tournament).await;
+        delete_seed_panel(ctx, &tournament).await;
         panel::refresh_now(ctx.http(), pool, &tournament).await?;
     }
 
@@ -743,6 +784,201 @@ async fn delete_checkin_panel(ctx: Context<'_>, tournament: &tournament_db::Tour
     if let Err(err) = channel_id.delete_message(ctx.http(), message_id).await {
         error!(
             "failed to delete the check-in panel for tournament {}: {err:?}",
+            tournament.id
+        );
+    }
+}
+
+// Seeding (docs/tournament.md §6, §8.4). Only `seed` is authoritative;
+// `suggested_seed` stays as the tiering proposed it, so the panel can show what
+// an organizer overrode.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    subcommands("seed_list", "seed_set", "seed_refresh"),
+    subcommand_required
+)]
+pub async fn seed(_: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+/// Autocompletes over the tournament's own checked-in field, sorted by current
+/// seed and rendered like the panel — `3 · MarineLorD · ATR 2293`.
+async fn autocomplete_entrant(ctx: Context<'_>, partial: &str) -> impl Iterator<Item = AutocompleteChoice> {
+    // Resolves the tournament directly rather than via
+    // `resolve_tournament_by_channel`, which replies when there isn't one — an
+    // autocomplete must never send a message. No field, no suggestions.
+    let pool = &ctx.data().database;
+    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    let entries = match tournament_db::get_tournament_by_any_channel_id(pool, channel_id).await {
+        Ok(Some(tournament)) => tournament_db::list_entries_for_tournament(pool, tournament.id)
+            .await
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    let mut field = seeding::seedable(&entries);
+    field.sort_by_key(|e| (e.seed.unwrap_or(i64::MAX), e.user_id));
+
+    let needle = partial.to_lowercase();
+    field
+        .iter()
+        .filter(|e| e.display_name.to_lowercase().contains(&needle))
+        .map(|e| {
+            let seed = e.seed.map_or_else(|| "—".to_string(), |s| s.to_string());
+            let atr = e.atr.map_or_else(|| "—".to_string(), |a| format!("{a:.0}"));
+            let elo = e.elo.map_or_else(|| "—".to_string(), |e| e.to_string());
+            AutocompleteChoice::new(
+                format!("{seed} · {} · ATR {atr} · ELO {elo}", e.display_name),
+                e.user_id.to_string(),
+            )
+        })
+        // Discord accepts at most 25 choices.
+        .take(25)
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+/// Reposts the seeding panel, in case it was deleted or has scrolled away.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    rename = "list"
+)]
+pub async fn seed_list(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let Some(bracket_channel_id) = tournament.bracket_channel_id else {
+        return Ok(());
+    };
+    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+
+    // Always a fresh post rather than an edit: the point of `list` is to bring a
+    // buried or deleted panel back into view, which editing in place cannot do.
+    let message_id = seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await?;
+    tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap())).await?;
+
+    ephemeral(
+        ctx,
+        locale.pick(
+            format!("已在 <#{bracket_channel_id}> 重新張貼種子列表。"),
+            format!("Reposted the seeding panel in <#{bracket_channel_id}>."),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Moves an entrant to a seed. Everyone between shifts along to keep 1..n intact.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    rename = "set"
+)]
+pub async fn seed_set(
+    ctx: Context<'_>,
+    #[description = "The entrant to move — pick from the field"]
+    #[autocomplete = "autocomplete_entrant"]
+    entrant: String,
+    #[description = "Their new seed; everyone between shifts along"] seed: i64,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
+    let field = seeding::seedable(&entries);
+    // Typed rather than picked, or picked from a field that has since changed:
+    // either way the lookup below reports it as not in the field.
+    let target = entrant.parse::<i64>().unwrap_or(0);
+
+    let Some(entry) = field.iter().find(|e| e.user_id == target) else {
+        let outcome = seeding::SeedOutcome::NotInField;
+        audit::log_action("seed set", tournament.id, &tournament.slug, ctx.author(), &outcome);
+        ephemeral(ctx, outcome.message(locale)).await?;
+        return Ok(());
+    };
+    let field_size = i64::try_from(field.len()).unwrap_or(i64::MAX);
+    if seed < 1 || seed > field_size {
+        let outcome = seeding::SeedOutcome::OutOfRange { field_size };
+        audit::log_action("seed set", tournament.id, &tournament.slug, ctx.author(), &outcome);
+        ephemeral(ctx, outcome.message(locale)).await?;
+        return Ok(());
+    }
+
+    let from = entry.seed.unwrap_or(field_size);
+    let display_name = entry.display_name.clone();
+    // Current order by seed, so the shift is relative to what the panel shows.
+    let mut ordered: Vec<&tournament_db::TournamentEntry> = field.clone();
+    ordered.sort_by_key(|e| (e.seed.unwrap_or(i64::MAX), e.user_id));
+    let current: Vec<i64> = ordered.iter().map(|e| e.user_id).collect();
+
+    // `also_suggested: false` — an override must not overwrite what the tiering
+    // proposed, or the panel loses the comparison.
+    tournament_db::set_seed_order(pool, tournament.id, &seeding::reorder(&current, target, seed), false).await?;
+
+    let outcome = seeding::SeedOutcome::Moved {
+        display_name,
+        from,
+        to: seed,
+    };
+    audit::log_action("seed set", tournament.id, &tournament.slug, ctx.author(), &outcome);
+
+    let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
+    seed_panel::refresh(ctx.http(), pool, &tournament).await?;
+    ctx.say(outcome.message(locale)).await?;
+    Ok(())
+}
+
+/// Re-fetches ATR and ELO for the field and recomputes the suggested seeding.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    rename = "refresh"
+)]
+pub async fn seed_refresh(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+
+    // Discards any override — that is the point of asking for a refresh, and
+    // `seed set` is how you put one back.
+    let message = seed_and_post_panel(ctx, &tournament, locale).await?;
+    ctx.say(message).await?;
+    Ok(())
+}
+
+/// Best-effort, for the same reason `delete_checkin_panel` is: reopening has
+/// already cleared the seeds this panel displayed, so a message someone removed
+/// by hand must not turn a successful reopen into a failure.
+async fn delete_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournament) {
+    let (Some(seed_message_id), Some(bracket_channel_id)) = (tournament.seed_message_id, tournament.bracket_channel_id)
+    else {
+        return;
+    };
+
+    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+    let message_id = MessageId::new(u64::try_from(seed_message_id).unwrap());
+    if let Err(err) = channel_id.delete_message(ctx.http(), message_id).await {
+        error!(
+            "failed to delete the seeding panel for tournament {}: {err:?}",
             tournament.id
         );
     }

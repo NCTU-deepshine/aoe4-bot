@@ -640,8 +640,14 @@ its CSV export has a two-row header with spreadsheet scratch columns. aoe4world 
 by `profile_id`, which is already our `aoe4_id`, with identical values (MarineLorD `2292.531382` in both). The
 sheet is maintained by Andrey "ISanych" (`@isanych_aoe`); credit the source wherever ATR is displayed.
 
-The `profile_ids` filter means ATR for an entire field is **one request**, regardless of size — which is why
-there is no ratings cache (§4): fetch at seeding, snapshot onto the entry, done. A full leaderboard sync is
+The `profile_ids` filter means ATR for an entire field is **one request per 50 entrants** — which is why there
+is no ratings cache (§4): fetch at seeding, snapshot onto the entry, done. A page caps at 50 and the endpoint
+ignores a smaller `per_page`, so a larger field is batched rather than fetched whole (verified against the live
+endpoint, which also confirmed MarineLorD's figure above).
+
+**Two fields in the response are nullable and both matter.** `profile_id` is null for leaderboard entries
+aoe4world has not matched to a profile — unavoidable, since the sheet it mirrors is name-keyed — and `rating`
+can be absent. Neither may fail the batch: those rows are dropped and the entrant simply has no ATR. A full leaderboard sync is
 possible (`?page=N`, `per_page: 50`, `total_count: 347`) but nothing here needs one.
 
 Most guild entrants will have no ATR at all; the leaderboard is 347 professional players. That is expected, not
@@ -859,6 +865,10 @@ any ──/tournament cancel──▶ canceled
 **Check-in gates the bracket**: the field is whoever checked in, not whoever registered, so no-shows never
 occupy a slot.
 
+**Seeding at close-checkin is best-effort.** Ratings come from aoe4world (§6), so the fetch can fail after the
+status has already moved to `seeding`. It never fails the command: the field is seeded from whatever ratings are
+stored, the reply says so, and `/tournament seed refresh` retries.
+
 **One backward edge, and it is a full reset.** `reopen-registration` exists for admin mistakes — check-in opened
 too early, or closed before a late entrant arrived. It rewinds the whole check-in round rather than partially
 undoing it: no-shows go back to `active`, every `checked_in_at` is cleared, and the check-in panel message is
@@ -885,7 +895,7 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament checkin` | anyone | Self check-in · also a button |
 | `/tournament close-checkin` | admin | Marks no-shows, runs suggested seeding |
 | `/tournament reopen-registration` | admin | Reverts to `registration`; clears check-ins and no-shows |
-| `/tournament seed list\|set` | admin | Review and override seeds |
+| `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
 | `/tournament start` | admin | Generates the bracket, opens round 1 |
 | `/tournament bracket [round]` | anyone | Reposts/refreshes the bracket |
 | `/tournament cancel` | admin | Cancels the event |
@@ -908,9 +918,10 @@ Follow the `subcommands(...) + subcommand_required` pattern from `bind` (`src/co
 the single `commands: vec![…]` at `src/main.rs`. Note that list's quirk — `bind`'s subcommands `id` and
 `name` are *also* pushed as top-level commands (`src/main.rs`) — and don't replicate it here.
 
-### 8.5 Player panels
+### 8.5 Panels
 
-Both panels are persistent messages in `#…-register`, edited in place.
+The two **player** panels are persistent messages in `#…-register`, edited in place. The **seeding** panel
+(below) is a third, in `#…-bracket` — output rather than input, so it lives with the bracket it precedes.
 
 **Why buttons rather than emoji reactions.** The repo only ever *adds* reactions (`message.react`,
 `src/emperor.rs`); there is no `reaction_add` handler, so emoji input needs new event handling either way.
@@ -991,6 +1002,24 @@ Same feedback rules: newly checked in, already checked in, not registered, check
   buttons visibly stop working instead of failing on press.
 - Panel message ids live in the DB, so a **boot-time reconciliation** should confirm each still exists and
   recreate it if an organizer deleted it.
+
+#### Seeding panel
+
+A persistent message in `#…-bracket`, posted when `/tournament close-checkin` computes the first seeding and
+edited in place on every `/tournament seed set|refresh`. It lists the checked-in field in `seed` order with
+**ATR and ELO in separate columns** — never one blended number (§6) — and carries two things §6 requires in the
+output rather than only in this document: that the two are different scales and the order is a default, not a
+claim they are comparable; and credit to the ATR source.
+
+**No buttons.** Unlike the other two, nothing here is for a player to press — seeding is admin work done by
+command — so the panel is display-only.
+
+A live panel is what makes `seed set`'s shift-down semantics safe. Moving an entrant to seed 3 pushes 3..n down
+one, which would otherwise silently invalidate a table the organizer had just read; because the panel re-renders
+on the same command, the renumbering is visible immediately.
+
+It is truncated past two dozen entrants to stay inside Discord's message limit — a larger field is shown in full
+by the bracket itself (§8.6). Bilingual, like the other panels and for the same reason (§8.10).
 
 ### 8.6 Bracket publication
 
@@ -1282,8 +1311,11 @@ than panicking (buttons from an older deploy will be pressed).
   `running` tournament, and an entry keeps its snapshotted `aoe4_id` across a permitted rebind;
 - **`accounts` is untouched** by every tournament code path — a user bound there is not implicitly a tournament
   player, and vice versa;
-- seeding tiers correctly when only some entrants have an `atr`, and an organizer's `seed` override survives
-  bracket generation;
+- seeding tiers correctly when only some entrants have an `atr` — an ATR-rated entrant outranks an ELO-only one
+  whatever the raw numbers say — ties break on `display_name`, and no-shows never take a seat;
+- an organizer's `seed` override leaves `suggested_seed` untouched, and re-ordering an already-seeded field does
+  not trip `unique (tournament_id, seed)`;
+- the esports leaderboard's nullable `profile_id`/`rating` rows are dropped rather than failing the batch;
 - draft import maps slots correctly (slot 1 is the higher seed);
 - re-import overwrites `draft_import` rows and preserves `manual` ones;
 - **completion is derived, not read**: a payload with `status = "running"` and a Bo3 score of 2–0 completes the
