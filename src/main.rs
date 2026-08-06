@@ -18,6 +18,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 mod aoe4world;
 mod commands;
 mod db;
+mod drafttool;
 mod emperor;
 mod errors;
 mod guilds;

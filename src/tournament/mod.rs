@@ -37,6 +37,9 @@ pub(crate) mod render;
 pub(crate) mod registration;
 // `/tournament create`'s slug argument (§8.1).
 pub(crate) mod slug;
+// What must be configured before a tournament can start (chunk 27, §8.3), and
+// which draft preset — and so which best_of — each round uses (§3.3).
+pub(crate) mod setup;
 // Ratings and suggested seeding (chunk 11, §6): the pure tiering plus the one
 // aoe4world path that snapshots ATR and ELO onto each entry.
 pub(crate) mod seeding;

@@ -10,8 +10,11 @@ use crate::tournament::access::{
 };
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
-use crate::tournament::{audit, checkin, checkin_panel, panel, registration, seed_panel, seeding, teardown};
+use crate::tournament::{
+    audit, checkin, checkin_panel, panel, registration, seed_panel, seeding, setup as tournament_setup, teardown,
+};
 use crate::{Context, Data, Error};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use regex::Regex;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, MessageId, PermissionOverwrite,
@@ -240,6 +243,8 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "check_in",
         "close_checkin",
         "reopen_registration",
+        "setup",
+        "preset",
         "seed",
         "delete"
     ),
@@ -377,7 +382,12 @@ pub async fn create(
     // Tournaments start in `registration` status immediately, with no separate
     // "open registration" command (docs/tournament.md §8.3) — so this is the only
     // place the panel can ever get posted.
-    let register_message_id = panel::post_initial(ctx.http(), register.id, tournament_id, &name).await?;
+    // The cap is `not null default 32`, so the panel can show it from the start
+    // even though `/tournament setup` has not run yet.
+    let cap = tournament_db::get_tournament(pool, tournament_id)
+        .await?
+        .map_or(32, |t| t.entrant_cap);
+    let register_message_id = panel::post_initial(ctx.http(), register.id, tournament_id, &name, cap).await?;
     tournament_db::set_register_message_id(pool, tournament_id, i64::try_from(register_message_id.get()).unwrap())
         .await?;
 
@@ -884,6 +894,239 @@ async fn delete_checkin_panel(ctx: Context<'_>, tournament: &tournament_db::Tour
     }
 }
 
+/// Which rounds a preset assignment covers, as a distance back from the final
+/// (docs/tournament.md §3.3). An assignment covers its own round and every round
+/// after it, so `Ro8` means Ro8, the semi and the final.
+///
+/// Offered as a choice rather than a number because rounds do not exist until
+/// start — there is nothing to autocomplete against — and nobody should have to
+/// know that "the final" is depth 1.
+#[derive(Debug, poise::ChoiceParameter)]
+pub enum FromRound {
+    #[name = "All rounds (default)"]
+    #[name_localized("zh-TW", "所有輪次（預設）")]
+    All,
+    #[name = "Ro32 onwards"]
+    #[name_localized("zh-TW", "32強之後")]
+    Ro32,
+    #[name = "Ro16 onwards"]
+    #[name_localized("zh-TW", "16強之後")]
+    Ro16,
+    #[name = "Quarterfinal onwards"]
+    #[name_localized("zh-TW", "八強之後")]
+    Quarterfinal,
+    #[name = "Semifinal onwards"]
+    #[name_localized("zh-TW", "四強之後")]
+    Semifinal,
+    #[name = "Final only"]
+    #[name_localized("zh-TW", "只有決賽")]
+    Final,
+}
+
+impl FromRound {
+    fn depth(&self) -> i64 {
+        match self {
+            FromRound::All => tournament_setup::DEFAULT_DEPTH,
+            FromRound::Ro32 => 5,
+            FromRound::Ro16 => 4,
+            FromRound::Quarterfinal => 3,
+            FromRound::Semifinal => 2,
+            FromRound::Final => 1,
+        }
+    }
+}
+
+/// Taiwan is UTC+8 year round with no daylight saving, so a fixed offset is exact
+/// and saves a `chrono-tz` dependency. Organizers type a local wall time; it is
+/// stored UTC and rendered back as a Discord timestamp, which every reader sees
+/// in their own zone.
+const LOCAL_OFFSET_HOURS: i32 = 8;
+
+/// Pure, so the parsing rules are testable without a Discord context.
+fn parse_start_time(input: &str) -> Option<DateTime<Utc>> {
+    let naive = NaiveDateTime::parse_from_str(input.trim(), "%Y-%m-%d %H:%M").ok()?;
+    let offset = FixedOffset::east_opt(LOCAL_OFFSET_HOURS * 3600)?;
+    Some(naive.and_local_timezone(offset).single()?.to_utc())
+}
+
+// Configuration a tournament needs before `/tournament start` will run
+// (docs/tournament.md §8.3). Always reports the full state, so it doubles as
+// "what am I still missing?".
+/// Configures the tournament. Run with no options to see what's still needed.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    description_localized("zh-TW", "設定賽事。不帶參數執行可以查看還缺什麼。")
+)]
+pub async fn setup(
+    ctx: Context<'_>,
+    #[description = "Maximum entrants; registration refuses sign-ups past this"]
+    #[description_localized("zh-TW", "參賽人數上限；超過後就無法報名")]
+    cap: Option<i64>,
+    #[description = "When it starts, as YYYY-MM-DD HH:MM in UTC+8"]
+    #[description_localized("zh-TW", "開賽時間，格式 YYYY-MM-DD HH:MM（UTC+8）")]
+    start_time: Option<String>,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+    let pool = &ctx.data().database;
+
+    if let Some(cap) = cap {
+        if cap < 2 {
+            ephemeral(
+                ctx,
+                locale.pick("人數上限至少要 2 人。", "The cap has to be at least 2."),
+            )
+            .await?;
+            return Ok(());
+        }
+        tournament_db::set_entrant_cap(pool, tournament.id, cap).await?;
+    }
+
+    if let Some(start_time) = &start_time {
+        let Some(parsed) = parse_start_time(start_time) else {
+            ephemeral(
+                ctx,
+                locale.pick(
+                    "看不懂這個時間 — 請用 `YYYY-MM-DD HH:MM`，例如 `2026-08-20 19:30`。",
+                    "Couldn't read that time — use `YYYY-MM-DD HH:MM`, e.g. `2026-08-20 19:30`.",
+                ),
+            )
+            .await?;
+            return Ok(());
+        };
+        tournament_db::set_scheduled_start_at(pool, tournament.id, parsed).await?;
+    }
+
+    // Re-read so the summary reflects what was just written.
+    let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
+    let presets = tournament_db::list_round_presets(pool, tournament.id).await?;
+    audit::log_action(
+        "setup",
+        tournament.id,
+        &tournament.slug,
+        ctx.author(),
+        &(cap, start_time),
+    );
+
+    ctx.say(setup_summary(&tournament, &presets, locale)).await?;
+    Ok(())
+}
+
+/// The whole configuration in one reply, plus what start is still waiting on.
+fn setup_summary(
+    tournament: &tournament_db::Tournament,
+    presets: &[tournament_db::RoundPreset],
+    locale: Locale,
+) -> String {
+    let start = tournament.scheduled_start_at.map_or_else(
+        || locale.pick("未設定", "not set").to_string(),
+        |at| format!("<t:{}:F>", at.timestamp()),
+    );
+    let preset_lines = if presets.is_empty() {
+        locale.pick("未設定", "not set").to_string()
+    } else {
+        presets
+            .iter()
+            .map(|p| {
+                let scope = if p.from_depth == tournament_setup::DEFAULT_DEPTH {
+                    locale.pick("所有輪次", "all rounds").to_string()
+                } else {
+                    locale.pick(
+                        format!("距決賽 {} 輪之後", p.from_depth),
+                        format!("{} round(s) out from the final, onwards", p.from_depth),
+                    )
+                };
+                format!("· {scope}: `{}` (Bo{})", p.draft_preset_id, p.best_of)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let missing = tournament_setup::missing(tournament, presets);
+    let still_needed = if missing.is_empty() {
+        locale
+            .pick(
+                "\n\n**設定完成，可以開賽。**",
+                "\n\n**Setup complete — ready to start.**",
+            )
+            .to_string()
+    } else {
+        format!(
+            "\n\n{} {}",
+            locale.pick("**還需要：**", "**Still needed:**"),
+            missing
+                .iter()
+                .map(|m| m.label_for(locale))
+                .collect::<Vec<_>>()
+                .join(locale.pick("、", ", "))
+        )
+    };
+
+    format!(
+        "**{} — {}**\n{}: {} / {}\n{}: {start}\n{}:\n{preset_lines}{still_needed}",
+        tournament.name,
+        locale.pick("賽事設定", "setup"),
+        locale.pick("人數上限", "Entrant cap"),
+        tournament.entrant_cap,
+        locale.pick("已報名", "registered"),
+        locale.pick("開賽時間", "Start time"),
+        locale.pick("抽選預設", "Draft presets"),
+    )
+}
+
+/// Sets the draft preset for a round onwards. Also decides that round's match length.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    description_localized("zh-TW", "指定某一輪之後所使用的抽選預設，同時決定該輪的戰制。")
+)]
+pub async fn preset(
+    ctx: Context<'_>,
+    #[description = "The draft tool's preset id; it has to be public"]
+    #[description_localized("zh-TW", "抽選工具的預設 id，必須是公開的")]
+    preset_id: String,
+    #[description = "Which rounds it covers; defaults to all of them"]
+    #[description_localized("zh-TW", "適用於哪些輪次，預設是全部")]
+    from_round: Option<FromRound>,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+
+    let preset_id = preset_id.trim().to_string();
+    let check = tournament_setup::check_preset(&preset_id).await;
+    audit::log_action("preset", tournament.id, &tournament.slug, ctx.author(), &check);
+
+    let Some(best_of) = check.best_of() else {
+        ephemeral(ctx, check.message(locale)).await?;
+        return Ok(());
+    };
+
+    let depth = from_round.unwrap_or(FromRound::All).depth();
+    let pool = &ctx.data().database;
+    tournament_db::upsert_round_preset(pool, tournament.id, depth, &preset_id, best_of).await?;
+
+    let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
+    let presets = tournament_db::list_round_presets(pool, tournament.id).await?;
+    ctx.say(format!(
+        "{}\n\n{}",
+        check.message(locale),
+        setup_summary(&tournament, &presets, locale)
+    ))
+    .await?;
+    Ok(())
+}
+
 // Seeding (docs/tournament.md §6, §8.4). Only `seed` is authoritative;
 // `suggested_seed` stays as the tiering proposed it, so the panel can show what
 // an organizer overrode.
@@ -1169,7 +1412,43 @@ async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db
 
 #[cfg(test)]
 mod tests {
+    use super::parse_start_time;
+    use chrono::{Datelike, Timelike};
     use regex::Regex;
+
+    #[test]
+    fn a_local_wall_time_is_stored_as_the_right_utc_instant() {
+        // 19:30 in UTC+8 is 11:30 UTC the same day. Taiwan has no DST, so this
+        // holds year-round and needs no timezone database.
+        let parsed = parse_start_time("2026-08-20 19:30").expect("should parse");
+        assert_eq!((parsed.year(), parsed.month(), parsed.day()), (2026, 8, 20));
+        assert_eq!((parsed.hour(), parsed.minute()), (11, 30));
+    }
+
+    #[test]
+    fn a_wall_time_before_the_offset_rolls_back_a_day_in_utc() {
+        let parsed = parse_start_time("2026-08-20 07:00").expect("should parse");
+        assert_eq!((parsed.day(), parsed.hour()), (19, 23));
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_tolerated() {
+        assert!(parse_start_time("  2026-08-20 19:30 ").is_some());
+    }
+
+    #[test]
+    fn malformed_times_are_rejected_rather_than_guessed() {
+        for input in [
+            "",
+            "tomorrow",
+            "2026-08-20",
+            "20/08/2026 19:30",
+            "2026-13-01 19:30",
+            "2026-08-20 25:00",
+        ] {
+            assert!(parse_start_time(input).is_none(), "{input:?} should not parse");
+        }
+    }
 
     #[test]
     fn test_regex() {

@@ -1273,6 +1273,134 @@ mod tests {
         assert!(entries.iter().all(|e| e.seed.is_none() && e.suggested_seed.is_none()));
     }
 
+    // Entrant cap gate tests (chunk 27).
+
+    async fn register_nth(
+        pool: &SqlitePool,
+        tournament: &crate::tournament::db::Tournament,
+        user_id: i64,
+    ) -> crate::tournament::registration::RegisterOutcome {
+        crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+            .await
+            .unwrap();
+        crate::tournament::registration::register(pool, tournament, user_id, None)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_cap_defaults_to_32_without_any_setup() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        assert_eq!(tournament.entrant_cap, 32);
+    }
+
+    #[tokio::test]
+    async fn registration_is_refused_once_the_field_is_full() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::set_entrant_cap(&pool, tournament.id, 2)
+            .await
+            .unwrap();
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            register_nth(&pool, &tournament, 1).await,
+            crate::tournament::registration::RegisterOutcome::Registered { .. }
+        ));
+        assert!(matches!(
+            register_nth(&pool, &tournament, 2).await,
+            crate::tournament::registration::RegisterOutcome::Registered { .. }
+        ));
+        assert_eq!(
+            register_nth(&pool, &tournament, 3).await,
+            crate::tournament::registration::RegisterOutcome::FieldFull { cap: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_withdrawal_frees_exactly_one_slot() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::set_entrant_cap(&pool, tournament.id, 2)
+            .await
+            .unwrap();
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        register_nth(&pool, &tournament, 1).await;
+        register_nth(&pool, &tournament, 2).await;
+
+        crate::tournament::registration::withdraw(&pool, &tournament, 1)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            register_nth(&pool, &tournament, 3).await,
+            crate::tournament::registration::RegisterOutcome::Registered { .. }
+        ));
+        // And the field is full again.
+        assert_eq!(
+            register_nth(&pool, &tournament, 4).await,
+            crate::tournament::registration::RegisterOutcome::FieldFull { cap: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn rejoining_after_a_withdrawal_is_capped_too() {
+        // Otherwise withdraw-then-rejoin walks straight past the cap: the slot
+        // freed by the withdrawal has already been taken by someone else.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::set_entrant_cap(&pool, tournament.id, 2)
+            .await
+            .unwrap();
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        register_nth(&pool, &tournament, 1).await;
+        register_nth(&pool, &tournament, 2).await;
+        crate::tournament::registration::withdraw(&pool, &tournament, 1)
+            .await
+            .unwrap();
+        register_nth(&pool, &tournament, 3).await;
+
+        assert_eq!(
+            register_nth(&pool, &tournament, 1).await,
+            crate::tournament::registration::RegisterOutcome::FieldFull { cap: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn round_presets_upsert_by_depth() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "seeding").await;
+
+        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 0, "A", 3)
+            .await
+            .unwrap();
+        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 1, "C", 7)
+            .await
+            .unwrap();
+        // Re-assigning the same depth replaces rather than duplicating.
+        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 1, "C2", 5)
+            .await
+            .unwrap();
+
+        let presets = crate::tournament::db::list_round_presets(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[0].from_depth, 0);
+        assert_eq!(presets[1].draft_preset_id, "C2");
+        assert_eq!(presets[1].best_of, 5);
+    }
+
     // Self-unbind gate tests.
 
     #[tokio::test]

@@ -83,6 +83,8 @@ mod tests {
             checkin_message_id: None,
             seed_message_id: None,
             checkin_closes_at: None,
+            entrant_cap: 32,
+            scheduled_start_at: None,
             created_by: 1,
             created_at: Utc::now(),
             started_at: None,

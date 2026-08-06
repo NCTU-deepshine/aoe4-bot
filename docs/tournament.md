@@ -85,8 +85,8 @@ Consequences, each of which removes a table or column someone would otherwise re
 - No event-level map pool — the draft preset defines the pool per draft.
 - No `map_bans_per_player`, no `allow_civ_repeat` — preset settings.
 - No draft-action table — steps are fetched on demand, never mirrored.
-- No map-order validation — `MAP_SELECT` is the tool's business. The one thing we check is the *preset*, once,
-  when a round is configured (§3.3): no `MAP_PICK` steps, so the loser picks from the whole pool.
+- No map validation of any kind — order, content and pools are the tool's business, per the table above. What
+  we check about a preset (§3.3) is only what the **bot** depends on, never how people should draft.
 - No attempt to derive who is in which seat. The tool knows only its own user ids, and exposes only *whether*
   both seats are filled — so the bot instructs players where to sit (§8.7) instead of reconciling afterwards,
   and a mistake is fixed by redrafting rather than by a mapping table.
@@ -97,9 +97,9 @@ when a set is decided. What the bot owns is **which ruleset a round uses** — o
 the checks in §3.3. So "the loser picks from the whole pool" is our rule and the tool's mechanism: asserted once
 by refusing a preset that cannot express it, and never again per pick.
 
-Worth naming because an earlier draft of this document called that rule "enforced by the tool", which is the
-category error to avoid. The tool enforces whatever the preset says; the preset is ours to choose. The same holds
-for `resultMode: "vote"` and for match length, which is why both are preset checks rather than columns.
+The distinction is worth holding onto: this rule is not "enforced by the tool". The tool enforces whatever the
+preset says; the preset is ours to choose. The same holds for `resultMode: "vote"` and for match length, which
+is why both are preset checks rather than columns.
 
 `tournament_games` is the one place the bot keeps a copy of the tool's output. It is a **projection**, not a
 second source of truth: populated by import, refreshable, and used so standings and civ/map statistics are
@@ -113,8 +113,8 @@ identified by a 24-hex id and exposed at two URLs: `/match/<id>` (the room, wher
 
 ### 3.1 Verified against source
 
-An earlier draft of this section was written by reading the client bundles and probing the live service; several
-of its conclusions were wrong, and are corrected here against the source.
+Everything below is read from the tool's source, cloned at `~/workspace/aoe4_banpick` — not inferred from the
+client bundles or probed off the live service. Fetch it before relying on any of it.
 
 **Step types** — the enum at `lib/draft/schema.ts`, verbatim:
 
@@ -144,7 +144,7 @@ a real one looks like: map bans, each player picking maps into their **own** poo
 drafted "hand" of `bestOf + 1` civs, then per game a map selection, a simultaneous hidden offer of 2, a
 simultaneous counter-snipe of 1, and a result.
 
-Two rules the earlier draft got wrong:
+Two rules that are easy to state backwards:
 
 - **Snipe.** `CIV_SNIPE_OPPONENT` removes civs from the opponent's *hidden offer for that one game*; the civ each
   player fields is what survives their own offer (`lib/draft/engine.ts`). It does not remove a civ the opponent
@@ -255,13 +255,13 @@ useful later.
   `/api/matches/<id>`.
 - **`updatedAt` and `ETag`** make polling cheap rather than wasteful.
 
-**Deliberately not asked for.** Each of these was in an earlier draft; each was cut because nothing consumes it:
+**Deliberately not asked for.** Nothing consumes any of these:
 
 - **`steps[]`, the full action log** — §2 already commits to never mirroring draft actions, and rendering a
-  draft's audit trail is not in scope (§1). This was the largest part of the payload and the least used.
-- **Per-game offer and snipe lists** — only meaningful for that audit trail. (For the record, the duel is a set
-  of hidden offers countered by a set of snipes, resolved to a survivor. An earlier draft asked for a
-  `targetsOrdinal` pointer from a snipe to a pick, which misdescribes the mechanic; do not reintroduce it.)
+  draft's audit trail is not in scope (§1). It is also the largest part of the payload.
+- **Per-game offer and snipe lists** — only meaningful for that audit trail. The duel is a set of hidden offers
+  countered by a set of snipes, resolved to a survivor; there is no pointer from a snipe to a particular pick,
+  and adding one would misdescribe the mechanic.
 - **`preset` metadata** (`name`, `bestOf`, `target`, `resultMode`, `anonymous`) — the bot picked that preset and
   validated it when the round was configured (§3.3), so it already knows all of it. A disagreement belongs at
   configuration time, not on every poll.
@@ -339,15 +339,21 @@ presets: the cap constrains organizers — a Bo3 bracket with a Bo5 final needs 
 (`lib/draft/validate.ts`) is a hard block at creation and returns `400` with an `issues` list. Discovering that a
 preset cannot produce a Bo5 at the moment two players are waiting is the wrong time.
 
-Two of our own rules are properties of the preset rather than of the bot, and both are checkable from the preset's
-config, which is readable unauthenticated (§3.1):
+**What we validate, and the line it sits on.** Only properties the bot itself depends on — a preset that
+breaks one of these breaks *us*, not somebody's idea of a good draft (§2). All are checkable from the preset's
+config, which is readable unauthenticated (§3.1). Both fields live under **`config.options`**, not at the top
+level (`PresetOptionsSchema`, `lib/draft/schema.ts`). `resultMode` defaults to `"vote"`, so a preset authored
+without one already passes.
 
 - **`resultMode` must be `"vote"`**, or every game waits on the bot to call it.
-- **`options.bestOf` must be odd, and must match the round's `best_of`.** Odd keeps "more than half" unambiguous
-  (§7); matching keeps the tool and the bracket from disagreeing about how long a set is.
-- **No `MAP_PICK` steps**, which is what makes the loser's pick range over the whole pool. With map picks present
-  the tool restricts each player to the maps *they* picked, and no `mapScope` value widens that back out — the
-  full pool is reached only by the empty-pool fallback. Map bans are unaffected and still work.
+- **`options.bestOf` must be odd.** It keeps "more than half" unambiguous (§7). The round's `best_of` is taken
+  from this value rather than compared against it, so the tool and the bracket cannot disagree about how long a
+  set is.
+- **The preset must be readable and public**, or `POST /api/matches` cannot use it.
+
+**Map steps are not validated.** How the loser's map selection is scoped — `mapScope: "own"` for their own
+picks, `"shared"` for both players' — is a format choice belonging to whoever authors the preset, and §2 gives
+step order and map pools to the tool.
 
 None of these is enforced at draft time: §2 leaves map and civ legality to the tool. These are checks on the preset an
 organizer chose, made once, so a mis-built preset is caught before a set opens rather than after.
@@ -420,7 +426,10 @@ create table if not exists tournaments (
   name text not null,
   status text not null default 'registration'
     check (status in ('registration','checkin','seeding','running','completed','canceled')),
-  draft_base_url text,
+  draft_base_url text,                      -- per-tournament override; normally null, the
+                                            -- instance comes from env (§3, chunk 14)
+  entrant_cap integer not null default 32,  -- registration refuses a sign-up past this (§8.3)
+  scheduled_start_at timestamp,             -- when the event is meant to begin; stored utc
   -- discord wiring; see §8.1. announce_channel_id is the channel /tournament create ran in.
   announce_channel_id bigint,
   category_id bigint,
@@ -479,6 +488,24 @@ create table if not exists tournament_players (
   display_name text not null,               -- player-editable; seeded from aoe4world at first sign-up
   bound_at timestamp not null default (datetime('now')),
   updated_at timestamp
+);
+
+-- 4b. which draft preset a round uses, and therefore how long its sets are (§3.3).
+--     keyed by depth counted back from the final: 1 = final, 2 = semi, 3 = ro8,
+--     and 0 = the default covering every round. depth rather than a round id
+--     because rounds do not exist until start and how many there are depends on
+--     the field size — and §5 already names rounds from the end for the same
+--     reason. an assignment covers its depth and everything after it, so the
+--     resolved preset is the one with the smallest threshold >= the round's
+--     depth, falling back to 0. best_of is snapshotted at assignment so a preset
+--     edited on the tool later cannot change a bracket already built from it.
+create table if not exists tournament_round_presets (
+  tournament_id integer not null references tournaments(id) on delete cascade,
+  from_depth integer not null check (from_depth >= 0),
+  draft_preset_id text not null,
+  best_of integer not null check (best_of % 2 = 1),
+  assigned_at timestamp not null default (datetime('now')),
+  primary key (tournament_id, from_depth)
 );
 
 -- 5. entrants. keyed by discord user: everything the bot does with an entrant is a
@@ -586,11 +613,9 @@ create table if not exists tournament_games (
   happen — the panel's seat instruction (§8.7) is trusted rather than defended against — and `/set redraft` is
   the only remedy if it ever does. A correction bit (flip the mapping without redrafting) is one column to add
   later if this assumption stops holding.
-- **There is no ratings cache table.** An earlier draft had one mirroring the esports leaderboard — name, rank,
-  active rank, active flag, country, Liquipedia name — of which the design only ever read `rating`. It is gone
-  entirely, not just trimmed: ATR for a whole field is **one request** (§6), the durable record is the `atr`
-  snapshot on `tournament_entries`, and a cache would buy a table, a sync command and staleness reasoning for no
-  benefit at this scale. If rate limits ever bite, it comes back as three columns — `aoe4_id`, `rating`,
+- **There is no ratings cache table.** ATR for a whole field is **one request** (§6), the durable record is the
+  `atr` snapshot on `tournament_entries`, and a cache would buy a table, a sync command and staleness reasoning
+  for no benefit at this scale. If rate limits ever bite, it comes back as three columns — `aoe4_id`, `rating`,
   `fetched_at` — and nothing else.
 - **There is no `draft_url` column.** The tool exposes one fixed base URL with a documented path scheme (§3):
   the room is `<draft_base_url>/match/<draft_external_id>`. Storing a second column that must be kept in step
@@ -645,8 +670,7 @@ sheet is maintained by Andrey "ISanych" (`@isanych_aoe`); credit the source wher
 
 The `profile_ids` filter means ATR for an entire field is **one request per 50 entrants** — which is why there
 is no ratings cache (§4): fetch at seeding, snapshot onto the entry, done. A page caps at 50 and the endpoint
-ignores a smaller `per_page`, so a larger field is batched rather than fetched whole (verified against the live
-endpoint, which also confirmed MarineLorD's figure above).
+ignores a smaller `per_page`, so a larger field is batched rather than fetched whole.
 
 **Two fields in the response are nullable and both matter.** `profile_id` is null for leaderboard entries
 aoe4world has not matched to a profile — unavoidable, since the sheet it mirrors is name-keyed — and `rating`
@@ -854,7 +878,8 @@ checkin ──/tournament close-checkin──▶ seeding
     │  entries without checked_in_at → status 'no_show'
     │  suggested seeding runs over checked-in entrants only
 seeding ──/tournament start──▶ running
-    │  requires seeds 1..n contiguous; generates the bracket;
+    │  requires setup complete (a draft preset and a start time) and
+    │  seeds 1..n contiguous; generates the bracket;
     │  creates round-1 threads; posts the bracket
 running ──(final set completes)──▶ completed
 checkin | seeding ──/tournament reopen-registration──▶ registration
@@ -899,6 +924,8 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament checkin` | anyone | Self check-in · also a button |
 | `/tournament close-checkin` | admin | Marks no-shows, runs suggested seeding |
 | `/tournament reopen-registration` | admin | Reverts to `registration`; clears check-ins and no-shows |
+| `/tournament setup [cap] [start_time]` | admin | Configure the event; with no options, reports what's missing |
+| `/tournament preset preset_id [from_round]` | admin | Set a round's draft preset, and so its `best_of` |
 | `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
 | `/tournament start` | admin | Generates the bracket, opens round 1 |
 | `/tournament bracket [round]` | anyone | Reposts/refreshes the bracket |
@@ -1042,8 +1069,8 @@ Anotand      2 ─┘
 **Every column holds the participants of the match to its right, each with the games they won in it.** So a
 score sits beside the player who earned it, in the round it was played — `MarineLorD 2` against `Beasty 1` is
 that semi-final, read off two adjacent rows. The rightmost column is the winner of the final, who has no next
-match and so no score. An earlier form put a combined `2-1` on the connector instead, which reads worse and
-needed the score reordered to the winner's side to avoid `Anotand 0-2` appearing beside the player who won.
+match and so no score. Scores belong beside their player, never combined onto the connector — a combined
+`2-1` reads worse and forces the score to be reordered to the winner's side.
 
 **A match that has not started leaves the score blank** rather than showing `0`, so "not begun" stays
 distinguishable from "0-2 down".
@@ -1063,8 +1090,7 @@ Four constraints, all easy to miss and all visible in production if missed:
    misaligns. Column math must use East Asian display width — add `unicode-width` (tiny, no transitive deps)
    rather than counting chars.
 4. **The 2000-char message limit.** Measured at a 12-column name width, every match decided: 4 players 294
-   chars, 8 → 855, **16 → 2308**, 32 → 5897. So the split starts at 16, not 32 — an earlier estimate here put 16
-   at ≈1700 and inside the limit, which the implementation disproved. Most of the bulk is structural: in a
+   chars, 8 → 855, **16 → 2308**, 32 → 5897. So the split starts at 16, not 32. Most of the bulk is structural: in a
    16-player bracket 14 of the 31 rows exist only to carry a `│` in a far column, so no amount of narrowing
    rescues it. Render as top half / bottom half plus a final message for the closing rounds and champion,
    recursing while a part still does not fit, and store each message id in `tournament_bracket_messages` so all
@@ -1257,8 +1283,8 @@ in both. Leaving them would mean an English-speaking entrant getting a Chinese e
 
   Command and option **descriptions** are localized, via Discord's static `description_localizations` rather
   than through `Locale` — a different code path, resolved by Discord at render time. They carry essentially all
-  of the command surface's explanatory text and none of the name risk. Added for the player-facing commands
-  after testers reported reading Chinese replies to an English form; the admin commands can follow.
+  of the command surface's explanatory text and none of the name risk. Localized on the player-facing commands;
+  the admin commands can follow.
 - The home guild's own commands and their hardcoded Chinese (`/查分`, `/rebuild`, `/refresh`, `bind`'s
   subcommands) — untouched. The distinction from `errors.rs`/`guilds.rs` above is which guilds the text can
   actually appear in, not which file it happens to live in.
@@ -1276,8 +1302,7 @@ which is what makes them stay in sync.
 **Schema delivery needs work before any of the above lands.** Today `schema.sql` is `include_str!`'d and
 executed as one batch at `src/main.rs`, and apart from one `drop table if exists` it is entirely
 `create table if not exists`. The problem: **there is no versioned migration mechanism**, so an `alter table`
-has nowhere to live — and a six-table feature will need alters. (An earlier draft of this section also flagged a
-missing trailing semicolon in `schema.sql`; that was fixed in `fb4b44e0`.)
+has nowhere to live — and a six-table feature will need alters.
 
 Add a `migrations/` directory driven by `sqlx::migrate!`. This needs no dependency change: sqlx's default
 features are not disabled in `Cargo.toml`, so `migrate` is already available. Run the migrator *after* the
@@ -1360,9 +1385,6 @@ than panicking (buttons from an older deploy will be pressed).
 ## 11. Follow-ups
 
 Tracked separately; not part of this design.
-
-Two follow-ups this document used to carry — sending a compliant User-Agent to aoe4world, and deleting the
-leftover `Secrets.toml` from the removed Shuttle setup — have since been done, and are dropped from the list.
 
 - **Result cross-checking.** `GET /api/v0/players/:profile_id/games?opponent_profile_id=X` returns games
   between two players with map, civs and winner, and supports `since=`/`updated_since=` for cheap incremental

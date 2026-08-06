@@ -71,6 +71,10 @@ pub(crate) enum RegisterOutcome {
     ProfileClaimRace,
     LookupFailed,
     RegistrationClosed,
+    /// The field is at its cap (§8.3). Refused before any write.
+    FieldFull {
+        cap: i64,
+    },
 }
 
 impl RegisterOutcome {
@@ -151,6 +155,10 @@ impl RegisterOutcome {
                 format!("**{tournament_name}** 的報名已經結束。"),
                 format!("Registration is closed for **{tournament_name}**."),
             ),
+            RegisterOutcome::FieldFull { cap } => locale.pick(
+                format!("**{tournament_name}** 的名額已滿（上限 {cap} 人）。有人退賽時就會空出名額。"),
+                format!("**{tournament_name}** is full ({cap} entrants). A slot opens up if someone withdraws."),
+            ),
         }
     }
 
@@ -162,6 +170,17 @@ impl RegisterOutcome {
             RegisterOutcome::Registered { .. } | RegisterOutcome::Reactivated { .. }
         )
     }
+}
+
+/// `Some(FieldFull)` when the field is at its cap. Counts `active` entries only,
+/// so a withdrawal really does free a place.
+async fn field_full(pool: &SqlitePool, tournament: &Tournament) -> Result<Option<RegisterOutcome>, sqlx::Error> {
+    let active = db::count_active_entries(pool, tournament.id).await?;
+    Ok(
+        (active >= tournament.entrant_cap).then_some(RegisterOutcome::FieldFull {
+            cap: tournament.entrant_cap,
+        }),
+    )
 }
 
 pub(crate) async fn register(
@@ -176,6 +195,11 @@ pub(crate) async fn register(
 
     if let Some(entry) = db::get_entry(pool, tournament.id, user_id).await? {
         return if entry.status == "withdrawn" {
+            // Rejoining takes a slot like any other sign-up, so the cap applies
+            // here too — otherwise withdraw-then-rejoin walks straight past it.
+            if let Some(full) = field_full(pool, tournament).await? {
+                return Ok(full);
+            }
             db::update_entry_status(pool, tournament.id, user_id, "active").await?;
             let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
             Ok(RegisterOutcome::Reactivated {
@@ -189,6 +213,10 @@ pub(crate) async fn register(
                 display_name: entry.display_name,
             })
         };
+    }
+
+    if let Some(full) = field_full(pool, tournament).await? {
+        return Ok(full);
     }
 
     match db::get_player(pool, user_id).await? {

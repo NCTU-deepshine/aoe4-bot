@@ -1,0 +1,92 @@
+{
+  "id": "6a4325f095d3637a0d064c21",
+  "ownerId": "6a3a525f2fa87f5851731993",
+  "name": "Bo3 Draft (relic cup)",
+  "description": "Standard Bo3 — map BP, hand draft, simultaneous offer & snipe.",
+  "isPublic": true,
+  "config": {
+    "civs": [
+      {
+        "id": "english",
+        "name": "English",
+        "imageUrl": "https://static.wikia.nocookie.net/ageofempires/images/6/6e/English_AoE4.png"
+      },
+      {
+        "id": "french",
+        "name": "French",
+        "imageUrl": "https://static.wikia.nocookie.net/ageofempires/images/5/5a/French_AoE4.png"
+      }
+    ],
+    "maps": [
+      {
+        "id": "dry-arabia",
+        "name": "Dry Arabia"
+      },
+      {
+        "id": "lipany",
+        "name": "Lipany"
+      }
+    ],
+    "steps": [
+      {
+        "id": "MAP_BAN-0",
+        "type": "MAP_BAN",
+        "actor": "PLAYER1",
+        "pool": "map",
+        "count": 1,
+        "timeLimitSec": 30,
+        "showCurrentMap": false,
+        "excludeUsedCivs": true,
+        "pausable": true,
+        "label": "P1 · Ban map"
+      },
+      {
+        "id": "MAP_BAN-1",
+        "type": "MAP_BAN",
+        "actor": "PLAYER2",
+        "pool": "map",
+        "count": 1,
+        "timeLimitSec": 30,
+        "showCurrentMap": false,
+        "excludeUsedCivs": true,
+        "pausable": true,
+        "label": "P2 · Ban map"
+      },
+      {
+        "id": "CIV_BAN-2",
+        "type": "MAP_BAN",
+        "actor": "PLAYER1",
+        "pool": "map",
+        "count": 1,
+        "timeLimitSec": 30,
+        "showCurrentMap": false,
+        "excludeUsedCivs": true,
+        "pausable": true,
+        "label": "P1 · Ban map"
+      },
+      {
+        "id": "09179417-f17d-42b6-bc94-1501f9719a49",
+        "type": "MAP_SELECT",
+        "actor": "HOST_DRAW",
+        "pool": "civ",
+        "count": 1,
+        "timeLimitSec": 30,
+        "showCurrentMap": false,
+        "excludeUsedCivs": true,
+        "pausable": true,
+        "label": "Random · Select map"
+      }
+    ],
+    "options": {
+      "bestOf": 3,
+      "publicHover": true,
+      "defaultTimeLimitSec": 30,
+      "pausable": true,
+      "resultMode": "vote"
+    }
+  },
+  "isOwner": false,
+  "isDemo": false,
+  "isFavorite": false,
+  "updatedAt": "2026-07-02T12:47:41.597Z"
+}

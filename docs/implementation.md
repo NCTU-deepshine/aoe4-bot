@@ -140,7 +140,8 @@ payload including its nullable `profile_id` rows.
 
 **12. `/tournament start`**
 Generate the bracket in one transaction from finalized seeds, publish it (chunked, ids in
-`tournament_bracket_messages`), and open round 1. Consumes chunks 4 and 5.
+`tournament_bracket_messages`), and open round 1. Consumes chunks 4 and 5, and chunk 27 for the gate and for
+each round's `best_of` — which comes from its draft preset, not from an option on this command.
 Design: §8.3, §5, §8.6.
 Gate: §10's lifecycle list — starting before check-in closes, non-contiguous seeds, registering after start all
 rejected.
@@ -173,6 +174,17 @@ share it.
 Design: §8.1, §8.2, §8.4.
 Gate: §10's deletion-cascade list.
 
+**27. Tournament setup, and preset-derived match lengths**
+`/tournament setup` (entrant cap, start time) and `/tournament preset`, which assigns a draft preset to a round
+and everything after it. The preset is where `best_of` comes from: §3.3 already requires the two to match, so
+deriving beats validating. Blocks chunk 12 until a preset and a start time exist. The cap defaults to 32 and is
+enforced at **registration** — the sign-up that would exceed it is refused, so an over-full field never happens
+and no admin "kick" is needed; rejoining after a withdrawal is capped too. Adds `drafttool.rs`, unauthenticated
+reads only, so none of Phase E is a prerequisite. One migration.
+Design: §3.3, §8.3, §4.
+Gate: the preset cascade resolved at every depth; the cap refusing at the boundary, freed by a withdrawal, and
+not leaking via rejoin; preset validation against a saved payload; a local wall time stored as the right UTC.
+
 ## Phase E — the draft tool
 
 **14. Draft-tool client**
@@ -181,14 +193,12 @@ and reading a preset's config. Base URL and credentials from env, alongside `DIS
 Design: §3.3.
 Gate: preset-config deserialization from a saved payload; the handshake against a stub. No live calls.
 
-**15. Round presets, validated up front**
-`draft_preset_id` on rounds, checked when the round is configured rather than when a set opens: public, playable
-per the tool's own validation, `resultMode: "vote"`, an odd `bestOf` matching the round's, and no `MAP_PICK`
-steps — the last is what makes the loser's map pick range over the whole pool rather than over the maps they
-picked themselves.
+**15. Round presets: the tool's own validation**
+Chunk 27 assigns presets and checks what the bot depends on (public, `resultMode: "vote"`, odd `bestOf`). What
+remains is running the tool's own `validatePreset` (`lib/draft/validate.ts`) and surfacing its `issues`, so a
+preset malformed by the tool's rules is caught here rather than at `POST /api/matches` with two players waiting.
 Design: §3.3.
-Gate: a host-mode preset, a non-public preset, an even or mismatched `bestOf`, and one containing map picks are
-each rejected, with the tool's `issues` surfaced alongside our own.
+Gate: the tool's `issues` surfaced alongside our own.
 
 **16. Set threads and draft creation**
 Thread on `ready`, members added, draft created as the bot's account, pinned panel carrying the room link and

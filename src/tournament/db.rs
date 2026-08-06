@@ -38,6 +38,8 @@ pub(crate) struct Tournament {
     pub checkin_message_id: Option<i64>,
     pub seed_message_id: Option<i64>,
     pub checkin_closes_at: Option<DateTime<Utc>>,
+    pub entrant_cap: i64,
+    pub scheduled_start_at: Option<DateTime<Utc>>,
     pub created_by: i64,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -71,7 +73,8 @@ pub(crate) async fn get_tournament(pool: &SqlitePool, id: i64) -> Result<Option<
         r"
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
-               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at, created_by, created_at,
+               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
+               entrant_cap, scheduled_start_at, created_by, created_at,
                started_at, completed_at
         from tournaments
         where id = ?1
@@ -88,7 +91,8 @@ pub(crate) async fn get_tournament_by_slug(pool: &SqlitePool, slug: &str) -> Res
         r"
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
-               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at, created_by, created_at,
+               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
+               entrant_cap, scheduled_start_at, created_by, created_at,
                started_at, completed_at
         from tournaments
         where slug = ?1
@@ -235,6 +239,108 @@ pub(crate) async fn set_checkin_closes_at(
     Ok(())
 }
 
+/// The maximum size of the field (§8.3). Enforced at registration rather than at
+/// start, so an over-full field never happens in the first place.
+pub(crate) async fn set_entrant_cap(pool: &SqlitePool, id: i64, entrant_cap: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set entrant_cap = ?1 where id = ?2")
+        .bind(entrant_cap)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// When the event is meant to begin. Stored UTC; the command parses a local wall
+/// time and Discord renders it back per reader.
+pub(crate) async fn set_scheduled_start_at(
+    pool: &SqlitePool,
+    id: i64,
+    scheduled_start_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set scheduled_start_at = ?1 where id = ?2")
+        .bind(scheduled_start_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Entrants occupying a slot. `withdrawn` and `no_show` rows persist (§4) but are
+/// not in the field, so withdrawing genuinely frees a place against the cap.
+pub(crate) async fn count_active_entries(pool: &SqlitePool, tournament_id: i64) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        r"
+        select count(*)
+        from tournament_entries
+        where tournament_id = ?1
+          and status = 'active'
+        ",
+    )
+    .bind(tournament_id)
+    .fetch_one(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+// 10. tournament_round_presets — which draft preset a round uses, and therefore
+//     how long its sets are (§3.3). Keyed by depth back from the final; see
+//     `tournament::setup::preset_for_depth` for how one is resolved.
+
+#[derive(FromRow)]
+pub(crate) struct RoundPreset {
+    pub tournament_id: i64,
+    pub from_depth: i64,
+    pub draft_preset_id: String,
+    pub best_of: i64,
+    pub assigned_at: DateTime<Utc>,
+}
+
+/// Upsert: re-assigning the same depth replaces it, which is how an organizer
+/// corrects a preset without a separate clear step.
+pub(crate) async fn upsert_round_preset(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    from_depth: i64,
+    draft_preset_id: &str,
+    best_of: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        insert into tournament_round_presets (tournament_id, from_depth, draft_preset_id, best_of)
+        values (?1, ?2, ?3, ?4)
+        on conflict (tournament_id, from_depth) do update set
+            draft_preset_id = excluded.draft_preset_id,
+            best_of = excluded.best_of,
+            assigned_at = datetime('now')
+        ",
+    )
+    .bind(tournament_id)
+    .bind(from_depth)
+    .bind(draft_preset_id)
+    .bind(best_of)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn list_round_presets(pool: &SqlitePool, tournament_id: i64) -> Result<Vec<RoundPreset>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        select tournament_id, from_depth, draft_preset_id, best_of, assigned_at
+        from tournament_round_presets
+        where tournament_id = ?1
+        order by from_depth
+        ",
+    )
+    .bind(tournament_id)
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
 /// Resolves a tournament from ANY of its five stored channel ids — the announce
 /// channel (`/tournament create`'s invoking channel) or any of the four it
 /// created. Used by `/tournament admin add|remove|list`'s resolution, which has
@@ -247,7 +353,8 @@ pub(crate) async fn get_tournament_by_any_channel_id(
         r"
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
-               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at, created_by, created_at,
+               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
+               entrant_cap, scheduled_start_at, created_by, created_at,
                started_at, completed_at
         from tournaments
         where announce_channel_id = ?1
