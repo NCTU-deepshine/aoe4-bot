@@ -11,7 +11,8 @@ use crate::tournament::registration::registration_is_open;
 use crate::tournament::throttle::EditThrottle;
 use chrono::{DateTime, Utc};
 use serenity::all::{
-    ButtonStyle, CacheHttp, ChannelId, CreateActionRow, CreateButton, CreateMessage, EditMessage, MessageId,
+    ButtonStyle, CacheHttp, ChannelId, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, EditMessage,
+    MessageId,
 };
 use sqlx::SqlitePool;
 use std::time::{Duration, Instant};
@@ -28,14 +29,28 @@ const ROSTER_DISPLAY_CAP: usize = 10;
 /// Pure. Filters `entries` down to `active` internally — a withdrawn entry's row
 /// persists (§4), but it must never show up in the roster, and callers should not
 /// have to remember to filter it out themselves.
+/// The heading, which becomes the embed's title.
+///
+/// Kept out of the message's `content` deliberately. An ephemeral reply to one of
+/// these buttons is rendered by Discord as a reply to this message, and that
+/// preview flattens `content` — and only `content` — onto a single line. With the
+/// panel in an embed there is nothing to flatten.
+pub(crate) fn render_title(name: &str, open: bool) -> String {
+    let heading = if open {
+        "報名進行中 / registration is OPEN"
+    } else {
+        "報名已結束 / registration is CLOSED"
+    };
+    format!("{name} — {heading}")
+}
+
+/// Pure, and the part worth golden-testing: everything below the title.
 pub(crate) fn render(
-    tournament_id: i64,
-    name: &str,
     entries: &[TournamentEntry],
     entrant_cap: i64,
     scheduled_start_at: Option<DateTime<Utc>>,
     open: bool,
-) -> (String, Vec<CreateActionRow>) {
+) -> String {
     let active: Vec<&TournamentEntry> = entries.iter().filter(|e| e.status == "active").collect();
 
     let roster = if active.is_empty() {
@@ -72,22 +87,18 @@ pub(crate) fn render(
     // Bilingual rather than per-reader (§8.10): one message, many readers, and it
     // re-renders on every button press — picking any one of their languages would
     // make it flip. Only the chrome doubles; the roster appears once.
-    let heading = if open {
-        "報名進行中 / registration is OPEN"
-    } else {
-        "報名已結束 / registration is CLOSED"
-    };
-
-    let content = format!(
-        "**{name} — {heading}**\n\
+    format!(
+        "\
          單淘汰 · 開賽前需簽到\n\
          Single elimination · check-in required before start\n\
          {first_time}\
          {starts}**已報名 / Registered ({}/{entrant_cap})**\n{roster}",
         active.len()
-    );
+    )
+}
 
-    let components = vec![CreateActionRow::Buttons(vec![
+pub(crate) fn render_components(tournament_id: i64, open: bool) -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![
         CreateButton::new(Action::Register.custom_id(tournament_id))
             .label("報名 / Register")
             .style(ButtonStyle::Primary)
@@ -99,9 +110,13 @@ pub(crate) fn render(
             .label("退賽 / Withdraw")
             .style(ButtonStyle::Danger)
             .disabled(!open),
-    ])];
+    ])]
+}
 
-    (content, components)
+/// Title and body as one embed. Thin by design — the two functions above hold
+/// everything worth testing.
+fn embed(name: &str, body: String, open: bool) -> CreateEmbed {
+    CreateEmbed::new().title(render_title(name, open)).description(body)
 }
 
 /// Posts the panel with an empty roster — called once, from `commands::create`,
@@ -115,9 +130,14 @@ pub(crate) async fn post_initial(
     entrant_cap: i64,
 ) -> Result<MessageId, Error> {
     // No start time yet: `create` runs before `/tournament setup` can.
-    let (content, components) = render(tournament_id, name, &[], entrant_cap, None, true);
+    let body = render(&[], entrant_cap, None, true);
     let message = channel_id
-        .send_message(http, CreateMessage::new().content(content).components(components))
+        .send_message(
+            http,
+            CreateMessage::new()
+                .embed(embed(name, body, true))
+                .components(render_components(tournament_id, true)),
+        )
         .await?;
     Ok(message.id)
 }
@@ -170,21 +190,20 @@ async fn edit(
     tournament: &Tournament,
 ) -> Result<(), Error> {
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-    let (content, components) = render(
-        tournament.id,
-        &tournament.name,
-        &entries,
-        tournament.entrant_cap,
-        tournament.scheduled_start_at,
-        registration_is_open(&tournament.status),
-    );
+    let open = registration_is_open(&tournament.status);
+    let body = render(&entries, tournament.entrant_cap, tournament.scheduled_start_at, open);
 
     let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
     channel_id
         .edit_message(
             http,
             message_id,
-            EditMessage::new().content(content).components(components),
+            EditMessage::new()
+                // The panel was plain text before; an explicit empty content
+                // clears it on an already-posted message.
+                .content("")
+                .embed(embed(&tournament.name, body, open))
+                .components(render_components(tournament.id, open)),
         )
         .await?;
     Ok(())
@@ -216,10 +235,14 @@ mod tests {
     fn the_panel_is_bilingual_rather_than_picking_a_reader() {
         // §8.10: a shared message re-rendered by whoever presses a button, so it
         // carries both languages instead of flipping between them.
-        let (content, _) = render(1, "Relic Cup", &[entry(1, "MarineLorD", "active")], 32, None, true);
-        assert!(content.contains("報名進行中"));
-        assert!(content.contains("registration is OPEN"));
-        assert!(content.contains("已報名 / Registered (1/32)"));
+        let title = render_title("Relic Cup", true);
+        assert!(title.contains("報名進行中"), "{title}");
+        assert!(title.contains("registration is OPEN"), "{title}");
+
+        let content = render(&[entry(1, "MarineLorD", "active")], 32, None, true);
+        assert!(content.contains("單淘汰"), "{content}");
+        assert!(content.contains("Single elimination"), "{content}");
+        assert!(content.contains("已報名 / Registered (1/32)"), "{content}");
     }
 
     #[test]
@@ -227,14 +250,14 @@ mod tests {
         // The cap is only fair if entrants can watch the field fill up — a
         // sign-up past it is refused (§8.3).
         let at = Utc::now();
-        let (content, _) = render(1, "Relic Cup", &[entry(1, "A", "active")], 8, Some(at), true);
+        let content = render(&[entry(1, "A", "active")], 8, Some(at), true);
         assert!(content.contains("Registered (1/8)"), "{content}");
         assert!(content.contains(&format!("<t:{}:F>", at.timestamp())), "{content}");
     }
 
     #[test]
     fn omits_the_start_line_entirely_when_unscheduled() {
-        let (content, _) = render(1, "Relic Cup", &[], 32, None, true);
+        let content = render(&[], 32, None, true);
         assert!(!content.contains("Starts"), "{content}");
     }
 
@@ -243,7 +266,7 @@ mod tests {
         // The Register button cannot serve a first-timer — it carries no name —
         // so the panel has to say so up front rather than let them hit the
         // refusal and go hunting for a command.
-        let (content, _) = render(1, "Relic Cup", &[], 32, None, true);
+        let content = render(&[], 32, None, true);
         assert!(content.contains("第一次報名？"), "{content}");
         assert!(content.contains("First time?"), "{content}");
         assert!(content.contains("/tournament register"));
@@ -251,7 +274,7 @@ mod tests {
 
     #[test]
     fn renders_a_placeholder_when_nobody_has_registered() {
-        let (content, _) = render(1, "Relic Cup", &[], 32, None, true);
+        let content = render(&[], 32, None, true);
         assert!(content.contains("Registered (0/32)"));
         assert!(content.contains("還沒有人報名。 / No one has registered yet."));
     }
@@ -263,7 +286,7 @@ mod tests {
             entry(2, "Beasty", "withdrawn"),
             entry(3, "Anotand", "active"),
         ];
-        let (content, _) = render(1, "Relic Cup", &entries, 32, None, true);
+        let content = render(&entries, 32, None, true);
         assert!(content.contains("Registered (2/32)"));
         assert!(content.contains("MarineLorD"));
         assert!(content.contains("Anotand"));
@@ -273,17 +296,30 @@ mod tests {
     #[test]
     fn truncates_the_roster_beyond_the_display_cap() {
         let entries: Vec<TournamentEntry> = (1..=12).map(|i| entry(i, &format!("Player{i}"), "active")).collect();
-        let (content, _) = render(1, "Relic Cup", &entries, 32, None, true);
+        let content = render(&entries, 32, None, true);
         assert!(content.contains("Registered (12/32)"));
         assert!(content.contains("…等 2 人 / and 2 more"));
         assert!(!content.contains("Player11"));
     }
 
     #[test]
+    fn the_title_is_short_enough_to_read_as_a_reply_preview() {
+        // Why the panel is an embed at all: Discord renders an ephemeral reply to
+        // one of these buttons as a reply to this message, flattening its
+        // `content` onto one line. The body lives in the embed, so only this
+        // title could ever appear there.
+        let title = render_title("Test Bot Cup", true);
+        assert!(title.len() < 80, "{} chars: {title}", title.len());
+        assert!(!title.contains('\n'), "a title is one line by construction");
+    }
+
+    #[test]
     fn a_closed_panel_says_so_and_stops_inviting_presses() {
-        let (content, components) = render(1, "Relic Cup", &[entry(1, "A", "active")], 32, None, false);
-        assert!(content.contains("報名已結束"), "{content}");
-        assert!(content.contains("registration is CLOSED"), "{content}");
+        let content = render(&[entry(1, "A", "active")], 32, None, false);
+        let components = render_components(1, false);
+        let title = render_title("Relic Cup", false);
+        assert!(title.contains("報名已結束"), "{title}");
+        assert!(title.contains("registration is CLOSED"), "{title}");
         // The first-timer hint would send someone to a command that refuses.
         assert!(!content.contains("First time?"), "{content}");
 
@@ -301,7 +337,7 @@ mod tests {
         // The panel becomes a record of who is in the field, so it must still
         // list them.
         let entries = vec![entry(1, "MarineLorD", "active"), entry(2, "Beasty", "active")];
-        let (content, _) = render(1, "Relic Cup", &entries, 32, None, false);
+        let content = render(&entries, 32, None, false);
         assert!(
             content.contains("MarineLorD") && content.contains("Beasty"),
             "{content}"
@@ -311,7 +347,7 @@ mod tests {
 
     #[test]
     fn buttons_carry_the_tournament_id_in_their_custom_id() {
-        let (_, components) = render(42, "Relic Cup", &[], 32, None, true);
+        let components = render_components(42, true);
         let CreateActionRow::Buttons(buttons) = &components[0] else {
             panic!("expected a button row");
         };
