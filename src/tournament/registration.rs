@@ -347,6 +347,69 @@ impl RebindOutcome {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum UnbindOutcome {
+    Unbound {
+        display_name: String,
+    },
+    NotBound,
+    /// Entries block the delete outright — see `db::count_entries_for_player`.
+    BlockedByEntries {
+        count: i64,
+    },
+}
+
+impl UnbindOutcome {
+    pub(crate) fn message(&self, locale: Locale) -> String {
+        match self {
+            UnbindOutcome::Unbound { display_name } => locale.pick(
+                format!("已解除與 **{display_name}** 的連結。下次報名時可以重新選擇遊戲帳號。"),
+                format!("Unlinked **{display_name}**. You'll pick a game account again next time you sign up."),
+            ),
+            UnbindOutcome::NotBound => locale.pick(
+                "你目前沒有連結任何遊戲帳號。".to_string(),
+                "You don't have a game account linked right now.".to_string(),
+            ),
+            // Says delete, not withdraw: withdrawing leaves the entry row behind
+            // (§4), so it would not unblock this and the advice would waste a trip.
+            UnbindOutcome::BlockedByEntries { count } => locale.pick(
+                format!(
+                    "你還有 {count} 筆賽事報名紀錄，無法解除連結。要換帳號請用 `/tournament rebind`；\
+                     若是測試用的賽事，請先請管理員用 `/tournament delete` 刪除該賽事。"
+                ),
+                format!(
+                    "You still have {count} tournament entr{} on record, so the link can't be removed. Use \
+                     `/tournament rebind` to change accounts; for a test tournament, ask an admin to \
+                     `/tournament delete` it first.",
+                    if *count == 1 { "y" } else { "ies" }
+                ),
+            ),
+        }
+    }
+}
+
+/// Drops the player's global binding so their next sign-up starts from scratch.
+/// Tournament-independent, like `rebind` — the player list is global (§4).
+///
+/// Refuses rather than cascading: entries, sets and games all reference the
+/// player row without `on delete cascade`, so deleting underneath them would
+/// either fail raw or orphan a bracket.
+pub(crate) async fn unbind(pool: &SqlitePool, user_id: i64) -> Result<UnbindOutcome, sqlx::Error> {
+    let Some(player) = db::get_player(pool, user_id).await? else {
+        return Ok(UnbindOutcome::NotBound);
+    };
+
+    let count = db::count_entries_for_player(pool, user_id).await?;
+    if count > 0 {
+        return Ok(UnbindOutcome::BlockedByEntries { count });
+    }
+
+    db::delete_player(pool, user_id).await?;
+    Ok(UnbindOutcome::Unbound {
+        display_name: player.display_name,
+    })
+}
+
 pub(crate) async fn rebind(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<RebindOutcome, sqlx::Error> {
     if db::get_player(pool, user_id).await?.is_none() {
         return Ok(RebindOutcome::NoExistingProfile);
@@ -404,6 +467,18 @@ mod tests {
         assert!(en.contains("You've withdrawn"), "{en}");
         // The tournament name is data, not text — it is not translated.
         assert!(zh.contains("Relic Cup") && en.contains("Relic Cup"));
+    }
+
+    #[test]
+    fn the_blocked_unbind_message_says_delete_not_withdraw() {
+        // Withdrawing leaves the entry row behind, so it does not unblock an
+        // unbind — pointing at it would send someone down a dead end.
+        for locale in [Locale::ZhTw, Locale::En] {
+            let message = UnbindOutcome::BlockedByEntries { count: 2 }.message(locale);
+            assert!(message.contains("/tournament delete"), "{message}");
+            assert!(!message.contains("/tournament withdraw"), "{message}");
+            assert!(message.contains('2'), "{message}");
+        }
     }
 
     #[test]

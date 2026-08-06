@@ -1273,6 +1273,80 @@ mod tests {
         assert!(entries.iter().all(|e| e.seed.is_none() && e.suggested_seed.is_none()));
     }
 
+    // Self-unbind gate tests.
+
+    #[tokio::test]
+    async fn unbind_clears_the_binding_and_frees_the_profile() {
+        let pool = test_pool().await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Player")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::unbind(&pool, 1).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::UnbindOutcome::Unbound {
+                display_name: "Player".to_string()
+            }
+        );
+        assert!(crate::tournament::db::get_player(&pool, 1).await.unwrap().is_none());
+
+        // The point of unbinding: aoe4_id is unique, so the profile must be
+        // claimable again — by this user or another.
+        crate::tournament::db::insert_player_if_absent(&pool, 2, 100, "Someone Else")
+            .await
+            .unwrap();
+        let claimed = crate::tournament::db::get_player_by_aoe4_id(&pool, 100).await.unwrap();
+        assert_eq!(claimed.map(|p| p.user_id), Some(2));
+    }
+
+    #[tokio::test]
+    async fn unbind_is_refused_while_any_entry_exists_even_a_withdrawn_one() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Player")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "Player")
+            .await
+            .unwrap();
+        // Withdrawing does not delete the row, so it must not unblock the unbind.
+        crate::tournament::db::update_entry_status(&pool, tournament.id, 1, "withdrawn")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::unbind(&pool, 1).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::UnbindOutcome::BlockedByEntries { count: 1 }
+        );
+        assert!(
+            crate::tournament::db::get_player(&pool, 1).await.unwrap().is_some(),
+            "a refused unbind must leave the binding alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn unbind_is_a_no_op_when_nothing_is_bound() {
+        let pool = test_pool().await;
+        let outcome = crate::tournament::registration::unbind(&pool, 999).await.unwrap();
+        assert_eq!(outcome, crate::tournament::registration::UnbindOutcome::NotBound);
+    }
+
+    #[tokio::test]
+    async fn unbind_leaves_the_home_guild_binding_alone() {
+        // §4 keeps `accounts` and `tournament_players` deliberately unlinked.
+        let pool = test_pool().await;
+        bind_account(&pool, 1, 100).await.unwrap();
+        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Player")
+            .await
+            .unwrap();
+
+        crate::tournament::registration::unbind(&pool, 1).await.unwrap();
+
+        assert_eq!(list_all(&pool).await.unwrap().len(), 1, "accounts must be untouched");
+    }
+
     // Chunk 11 (seeding) gate tests.
 
     /// A checked-in field of `n` entrants, unseeded.

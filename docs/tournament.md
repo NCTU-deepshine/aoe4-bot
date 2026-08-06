@@ -469,7 +469,10 @@ create table if not exists tournament_rounds (
 -- 4. tournament players: one MAIN aoe4 profile per discord user, and one user per
 --    profile. deliberately separate from `accounts`, which is the ranked board's
 --    table and allows a user several profiles — see the notes. bound at sign-up
---    (§8.5) and reused by every later tournament.
+--    (§8.5) and reused by every later tournament. `/tournament unbind` drops the
+--    row, freeing the unique aoe4_id, but is refused while the user has ANY entry:
+--    entries/sets/games reference this row without `on delete cascade`, and
+--    entries are never deleted, so even a withdrawn one blocks it.
 create table if not exists tournament_players (
   user_id bigint primary key,               -- discord user; one main profile each
   aoe4_id bigint not null unique,           -- and one user per profile
@@ -890,6 +893,7 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament admin add\|remove\|list` | creator | Manage the admin list |
 | `/tournament register [in_game_name]` | anyone | Autocompleted by in-game name, first sign-up only · also a button |
 | `/tournament rebind in_game_name` | anyone | Change which game account you're linked to; refused during a running event |
+| `/tournament unbind` | anyone | Unlink your game account entirely; refused while you have any entry |
 | `/tournament withdraw` | anyone | Before start only · also a button |
 | `/tournament open-checkin [minutes]` | admin | Posts the check-in panel |
 | `/tournament checkin` | anyone | Self check-in · also a button |

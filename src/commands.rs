@@ -234,6 +234,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "admin",
         "register",
         "rebind",
+        "unbind",
         "withdraw",
         "open_checkin",
         "check_in",
@@ -632,6 +633,26 @@ pub async fn rebind(
         "rebind by {} ({user_id}) to aoe4 id {in_game_name}: {outcome:?}",
         ctx.author().name
     );
+    ephemeral(ctx, outcome.message(locale)).await?;
+    Ok(())
+}
+
+// Tournament-independent, like `rebind` — the player list is global (§4). Kept
+// self-service: it only ever clears the caller's own binding.
+/// Unlinks your game account, so your next sign-up starts from scratch.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    description_localized("zh-TW", "解除你目前連結的遊戲帳號，下次報名時重新選擇。")
+)]
+pub async fn unbind(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
+    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+
+    let outcome = registration::unbind(&ctx.data().database, user_id).await?;
+    info!("unbind by {} ({user_id}): {outcome:?}", ctx.author().name);
     ephemeral(ctx, outcome.message(locale)).await?;
     Ok(())
 }

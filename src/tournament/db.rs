@@ -467,6 +467,34 @@ pub(crate) async fn insert_player_if_absent(
 
 /// Rebinding changes which aoe4 profile is bound, nothing else — `display_name` is a
 /// separate, player-editable concern (see `set_player_display_name`).
+/// Every entry a player has ever had, in any tournament and whatever its status.
+///
+/// Counts `withdrawn` rows too, deliberately: entries are never deleted (§4), and
+/// `tournament_entries.user_id` references this player row with no `on delete
+/// cascade`, so a withdrawn entry blocks a delete exactly as an active one does.
+/// Counting only the live ones would report success and then hit a raw FK error.
+pub(crate) async fn count_entries_for_player(pool: &SqlitePool, user_id: i64) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(r"select count(*) from tournament_entries where user_id = ?1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .inspect_err(log_db_error)
+}
+
+/// Drops the global Discord↔aoe4world binding, freeing the `aoe4_id` for someone
+/// else to claim. Callers must check `count_entries_for_player` first — the
+/// foreign keys from entries, sets and games have no cascade, so this fails
+/// rather than orphaning them. `accounts` is a separate table and is untouched
+/// (§4: the two are deliberately not linked).
+pub(crate) async fn delete_player(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"delete from tournament_players where user_id = ?1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 pub(crate) async fn update_player_binding(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<(), sqlx::Error> {
     sqlx::query(
         r"
