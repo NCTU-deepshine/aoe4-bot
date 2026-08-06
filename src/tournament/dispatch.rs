@@ -192,8 +192,9 @@ impl Dispatcher {
             Ok(Some(tournament)) => Some(tournament),
             Ok(None) => {
                 // A stale button whose entity_id no longer resolves to a
-                // tournament (unreachable today — nothing deletes a tournament
-                // row — but not a case to panic on, §8.5/§10). Whether this
+                // tournament — reachable since chunk 26, by pressing a panel
+                // button `/tournament delete` has not yet removed the channel
+                // for (§8.5/§10, and not a case to panic on). Whether this
                 // interaction was already deferred depends on `action`, and
                 // replying the wrong way is worse than leaving it to time out,
                 // so this is a log-only best effort.

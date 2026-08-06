@@ -110,6 +110,20 @@ pub(crate) async fn update_tournament_status(pool: &SqlitePool, id: i64, status:
     Ok(())
 }
 
+/// `/tournament delete` (docs/tournament.md §8.4). One statement is enough: every
+/// tournament-scoped table cascades off this row — entries, admins, stages,
+/// rounds, sets, games and bracket messages — which is invisible here, hence the
+/// note. `tournament_players` is deliberately not among them: the Discord↔aoe4world
+/// binding is global (§4) and outlives any one tournament.
+pub(crate) async fn delete_tournament(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"delete from tournaments where id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 /// The channel ids `/tournament create` allocates, written once Discord confirms
 /// they exist (§8.1). A carrier rather than six positional args, matching
 /// `NewGame`'s precedent (`insert_game`).

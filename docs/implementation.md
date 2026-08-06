@@ -162,7 +162,8 @@ so the reply doesn't vanish with its own channel. Deletes `#…-register|bracket
 `tournaments` row, which cascades to every tournament-scoped table; the announce channel, the category and
 `tournament_players` are left alone. Channel deletions are best-effort and logged — one an admin already
 removed by hand must not block the database cleanup. Creator-or-`MANAGE_GUILD` tier, so it reuses
-`tournament_admin_only` unchanged.
+`tournament_admin_only`, whose refusal message stops naming the admin list now that two commands
+share it.
 Design: §8.1, §8.2, §8.4.
 Gate: §10's deletion-cascade list.
 

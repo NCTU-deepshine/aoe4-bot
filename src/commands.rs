@@ -7,7 +7,7 @@ use crate::reply::ephemeral;
 use crate::tournament::access::{create_tournament_only, tournament_admin_only, tournament_manage_only};
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
-use crate::tournament::{audit, checkin, checkin_panel, panel, registration};
+use crate::tournament::{audit, checkin, checkin_panel, panel, registration, teardown};
 use crate::{Context, Data, Error};
 use regex::Regex;
 use serenity::all::{
@@ -189,7 +189,8 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "open_checkin",
         "check_in",
         "close_checkin",
-        "reopen_registration"
+        "reopen_registration",
+        "delete"
     ),
     subcommand_required
 )]
@@ -698,6 +699,90 @@ async fn delete_checkin_panel(ctx: Context<'_>, tournament: &tournament_db::Tour
             tournament.id
         );
     }
+}
+
+// The inverse of `create` (docs/tournament.md §8.4): removes the four channels it
+// made and the `tournaments` row, which cascades to every tournament-scoped
+// table. The announce channel and the category are left alone — the bot created
+// neither (§8.1) — and so is `tournament_players`, which is global (§4).
+/// Deletes the tournament and the channels it created. Cannot be undone.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_admin_only",
+    required_bot_permissions = "MANAGE_CHANNELS"
+)]
+pub async fn delete(
+    ctx: Context<'_>,
+    #[description = "Type the tournament's slug to confirm — this cannot be undone"] confirm: String,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        ephemeral(ctx, "This command must be run in one of the tournament's own channels.").await?;
+        return Ok(());
+    };
+
+    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    let check = teardown::check_delete(&tournament, &confirm, channel_id);
+    audit::log_action("delete", tournament.id, &tournament.slug, ctx.author(), &check);
+    if check != teardown::DeleteCheck::Ok {
+        ephemeral(ctx, check.message(&tournament)).await?;
+        return Ok(());
+    }
+
+    // Channels first, then the row. The other order would leave channels nothing
+    // resolves to, so the command could never be retried; this way a partial
+    // failure still leaves a row reachable from the announce channel.
+    let failed = delete_tournament_channels(ctx, &tournament).await;
+    tournament_db::delete_tournament(&ctx.data().database, tournament.id).await?;
+
+    // The only surviving record of the tournament, now that its row is gone —
+    // the pair to the line `create` writes.
+    info!(
+        "deleted tournament {} ({}) \"{}\" by {} ({}), {failed} channel(s) could not be removed",
+        tournament.id,
+        tournament.slug,
+        tournament.name,
+        ctx.author().name,
+        ctx.author().id,
+    );
+
+    let leftover = if failed > 0 {
+        format!(" ({failed} channel(s) couldn't be deleted — remove them by hand.)")
+    } else {
+        String::new()
+    };
+    ctx.say(format!("{}{leftover}", check.message(&tournament))).await?;
+    Ok(())
+}
+
+/// Deletes the four channels `create` made, skipping the announce channel and the
+/// category. Best-effort per channel: one an admin already removed by hand must
+/// not block the rest, or the row delete that follows. Returns the failure count.
+async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> usize {
+    let created = [
+        ("register", tournament.register_channel_id),
+        ("bracket", tournament.bracket_channel_id),
+        ("draft", tournament.draft_channel_id),
+        ("matches", tournament.matches_channel_id),
+    ];
+
+    let mut failed = 0;
+    for (label, channel_id) in created {
+        let Some(channel_id) = channel_id else {
+            continue;
+        };
+        let channel_id = ChannelId::new(u64::try_from(channel_id).unwrap());
+        if let Err(err) = channel_id.delete(ctx.http()).await {
+            error!(
+                "failed to delete the {label} channel {channel_id} of tournament {}: {err:?}",
+                tournament.id
+            );
+            failed += 1;
+        }
+    }
+    failed
 }
 
 #[cfg(test)]

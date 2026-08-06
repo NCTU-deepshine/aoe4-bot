@@ -53,7 +53,8 @@ pub(crate) fn decide(user_id: i64, created_by: i64, is_admin: bool, has_manage_g
     }
 }
 
-/// Command check for `/tournament admin add|remove|list`. Resolves the
+/// Command check for `/tournament admin add|remove|list` and `/tournament delete`
+/// — the creator-only tier, tighter than `tournament_manage_only`. Resolves the
 /// tournament from the invoking channel — matching ANY of its five stored
 /// channel ids, not a slug argument (docs/tournament.md §8.2's admin-resolution
 /// gap: every reply here is ephemeral, so there's no clutter cost to letting an
@@ -81,7 +82,7 @@ pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Erro
     }
     ephemeral(
         ctx,
-        "Only the tournament's creator (or a member with Manage Guild) can manage its admin list.",
+        "Only the tournament's creator (or a member with Manage Guild) can do that.",
     )
     .await?;
     Ok(false)

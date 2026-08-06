@@ -37,6 +37,8 @@ pub(crate) mod render;
 pub(crate) mod registration;
 // `/tournament create`'s slug argument (§8.1).
 pub(crate) mod slug;
+// `/tournament delete`'s guards (chunk 26, §8.4) — pure, like `access::decide`.
+pub(crate) mod teardown;
 // The panel-edit throttle (§8.5, "Edits must be throttled"). Consumed by
 // chunk 9's registration panel (`panel::refresh`).
 pub(crate) mod throttle;

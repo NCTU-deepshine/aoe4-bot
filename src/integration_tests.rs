@@ -1272,4 +1272,128 @@ mod tests {
             .unwrap();
         assert!(entries.iter().all(|e| e.seed.is_none() && e.suggested_seed.is_none()));
     }
+
+    // Chunk 26 (/tournament delete) gate tests.
+
+    /// A tournament with a row in every table that references it, so a delete has
+    /// something to cascade into at each level.
+    async fn setup_fully_populated_tournament(pool: &SqlitePool, slug: &str, user_id: i64) -> i64 {
+        let tournament_id = crate::tournament::db::insert_tournament(pool, slug, "Name", user_id)
+            .await
+            .unwrap();
+        crate::tournament::db::add_admin(pool, tournament_id, user_id, user_id)
+            .await
+            .unwrap();
+        crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(pool, tournament_id, user_id, user_id * 100, "P")
+            .await
+            .unwrap();
+        crate::tournament::db::upsert_bracket_message(pool, tournament_id, 1, 555)
+            .await
+            .unwrap();
+
+        let stage_id = crate::tournament::db::insert_stage(pool, tournament_id, 1, "Main Bracket", "single_elim")
+            .await
+            .unwrap();
+        let round_id = crate::tournament::db::insert_round(pool, stage_id, 1, "Final", 3, None)
+            .await
+            .unwrap();
+        let set_id = crate::tournament::db::insert_set(pool, tournament_id, round_id, 1, None, None, "pending")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_game(
+            pool,
+            crate::tournament::db::NewGame {
+                set_id,
+                game_number: 1,
+                map: None,
+                slot1_civ: None,
+                slot2_civ: None,
+                winner_user_id: None,
+                status: "pending".to_string(),
+                source: "manual".to_string(),
+                reported_by: None,
+                reported_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        tournament_id
+    }
+
+    /// `table` only ever comes from `TOURNAMENT_SCOPED_TABLES` below — literals,
+    /// with nothing external reaching the string.
+    async fn count(pool: &SqlitePool, table: &str) -> i64 {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    const TOURNAMENT_SCOPED_TABLES: [&str; 8] = [
+        "tournaments",
+        "tournament_admins",
+        "tournament_entries",
+        "tournament_bracket_messages",
+        "tournament_stages",
+        "tournament_rounds",
+        "tournament_sets",
+        "tournament_games",
+    ];
+
+    #[tokio::test]
+    async fn delete_tournament_cascades_to_every_tournament_scoped_table() {
+        let pool = test_pool().await;
+        let tournament_id = setup_fully_populated_tournament(&pool, "relic-cup", 1).await;
+        for table in TOURNAMENT_SCOPED_TABLES {
+            assert_eq!(count(&pool, table).await, 1, "{table} should be populated up front");
+        }
+
+        crate::tournament::db::delete_tournament(&pool, tournament_id)
+            .await
+            .unwrap();
+
+        for table in TOURNAMENT_SCOPED_TABLES {
+            assert_eq!(count(&pool, table).await, 0, "{table} should have been cascaded away");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_tournament_leaves_the_global_player_binding_intact() {
+        let pool = test_pool().await;
+        let tournament_id = setup_fully_populated_tournament(&pool, "relic-cup", 1).await;
+
+        crate::tournament::db::delete_tournament(&pool, tournament_id)
+            .await
+            .unwrap();
+
+        // The Discord↔aoe4world binding is global (§4) — it must outlive any one
+        // tournament, or a returning player would have to rebind.
+        assert_eq!(count(&pool, "tournament_players").await, 1);
+        let player = crate::tournament::db::get_player(&pool, 1).await.unwrap();
+        assert!(player.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_tournament_leaves_other_tournaments_untouched() {
+        let pool = test_pool().await;
+        let doomed = setup_fully_populated_tournament(&pool, "relic-cup", 1).await;
+        let survivor = setup_fully_populated_tournament(&pool, "other-cup", 2).await;
+
+        crate::tournament::db::delete_tournament(&pool, doomed).await.unwrap();
+
+        // One row left everywhere, not zero — the assertion that catches a delete
+        // that forgot its where clause.
+        for table in TOURNAMENT_SCOPED_TABLES {
+            assert_eq!(count(&pool, table).await, 1, "{table} should still hold the survivor");
+        }
+        assert!(
+            crate::tournament::db::get_tournament(&pool, survivor)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
 }
