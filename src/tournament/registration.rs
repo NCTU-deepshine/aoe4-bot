@@ -111,15 +111,18 @@ impl RegisterOutcome {
                 ),
             ),
             RegisterOutcome::NeedsProfileArgument => locale.pick(
-                "你還沒有綁定任何帳號 — 第一次報名請用 `/tournament register aoe4_id:<profile>` 指定綁定aoe4帳號進行報名。".to_string(),
-                "You haven't registered a profile yet — please use `/tournament register aoe4_id:<profile>` only for the first time to bind your aoe4 account and sign up."
+                "第一次報名需要先連結你的遊戲帳號：請用 `/tournament register`，在欄位輸入你的遊戲名稱，\
+                 然後從清單中選擇自己。之後再報名就不用了。"
+                    .to_string(),
+                "Signing up for the first time needs your game account: use `/tournament register`, type your \
+                 in-game name in the field, and pick yourself from the list. You won't need to do this again."
                     .to_string(),
             ),
             RegisterOutcome::AlreadyBoundToDifferentProfile { display_name } => locale.pick(
-                format!("你已經綁定 **{display_name}**。想更換帳號請用 `/tournament rebind`。"),
+                format!("你的帳號已經連結到 **{display_name}**，直接報名就可以了。要換成別的遊戲帳號請用 `/tournament rebind`。"),
                 format!(
-                    "You're already bound to **{display_name}**. Use `/tournament rebind` if you want to change \
-                     your profile."
+                    "Your account is already linked to **{display_name}**, so just sign up. Use \
+                     `/tournament rebind` if you want to link a different game account."
                 ),
             ),
             RegisterOutcome::ProfileClaimedByAnother {
@@ -140,8 +143,9 @@ impl RegisterOutcome {
                     .to_string(),
             ),
             RegisterOutcome::LookupFailed => locale.pick(
-                "找不到這個 aoe4 帳號 — 請確認 id 後再試一次。".to_string(),
-                "Couldn't find that aoe4 profile — double-check the id and try again.".to_string(),
+                "找不到這個遊戲帳號 — 請重新輸入遊戲名稱，並從清單中選擇。".to_string(),
+                "Couldn't find that game account — type the in-game name again and pick it from the list."
+                    .to_string(),
             ),
             RegisterOutcome::RegistrationClosed => locale.pick(
                 format!("**{tournament_name}** 的報名已經結束。"),
@@ -324,8 +328,8 @@ impl RebindOutcome {
                 )
             },
             RebindOutcome::NoExistingProfile => locale.pick(
-                "你還沒有在任何賽事報名過 — 請先用 `/tournament register aoe4_id:<profile>`。".to_string(),
-                "You haven't registered anywhere yet — use `/tournament register aoe4_id:<profile>` first.".to_string(),
+                "你還沒有連結任何遊戲帳號 — 請先用 `/tournament register` 報名一次。".to_string(),
+                "You haven't linked a game account yet — sign up once with `/tournament register` first.".to_string(),
             ),
             RebindOutcome::ProfileClaimedByAnother { other_user_id } => locale.pick(
                 format!("這個帳號已經綁定給 <@{other_user_id}>。"),
@@ -336,8 +340,8 @@ impl RebindOutcome {
                 "You can't rebind while you have an entry in a running tournament. Ask an admin for help.".to_string(),
             ),
             RebindOutcome::LookupFailed => locale.pick(
-                "找不到這個 aoe4 帳號 — 請確認 id 後再試一次。".to_string(),
-                "Couldn't find that aoe4 profile — double-check the id and try again.".to_string(),
+                "找不到這個遊戲帳號 — 請重新輸入遊戲名稱，並從清單中選擇。".to_string(),
+                "Couldn't find that game account — type the in-game name again and pick it from the list.".to_string(),
             ),
         }
     }
@@ -400,6 +404,23 @@ mod tests {
         assert!(en.contains("You've withdrawn"), "{en}");
         // The tournament name is data, not text — it is not translated.
         assert!(zh.contains("Relic Cup") && en.contains("Relic Cup"));
+    }
+
+    #[test]
+    fn the_first_timer_message_describes_the_actual_flow() {
+        // The message testers got stuck on. It must teach "type your name and
+        // pick from the list" — not an id, and not the word "profile", which
+        // could mean their Discord profile just as easily.
+        for locale in [Locale::ZhTw, Locale::En] {
+            let message = RegisterOutcome::NeedsProfileArgument.message("Relic Cup", locale);
+            assert!(message.contains("/tournament register"), "{message}");
+            assert!(!message.contains("aoe4_id"), "must not name the option: {message}");
+            assert!(!message.to_lowercase().contains("profile"), "{message}");
+        }
+        let zh = RegisterOutcome::NeedsProfileArgument.message("Relic Cup", Locale::ZhTw);
+        let en = RegisterOutcome::NeedsProfileArgument.message("Relic Cup", Locale::En);
+        assert!(zh.contains("遊戲名稱"), "{zh}");
+        assert!(en.contains("in-game name"), "{en}");
     }
 
     #[test]

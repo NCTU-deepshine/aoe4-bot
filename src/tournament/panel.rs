@@ -53,7 +53,9 @@ pub(crate) fn render(tournament_id: i64, name: &str, entries: &[TournamentEntry]
     let content = format!(
         "**{name} — 報名進行中 / registration is OPEN**\n\
          單淘汰 · 開賽前需簽到\n\
-         Single elimination · check-in required before start\n\n\
+         Single elimination · check-in required before start\n\
+         第一次報名？請用 `/tournament register` 並輸入你的遊戲名稱。\n\
+         First time? Use `/tournament register` and type your in-game name.\n\n\
          **已報名 / Registered ({})**\n{roster}",
         active.len()
     );
@@ -177,6 +179,17 @@ mod tests {
         assert!(content.contains("報名進行中"));
         assert!(content.contains("registration is OPEN"));
         assert!(content.contains("已報名 / Registered (1)"));
+    }
+
+    #[test]
+    fn tells_first_timers_what_to_do_before_they_press_the_button() {
+        // The Register button cannot serve a first-timer — it carries no name —
+        // so the panel has to say so up front rather than let them hit the
+        // refusal and go hunting for a command.
+        let (content, _) = render(1, "Relic Cup", &[]);
+        assert!(content.contains("第一次報名？"), "{content}");
+        assert!(content.contains("First time?"), "{content}");
+        assert!(content.contains("/tournament register"));
     }
 
     #[test]

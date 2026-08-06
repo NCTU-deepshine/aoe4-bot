@@ -888,8 +888,8 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 |---|---|---|
 | `/tournament create name slug` | Manage Guild | Creates channels; registers creator as admin |
 | `/tournament admin add\|remove\|list` | creator | Manage the admin list |
-| `/tournament register [aoe4_id]` | anyone | `aoe4_id` on a first sign-up only, autocompleted · also a button |
-| `/tournament rebind aoe4_id` | anyone | Change your main profile; refused during a running event |
+| `/tournament register [in_game_name]` | anyone | Autocompleted by in-game name, first sign-up only · also a button |
+| `/tournament rebind in_game_name` | anyone | Change which game account you're linked to; refused during a running event |
 | `/tournament withdraw` | anyone | Before start only · also a button |
 | `/tournament open-checkin [minutes]` | admin | Posts the check-in panel |
 | `/tournament checkin` | anyone | Self check-in · also a button |
@@ -1246,9 +1246,15 @@ home-only. `errors.rs` answers *any* failed command in either guild, and `guilds
 in both. Leaving them would mean an English-speaking entrant getting a Chinese error from a bilingual feature.
 **Not** in scope:
 
-- Slash command names and descriptions — Discord has its own static localization for these
-  (`name_localizations`/`description_localizations`), a different code path from runtime reply text, and out of
-  scope here.
+- Slash command **names** — deliberately, not by omission. Discord's `name_localizations` changes what the user
+  actually types, so a localized name breaks the commonest way people help each other: one tester telling
+  another to "run `/tournament register`" would send them looking for a command they cannot see. Names stay
+  canonical English.
+
+  Command and option **descriptions** are localized, via Discord's static `description_localizations` rather
+  than through `Locale` — a different code path, resolved by Discord at render time. They carry essentially all
+  of the command surface's explanatory text and none of the name risk. Added for the player-facing commands
+  after testers reported reading Chinese replies to an English form; the admin commands can follow.
 - The home guild's own commands and their hardcoded Chinese (`/查分`, `/rebuild`, `/refresh`, `bind`'s
   subcommands) — untouched. The distinction from `errors.rs`/`guilds.rs` above is which guilds the text can
   actually appear in, not which file it happens to live in.

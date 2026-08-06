@@ -103,7 +103,41 @@ pub async fn rebuild(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-async fn auto_complete_id(_ctx: Context<'_>, username: &str) -> impl Iterator<Item = AutocompleteChoice> {
+/// The value a hint choice carries. Discord requires a choice's value to match
+/// the option's type, so the hint cannot be valueless; callers treat this as
+/// "nothing was actually picked" rather than looking up profile id 0.
+pub(crate) const NO_PROFILE_PICKED: i32 = 0;
+
+/// The hint choice is selectable like any other, so every caller has to treat it
+/// as "nothing was entered" rather than as profile id 0 — which would otherwise
+/// bind someone to a profile that does not exist.
+fn picked_profile(aoe4_id: i32) -> Option<i32> {
+    (aoe4_id != NO_PROFILE_PICKED).then_some(aoe4_id)
+}
+
+/// Shared by every command using `auto_complete_id`, so submitting the hint says
+/// the same thing whichever guild you are in.
+async fn ask_for_in_game_name(ctx: Context<'_>) -> Result<(), Error> {
+    ephemeral(
+        ctx,
+        Locale::from_context(ctx).pick(
+            "請輸入你的遊戲名稱，然後從清單中選擇。",
+            "Type your in-game name, then pick it from the list.",
+        ),
+    )
+    .await
+}
+
+async fn auto_complete_id(ctx: Context<'_>, username: &str) -> impl Iterator<Item = AutocompleteChoice> {
+    // Discord fires an autocomplete the moment the option is focused, before a
+    // single keystroke. Searching for "" returns nothing useful, so the empty
+    // dropdown used to appear at exactly the moment the user needed telling what
+    // to type — and cost a request to say nothing.
+    if username.trim().is_empty() {
+        let hint = Locale::from_context(ctx).pick("請輸入你的遊戲名稱…", "Type your in-game name…");
+        return vec![AutocompleteChoice::new(hint, json!(NO_PROFILE_PICKED))].into_iter();
+    }
+
     info!("search aoe4 world profiles with username {}", username);
     let mut players = match search_players(username).await {
         None => vec![],
@@ -120,15 +154,22 @@ async fn auto_complete_id(_ctx: Context<'_>, username: &str) -> impl Iterator<It
             ))
         })
         .take(10)
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 #[poise::command(slash_command, guild_only, check = "home_only")]
 pub async fn name(
     ctx: Context<'_>,
-    #[description = "遊戲ID"]
+    #[description = "Type your in-game name and pick yourself from the list"]
+    #[description_localized("zh-TW", "輸入你的遊戲內名稱，然後從清單中選擇自己")]
     #[autocomplete = "auto_complete_id"]
-    aoe4_id: i32,
+    in_game_name: i32,
 ) -> Result<(), Error> {
+    let Some(aoe4_id) = picked_profile(in_game_name) else {
+        ask_for_in_game_name(ctx).await?;
+        return Ok(());
+    };
     info!("attempting to bind id {}", aoe4_id);
     let user_id = ctx.author().id;
     info!("binding discord user {} with aoe4 player {}", user_id, aoe4_id);
@@ -144,10 +185,15 @@ pub async fn name(
 #[poise::command(slash_command, guild_only, check = "home_only", rename = "查分")]
 pub async fn check(
     ctx: Context<'_>,
-    #[description = "遊戲ID"]
+    #[description = "Type an in-game name and pick the player from the list"]
+    #[description_localized("zh-TW", "輸入遊戲內名稱，然後從清單中選擇玩家")]
     #[autocomplete = "auto_complete_id"]
-    aoe4_id: i32,
+    in_game_name: i32,
 ) -> Result<(), Error> {
+    let Some(aoe4_id) = picked_profile(in_game_name) else {
+        ask_for_in_game_name(ctx).await?;
+        return Ok(());
+    };
     info!("attempting to check id {}", aoe4_id);
     ctx.defer().await?;
     let Some(player) = try_create_ranked_without_account(aoe4_id).await else {
@@ -524,13 +570,19 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
 // also binds an aoe4world profile; there is no separate bind step
 // (docs/tournament.md §8.5). Only ELO is snapshotted here — ATR is a bulk
 // seeding-time fetch (chunk 11, §6 "Reuse"), not a per-registrant one.
-/// Registers you for the tournament. Give `aoe4_id` only on your first ever sign-up.
-#[poise::command(slash_command, guild_only, check = "tournament_only")]
+/// Registers you for the tournament. First time? Type your in-game name below.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    description_localized("zh-TW", "報名這場賽事。第一次報名的話，請在下面輸入你的遊戲名稱。")
+)]
 pub async fn register(
     ctx: Context<'_>,
-    #[description = "Your aoe4world profile — required on your first ever sign-up only"]
+    #[description = "Type your in-game name and pick yourself from the list — first sign-up only"]
+    #[description_localized("zh-TW", "輸入你的遊戲名稱，然後從清單中選擇自己 — 只有第一次報名需要")]
     #[autocomplete = "auto_complete_id"]
-    aoe4_id: Option<i32>,
+    in_game_name: Option<i32>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
@@ -540,7 +592,8 @@ pub async fn register(
 
     let pool = &ctx.data().database;
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
-    let outcome = registration::register(pool, &tournament, user_id, aoe4_id.map(i64::from)).await?;
+    let picked = in_game_name.and_then(picked_profile);
+    let outcome = registration::register(pool, &tournament, user_id, picked.map(i64::from)).await?;
     audit::log_action("register", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
 
@@ -552,21 +605,31 @@ pub async fn register(
 
 // Tournament-independent — the player list is global (§4), so unlike
 // register/withdraw this resolves no tournament by channel.
-/// Changes which aoe4world profile is bound to your Discord account.
-#[poise::command(slash_command, guild_only, check = "tournament_only")]
+/// Changes which game account your Discord account is linked to.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    description_localized("zh-TW", "更換你的 Discord 帳號所連結的遊戲帳號。")
+)]
 pub async fn rebind(
     ctx: Context<'_>,
-    #[description = "The aoe4world profile to bind instead"]
+    #[description = "Type the in-game name to link instead, and pick it from the list"]
+    #[description_localized("zh-TW", "輸入要改連結的遊戲名稱，然後從清單中選擇")]
     #[autocomplete = "auto_complete_id"]
-    aoe4_id: i32,
+    in_game_name: i32,
 ) -> Result<(), Error> {
     let locale = Locale::from_context(ctx);
     ctx.defer_ephemeral().await?;
+    let Some(in_game_name) = picked_profile(in_game_name) else {
+        ask_for_in_game_name(ctx).await?;
+        return Ok(());
+    };
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
-    let outcome = registration::rebind(&ctx.data().database, user_id, i64::from(aoe4_id)).await?;
+    let outcome = registration::rebind(&ctx.data().database, user_id, i64::from(in_game_name)).await?;
     // No tournament to name — the player list is global (see the note above).
     info!(
-        "rebind by {} ({user_id}) to aoe4 id {aoe4_id}: {outcome:?}",
+        "rebind by {} ({user_id}) to aoe4 id {in_game_name}: {outcome:?}",
         ctx.author().name
     );
     ephemeral(ctx, outcome.message(locale)).await?;
@@ -574,7 +637,12 @@ pub async fn rebind(
 }
 
 /// Withdraws you from the tournament, before it has started.
-#[poise::command(slash_command, guild_only, check = "tournament_only")]
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    description_localized("zh-TW", "在賽事開始前退出報名。")
+)]
 pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
@@ -644,7 +712,13 @@ pub async fn open_checkin(
 // `check_in` in Rust to avoid colliding with the `checkin` module import;
 // `rename` keeps the Discord-visible command `/tournament checkin`.
 /// Checks you in, once check-in has opened.
-#[poise::command(slash_command, guild_only, check = "tournament_only", rename = "checkin")]
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    rename = "checkin",
+    description_localized("zh-TW", "在簽到開放後完成簽到。")
+)]
 pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
