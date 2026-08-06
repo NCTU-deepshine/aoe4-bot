@@ -1,5 +1,5 @@
 use crate::guilds::{Feature, Guilds};
-use rand::Rng;
+use rand::RngExt;
 use serenity::all::{EmojiId, Message, Reaction, ReactionType, Ready, UserId};
 use serenity::async_trait;
 use serenity::prelude::*;

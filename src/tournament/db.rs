@@ -7,7 +7,7 @@
 
 use crate::tournament::bracket::Slot;
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{AssertSqlSafe, FromRow, SqlitePool};
 use tracing::error;
 
 fn log_db_error(err: &sqlx::Error) {
@@ -843,13 +843,13 @@ pub(crate) async fn insert_set(
 }
 
 pub(crate) async fn get_set(pool: &SqlitePool, id: i64) -> Result<Option<TournamentSet>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(AssertSqlSafe(format!(
         r"
         select {TOURNAMENT_SET_COLUMNS}
         from tournament_sets
         where id = ?1
         "
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -861,14 +861,14 @@ pub(crate) async fn get_set_by_position(
     round_id: i64,
     position: i64,
 ) -> Result<Option<TournamentSet>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(AssertSqlSafe(format!(
         r"
         select {TOURNAMENT_SET_COLUMNS}
         from tournament_sets
         where round_id = ?1
           and position = ?2
         "
-    ))
+    )))
     .bind(round_id)
     .bind(position)
     .fetch_optional(pool)
@@ -877,14 +877,14 @@ pub(crate) async fn get_set_by_position(
 }
 
 pub(crate) async fn list_sets_for_round(pool: &SqlitePool, round_id: i64) -> Result<Vec<TournamentSet>, sqlx::Error> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(AssertSqlSafe(format!(
         r"
         select {TOURNAMENT_SET_COLUMNS}
         from tournament_sets
         where round_id = ?1
         order by position
         "
-    ))
+    )))
     .bind(round_id)
     .fetch_all(pool)
     .await
