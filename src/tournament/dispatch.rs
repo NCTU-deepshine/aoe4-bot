@@ -8,6 +8,7 @@
 //! the slash commands in `commands.rs`, which resolve it from the invoking
 //! channel.
 
+use crate::db::to_db_id;
 use crate::guilds::{Feature, Guilds};
 use crate::locale::Locale;
 use crate::tournament::action::{self, Action};
@@ -83,7 +84,7 @@ impl Dispatcher {
             return;
         };
 
-        let user_id = i64::try_from(component.user.id.get()).unwrap();
+        let user_id = to_db_id(component.user.id);
         let outcome = match registration::register(&self.pool, &tournament, user_id, None).await {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -124,7 +125,7 @@ impl Dispatcher {
             return;
         };
 
-        let user_id = i64::try_from(component.user.id.get()).unwrap();
+        let user_id = to_db_id(component.user.id);
         let outcome = match registration::withdraw(&self.pool, &tournament, user_id).await {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -163,7 +164,7 @@ impl Dispatcher {
             return;
         };
 
-        let user_id = i64::try_from(component.user.id.get()).unwrap();
+        let user_id = to_db_id(component.user.id);
         let outcome = match checkin::checkin(&self.pool, &tournament, user_id).await {
             Ok(outcome) => outcome,
             Err(err) => {

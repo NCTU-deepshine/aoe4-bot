@@ -1,5 +1,5 @@
 use crate::aoe4world::search_players;
-use crate::db::{bind_account, to_db_id};
+use crate::db::{bind_account, to_channel_id, to_db_id, to_message_id};
 use crate::guilds::{home_only, tournament_only};
 use crate::locale::Locale;
 use crate::ranked::try_create_ranked_without_account;
@@ -18,7 +18,7 @@ use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use regex::Regex;
 use serenity::all::{
-    AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, MessageId, PermissionOverwrite,
+    AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, PermissionOverwrite,
     PermissionOverwriteType, Permissions, RoleId, User, UserId,
 };
 use serenity::json::json;
@@ -324,7 +324,7 @@ pub async fn create(
     }
 
     let pool = &ctx.data().database;
-    let announce_channel_id = i64::try_from(announce_channel.id.get()).unwrap();
+    let announce_channel_id = to_db_id(announce_channel.id);
     if let Some(existing) = tournament_db::get_live_tournament_by_announce_channel(pool, announce_channel_id).await? {
         ephemeral(
             ctx,
@@ -362,18 +362,18 @@ pub async fn create(
     let draft = create_tournament_channel(ctx, &format!("{slug}-draft"), category_id, read_only.clone()).await?;
     let matches = create_tournament_channel(ctx, &format!("{slug}-matches"), category_id, read_only).await?;
 
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
     let tournament_id = tournament_db::insert_tournament(pool, &slug, &name, user_id).await?;
     tournament_db::set_tournament_channels(
         pool,
         tournament_id,
         tournament_db::TournamentChannels {
-            category_id: category_id.map(|id| i64::try_from(id.get()).unwrap()),
+            category_id: category_id.map(to_db_id),
             announce_channel_id,
-            register_channel_id: i64::try_from(register.id.get()).unwrap(),
-            bracket_channel_id: i64::try_from(bracket.id.get()).unwrap(),
-            matches_channel_id: i64::try_from(matches.id.get()).unwrap(),
-            draft_channel_id: i64::try_from(draft.id.get()).unwrap(),
+            register_channel_id: to_db_id(register.id),
+            bracket_channel_id: to_db_id(bracket.id),
+            matches_channel_id: to_db_id(matches.id),
+            draft_channel_id: to_db_id(draft.id),
         },
     )
     .await?;
@@ -388,8 +388,7 @@ pub async fn create(
         .await?
         .map_or(32, |t| t.entrant_cap);
     let register_message_id = panel::post_initial(ctx.http(), register.id, tournament_id, &name, cap).await?;
-    tournament_db::set_register_message_id(pool, tournament_id, i64::try_from(register_message_id.get()).unwrap())
-        .await?;
+    tournament_db::set_register_message_id(pool, tournament_id, to_db_id(register_message_id)).await?;
 
     // The record a later `/tournament delete` is audited against: what existed,
     // and which channels were ours to remove.
@@ -493,7 +492,7 @@ pub async fn admin(_: Context<'_>) -> Result<(), Error> {
 /// isn't one** — every caller refused identically, so the reply lives here rather
 /// than in eight copies. `None` therefore means "already handled, just return".
 async fn resolve_tournament_by_channel(ctx: Context<'_>) -> Result<Option<tournament_db::Tournament>, Error> {
-    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    let channel_id = to_db_id(ctx.channel_id());
     let tournament = tournament_db::get_tournament_by_any_channel_id(&ctx.data().database, channel_id).await?;
     if tournament.is_none() {
         ephemeral(ctx, wrong_channel_message(Locale::from_context(ctx))).await?;
@@ -513,8 +512,8 @@ pub async fn add(ctx: Context<'_>, user: User) -> Result<(), Error> {
         return Ok(());
     };
 
-    let added_by = i64::try_from(ctx.author().id.get()).unwrap();
-    let target = i64::try_from(user.id.get()).unwrap();
+    let added_by = to_db_id(ctx.author().id);
+    let target = to_db_id(user.id);
     tournament_db::add_admin(&ctx.data().database, tournament.id, target, added_by).await?;
     info!(
         "admin add on tournament {} ({}) by {} ({added_by}): added {} ({target})",
@@ -546,8 +545,8 @@ pub async fn remove(ctx: Context<'_>, user: User) -> Result<(), Error> {
         return Ok(());
     };
 
-    let removed_by = i64::try_from(ctx.author().id.get()).unwrap();
-    let target = i64::try_from(user.id.get()).unwrap();
+    let removed_by = to_db_id(ctx.author().id);
+    let target = to_db_id(user.id);
     tournament_db::remove_admin(&ctx.data().database, tournament.id, target).await?;
     info!(
         "admin remove on tournament {} ({}) by {} ({removed_by}): removed {} ({target})",
@@ -626,7 +625,7 @@ pub async fn register(
     };
 
     let pool = &ctx.data().database;
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
     let picked = in_game_name.and_then(picked_profile);
     let outcome = registration::register(pool, &tournament, user_id, picked.map(i64::from)).await?;
     audit::log_action("register", tournament.id, &tournament.slug, ctx.author(), &outcome);
@@ -664,7 +663,7 @@ pub async fn rebind(
         ask_for_in_game_name(ctx).await?;
         return Ok(());
     };
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
     let outcome = registration::rebind(&ctx.data().database, user_id, i64::from(in_game_name)).await?;
     // No tournament to name — the player list is global (see the note above).
     info!(
@@ -687,7 +686,7 @@ pub async fn rebind(
 pub async fn unbind(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
 
     let outcome = registration::unbind(&ctx.data().database, user_id).await?;
     info!("unbind by {} ({user_id}): {outcome:?}", ctx.author().name);
@@ -709,7 +708,7 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
     };
 
     let pool = &ctx.data().database;
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
     let outcome = registration::withdraw(pool, &tournament, user_id).await?;
     audit::log_action("withdraw", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
@@ -751,7 +750,7 @@ pub async fn open_checkin(
 
     if let checkin::OpenCheckinOutcome::Opened { closes_at } = outcome {
         // Always set by `create()` when the tournament was made.
-        let register_channel_id = ChannelId::new(u64::try_from(tournament.register_channel_id.unwrap()).unwrap());
+        let register_channel_id = to_channel_id(tournament.register_channel_id.unwrap());
         let message_id = checkin_panel::post_initial(
             ctx.http(),
             pool,
@@ -762,8 +761,7 @@ pub async fn open_checkin(
             true,
         )
         .await?;
-        tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
-            .await?;
+        tournament_db::set_checkin_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
 
         // Registration closes here (§8.3), so the panel must stop inviting
         // sign-ups the gate would now refuse. Re-read: the status has moved.
@@ -792,7 +790,7 @@ pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
     };
 
     let pool = &ctx.data().database;
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
     let outcome = checkin::checkin(pool, &tournament, user_id).await?;
     audit::log_action("checkin", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
@@ -854,7 +852,7 @@ async fn seed_and_post_panel(
     let Some(bracket_channel_id) = tournament.bracket_channel_id else {
         return Ok(String::new());
     };
-    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+    let channel_id = to_channel_id(bracket_channel_id);
 
     // A tournament reopened and re-closed already has a panel; edit rather than
     // stacking a second one in the channel.
@@ -863,7 +861,7 @@ async fn seed_and_post_panel(
     } else {
         let message_id =
             seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await?;
-        tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap())).await?;
+        tournament_db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
     }
 
     Ok(outcome.message(&tournament.name, locale))
@@ -919,8 +917,8 @@ async fn delete_checkin_panel(ctx: Context<'_>, tournament: &tournament_db::Tour
         return;
     };
 
-    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
-    let message_id = MessageId::new(u64::try_from(checkin_message_id).unwrap());
+    let channel_id = to_channel_id(register_channel_id);
+    let message_id = to_message_id(checkin_message_id);
     if let Err(err) = channel_id.delete_message(ctx.http(), message_id).await {
         error!(
             "failed to delete the check-in panel for tournament {}: {err:?}",
@@ -1203,7 +1201,7 @@ async fn autocomplete_entrant(ctx: Context<'_>, partial: &str) -> impl Iterator<
     // `resolve_tournament_by_channel`, which replies when there isn't one — an
     // autocomplete must never send a message. No field, no suggestions.
     let pool = &ctx.data().database;
-    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    let channel_id = to_db_id(ctx.channel_id());
     let entries = match tournament_db::get_tournament_by_any_channel_id(pool, channel_id).await {
         Ok(Some(tournament)) => tournament_db::list_entries_for_tournament(pool, tournament.id)
             .await
@@ -1252,12 +1250,12 @@ pub async fn seed_list(ctx: Context<'_>) -> Result<(), Error> {
     let Some(bracket_channel_id) = tournament.bracket_channel_id else {
         return Ok(());
     };
-    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+    let channel_id = to_channel_id(bracket_channel_id);
 
     // Always a fresh post rather than an edit: the point of `list` is to bring a
     // buried or deleted panel back into view, which editing in place cannot do.
     let message_id = seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await?;
-    tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap())).await?;
+    tournament_db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
 
     ephemeral(
         ctx,
@@ -1369,8 +1367,8 @@ async fn delete_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournam
         return;
     };
 
-    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
-    let message_id = MessageId::new(u64::try_from(seed_message_id).unwrap());
+    let channel_id = to_channel_id(bracket_channel_id);
+    let message_id = to_message_id(seed_message_id);
     if let Err(err) = channel_id.delete_message(ctx.http(), message_id).await {
         error!(
             "failed to delete the seeding panel for tournament {}: {err:?}",
@@ -1492,7 +1490,7 @@ async fn refresh_register_panel(
             .to_string());
     }
 
-    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+    let channel_id = to_channel_id(register_channel_id);
     match panel::post_initial(
         ctx.http(),
         channel_id,
@@ -1503,8 +1501,7 @@ async fn refresh_register_panel(
     .await
     {
         Ok(message_id) => {
-            tournament_db::set_register_message_id(pool, tournament.id, i64::try_from(message_id.get()).unwrap())
-                .await?;
+            tournament_db::set_register_message_id(pool, tournament.id, to_db_id(message_id)).await?;
             Ok(locale
                 .pick("報名面板：已重新張貼。", "Registration panel: reposted.")
                 .to_string())
@@ -1552,7 +1549,7 @@ async fn refresh_checkin_panel(
             .to_string());
     }
 
-    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+    let channel_id = to_channel_id(register_channel_id);
     match checkin_panel::post_initial(
         ctx.http(),
         pool,
@@ -1566,8 +1563,7 @@ async fn refresh_checkin_panel(
     .await
     {
         Ok(message_id) => {
-            tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
-                .await?;
+            tournament_db::set_checkin_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
             Ok(locale
                 .pick("簽到面板：已重新張貼。", "Check-in panel: reposted.")
                 .to_string())
@@ -1609,11 +1605,10 @@ async fn refresh_seed_panel(
         return Ok(locale.pick("種子名單：已更新。", "Seeding panel: updated.").to_string());
     }
 
-    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+    let channel_id = to_channel_id(bracket_channel_id);
     match seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await {
         Ok(message_id) => {
-            tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
-                .await?;
+            tournament_db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
             Ok(locale
                 .pick("種子名單：已重新張貼。", "Seeding panel: reposted.")
                 .to_string())
@@ -1650,7 +1645,7 @@ async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_d
     .into_iter()
     .flatten()
     {
-        let channel_id = ChannelId::new(u64::try_from(channel_id).unwrap());
+        let channel_id = to_channel_id(channel_id);
         for overwrite in &overwrites {
             if let Err(err) = channel_id.create_permission(ctx.http(), overwrite.clone()).await {
                 error!("failed to reapply permissions on channel {channel_id}: {err:?}");
@@ -1719,7 +1714,7 @@ pub async fn delete(
         return Ok(());
     };
 
-    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    let channel_id = to_db_id(ctx.channel_id());
     let check = teardown::check_delete(&tournament, &confirm, channel_id);
     audit::log_action("delete", tournament.id, &tournament.slug, ctx.author(), &check);
     if check != teardown::DeleteCheck::Ok {
@@ -1773,7 +1768,7 @@ async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db
         let Some(channel_id) = channel_id else {
             continue;
         };
-        let channel_id = ChannelId::new(u64::try_from(channel_id).unwrap());
+        let channel_id = to_channel_id(channel_id);
         if let Err(err) = channel_id.delete(ctx.http()).await {
             error!(
                 "failed to delete the {label} channel {channel_id} of tournament {}: {err:?}",

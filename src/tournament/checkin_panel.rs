@@ -6,6 +6,7 @@
 //! `dispatch.rs` use.
 
 use crate::Error;
+use crate::db::{to_channel_id, to_message_id};
 use crate::tournament::action::Action;
 use crate::tournament::checkin::checkin_counts;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
@@ -100,7 +101,7 @@ pub(crate) async fn refresh(
         return Ok(());
     };
 
-    let message_id = MessageId::new(u64::try_from(checkin_message_id).unwrap());
+    let message_id = to_message_id(checkin_message_id);
     if !throttle.try_begin_edit(message_id, Instant::now()) {
         return Ok(());
     }
@@ -118,7 +119,7 @@ pub(crate) async fn close(http: impl CacheHttp, pool: &SqlitePool, tournament: &
         return Ok(());
     };
 
-    let message_id = MessageId::new(u64::try_from(checkin_message_id).unwrap());
+    let message_id = to_message_id(checkin_message_id);
     edit(http, pool, register_channel_id, message_id, tournament, false).await
 }
 
@@ -132,7 +133,7 @@ pub(crate) async fn refresh_now(http: impl CacheHttp, pool: &SqlitePool, tournam
         return Ok(());
     };
 
-    let message_id = MessageId::new(u64::try_from(checkin_message_id).unwrap());
+    let message_id = to_message_id(checkin_message_id);
     let open = crate::tournament::checkin::checkin_is_open(&tournament.status);
     edit(http, pool, register_channel_id, message_id, tournament, open).await
 }
@@ -154,7 +155,7 @@ async fn edit(
         open,
     );
 
-    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+    let channel_id = to_channel_id(register_channel_id);
     channel_id
         .edit_message(
             http,

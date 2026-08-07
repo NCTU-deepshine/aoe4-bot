@@ -9,6 +9,7 @@
 //! the same reason those two are (§8.10) — one shared message, many readers.
 
 use crate::Error;
+use crate::db::{to_channel_id, to_message_id};
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use crate::tournament::seeding::display_order;
 use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
@@ -80,11 +81,11 @@ pub(crate) async fn refresh(http: impl CacheHttp, pool: &SqlitePool, tournament:
     };
 
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+    let channel_id = to_channel_id(bracket_channel_id);
     channel_id
         .edit_message(
             http,
-            MessageId::new(u64::try_from(seed_message_id).unwrap()),
+            to_message_id(seed_message_id),
             EditMessage::new().content(render(&tournament.name, &entries)),
         )
         .await?;

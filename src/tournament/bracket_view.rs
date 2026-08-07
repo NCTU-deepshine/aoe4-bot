@@ -11,10 +11,11 @@
 //! messages, which is what `reconcile` is about.
 
 use crate::Error;
+use crate::db::{to_channel_id, to_db_id, to_message_id};
 use crate::tournament::db::{self, Tournament, TournamentEntry, TournamentRound, TournamentSet};
 use crate::tournament::seeding;
 use crate::tournament::{bracket, render};
-use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
+use serenity::all::{CacheHttp, CreateMessage, EditMessage};
 use sqlx::SqlitePool;
 
 /// A bracket needs two sides; below that there is nothing to draw.
@@ -244,7 +245,7 @@ pub(crate) async fn reconcile(
     let Some(bracket_channel_id) = tournament.bracket_channel_id else {
         return Ok(ReconcileOutcome::NoChannel);
     };
-    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+    let channel_id = to_channel_id(bracket_channel_id);
 
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
     // Whether this is still a preview is the same question as which drawing we
@@ -268,7 +269,7 @@ pub(crate) async fn reconcile(
         let ordinal = i64::try_from(index).unwrap();
         match existing.iter().find(|m| m.ordinal == ordinal) {
             Some(message) => {
-                let message_id = MessageId::new(u64::try_from(message.message_id).unwrap());
+                let message_id = to_message_id(message.message_id);
                 channel_id
                     .edit_message(&http, message_id, EditMessage::new().content(chunk))
                     .await?;
@@ -278,8 +279,7 @@ pub(crate) async fn reconcile(
                 let message = channel_id
                     .send_message(&http, CreateMessage::new().content(chunk))
                     .await?;
-                db::upsert_bracket_message(pool, tournament.id, ordinal, i64::try_from(message.id.get()).unwrap())
-                    .await?;
+                db::upsert_bracket_message(pool, tournament.id, ordinal, to_db_id(message.id)).await?;
                 posted += 1;
             },
         }
@@ -288,7 +288,7 @@ pub(crate) async fn reconcile(
     // Anything past the last chunk belongs to a bracket that no longer exists.
     let surplus = i64::try_from(chunks.len()).unwrap();
     for message in existing.iter().filter(|m| m.ordinal >= surplus) {
-        let message_id = MessageId::new(u64::try_from(message.message_id).unwrap());
+        let message_id = to_message_id(message.message_id);
         // `delete_message` wants `AsRef<Http>` where the others take `CacheHttp`.
         if let Err(err) = channel_id.delete_message(http.http(), message_id).await {
             tracing::error!(

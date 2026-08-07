@@ -5,6 +5,7 @@
 //! functions around them do the one DB lookup and/or Discord permission fetch
 //! each decision actually needs.
 
+use crate::db::to_db_id;
 use crate::locale::Locale;
 use crate::reply::ephemeral;
 use crate::tournament::db;
@@ -62,14 +63,14 @@ pub(crate) fn decide(user_id: i64, created_by: i64, is_admin: bool, has_manage_g
 /// admin manage the list from wherever they already are) — then applies `decide`.
 pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Error> {
     let pool = &ctx.data().database;
-    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    let channel_id = to_db_id(ctx.channel_id());
 
     let Some(tournament) = db::get_tournament_by_any_channel_id(pool, channel_id).await? else {
         ephemeral(ctx, wrong_channel_message(Locale::from_context(ctx))).await?;
         return Ok(false);
     };
 
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
     let is_admin = db::is_admin(pool, tournament.id, user_id).await?;
     let has_manage_guild = author_has_manage_guild(ctx).await?;
 
@@ -92,14 +93,14 @@ pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Erro
 /// tier, unlike `tournament_admin_only`'s creator-only gate.
 pub(crate) async fn tournament_manage_only(ctx: Context<'_>) -> Result<bool, Error> {
     let pool = &ctx.data().database;
-    let channel_id = i64::try_from(ctx.channel_id().get()).unwrap();
+    let channel_id = to_db_id(ctx.channel_id());
 
     let Some(tournament) = db::get_tournament_by_any_channel_id(pool, channel_id).await? else {
         ephemeral(ctx, wrong_channel_message(Locale::from_context(ctx))).await?;
         return Ok(false);
     };
 
-    let user_id = i64::try_from(ctx.author().id.get()).unwrap();
+    let user_id = to_db_id(ctx.author().id);
     let is_admin = db::is_admin(pool, tournament.id, user_id).await?;
     let has_manage_guild = author_has_manage_guild(ctx).await?;
 

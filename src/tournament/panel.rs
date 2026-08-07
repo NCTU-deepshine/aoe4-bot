@@ -5,6 +5,7 @@
 //! that `commands::create` and `tournament::registration`'s callers use.
 
 use crate::Error;
+use crate::db::{to_channel_id, to_message_id};
 use crate::tournament::action::Action;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use crate::tournament::registration::registration_is_open;
@@ -159,7 +160,7 @@ pub(crate) async fn refresh(
         return Ok(());
     };
 
-    let message_id = MessageId::new(u64::try_from(register_message_id).unwrap());
+    let message_id = to_message_id(register_message_id);
     if !throttle.try_begin_edit(message_id, Instant::now()) {
         return Ok(());
     }
@@ -178,7 +179,7 @@ pub(crate) async fn refresh_now(http: impl CacheHttp, pool: &SqlitePool, tournam
         return Ok(());
     };
 
-    let message_id = MessageId::new(u64::try_from(register_message_id).unwrap());
+    let message_id = to_message_id(register_message_id);
     edit(http, pool, register_channel_id, message_id, tournament).await
 }
 
@@ -193,7 +194,7 @@ async fn edit(
     let open = registration_is_open(&tournament.status);
     let body = render(&entries, tournament.entrant_cap, tournament.scheduled_start_at, open);
 
-    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+    let channel_id = to_channel_id(register_channel_id);
     channel_id
         .edit_message(
             http,

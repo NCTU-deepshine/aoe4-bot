@@ -1,15 +1,26 @@
-use serenity::all::UserId;
+use serenity::all::{ChannelId, MessageId, UserId};
 use sqlx::{FromRow, SqlitePool};
 use tracing::error;
 
 // Discord snowflakes are u64 but SQLite integers are signed, so they are stored as the same 64
 // bits reinterpreted. `as` round-trips every value exactly; `i64::try_from` would panic instead.
-pub(crate) fn to_db_id(id: UserId) -> i64 {
-    u64::from(id) as i64
+// `impl Into<u64>` so one function covers users, channels, messages and roles alike.
+pub(crate) fn to_db_id(id: impl Into<u64>) -> i64 {
+    id.into() as i64
 }
 
+// The way back needs one per type, since each id is its own newtype. Same
+// reinterpretation, so `to_db_id` and these round-trip exactly.
 pub(crate) fn to_user_id(id: i64) -> UserId {
     UserId::new(id as u64)
+}
+
+pub(crate) fn to_channel_id(id: i64) -> ChannelId {
+    ChannelId::new(id as u64)
+}
+
+pub(crate) fn to_message_id(id: i64) -> MessageId {
+    MessageId::new(id as u64)
 }
 
 #[derive(FromRow)]

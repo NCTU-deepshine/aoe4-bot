@@ -422,6 +422,13 @@ abandoned mid-way, and API outages: a report command writing the same `tournamen
 Seven tables. Conventions follow the existing schema: lowercase SQL, `integer primary key
 autoincrement`, Discord snowflakes and aoe4 ids as `bigint`, timestamps written with `datetime('now')`.
 
+A snowflake is a `u64` and SQLite's integer is signed, so ids are stored as **the same 64 bits
+reinterpreted** — `crate::db`'s `to_db_id` / `to_user_id` / `to_channel_id` / `to_message_id`, and never
+`try_from().unwrap()` at the call site. The distinction is not cosmetic: `as` round-trips every value
+exactly, while `try_from` would start panicking once snowflakes pass 2^63 (a 42-bit millisecond timestamp
+from a 2015 epoch reaches that around 2084). Counts and ordinals still use `try_from`, where overflow is
+genuinely impossible rather than merely distant.
+
 Note what is *not* here: no column holds an entrant's **draft-tool** identity — distinct from `tournament_players`,
 which holds their **aoe4world** profile. There is nothing worth storing yet —
 tool display names are player-editable, and the read API exposes no seat identity today (§3.4) — so the design
