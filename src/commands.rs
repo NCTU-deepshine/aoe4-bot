@@ -1029,7 +1029,12 @@ pub async fn setup(
         &(cap, start_time),
     );
 
-    ctx.say(setup_summary(&tournament, &presets, locale)).await?;
+    // The panel displays both the cap and the start time, so it goes stale the
+    // moment either is written.
+    panel::refresh_now(ctx.http(), pool, &tournament).await?;
+
+    let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
+    ctx.say(setup_summary(&tournament, &presets, &entries, locale)).await?;
     Ok(())
 }
 
@@ -1037,8 +1042,10 @@ pub async fn setup(
 fn setup_summary(
     tournament: &tournament_db::Tournament,
     presets: &[tournament_db::RoundPreset],
+    entries: &[tournament_db::TournamentEntry],
     locale: Locale,
 ) -> String {
+    let registered = entries.iter().filter(|e| e.status == "active").count();
     let start = tournament.scheduled_start_at.map_or_else(
         || locale.pick("未設定", "not set").to_string(),
         |at| format!("<t:{}:F>", at.timestamp()),
@@ -1097,12 +1104,11 @@ fn setup_summary(
     };
 
     format!(
-        "**{} — {}**\n{}: {} / {}\n{}: {start}{placeholder}\n{}:\n{preset_lines}{still_needed}",
+        "**{} — {}**\n{}: {registered}/{}\n{}: {start}{placeholder}\n{}:\n{preset_lines}{still_needed}",
         tournament.name,
         locale.pick("賽事設定", "setup"),
-        locale.pick("人數上限", "Entrant cap"),
+        locale.pick("已報名 / 上限", "Registered / cap"),
         tournament.entrant_cap,
-        locale.pick("已報名", "registered"),
         locale.pick("開賽時間", "Start time"),
         locale.pick("抽選預設", "Draft presets"),
     )
@@ -1146,10 +1152,11 @@ pub async fn preset(
 
     let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
     let presets = tournament_db::list_round_presets(pool, tournament.id).await?;
+    let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
     ctx.say(format!(
         "{}\n\n{}",
         check.message(locale),
-        setup_summary(&tournament, &presets, locale)
+        setup_summary(&tournament, &presets, &entries, locale)
     ))
     .await?;
     Ok(())

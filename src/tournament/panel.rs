@@ -303,6 +303,15 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_follows_a_cap_change() {
+        // `/tournament setup` writes the cap, and the panel is where entrants see
+        // it — so a stale panel understates or overstates how full the field is.
+        let entries = vec![entry(1, "A", "active")];
+        assert!(render(&entries, 32, None, true).contains("Registered (1/32)"));
+        assert!(render(&entries, 8, None, true).contains("Registered (1/8)"));
+    }
+
+    #[test]
     fn the_title_is_short_enough_to_read_as_a_reply_preview() {
         // Why the panel is an embed at all: Discord renders an ephemeral reply to
         // one of these buttons as a reply to this message, flattening its
