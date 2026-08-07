@@ -40,6 +40,22 @@ pub(crate) fn suggested_order(entries: &[TournamentEntry]) -> Vec<i64> {
     field.iter().map(|e| e.user_id).collect()
 }
 
+/// How the field is shown, wherever it is shown: seeded entrants first in seed
+/// order, everyone else after them by §6's tiering.
+///
+/// Defined once because the seeding panel and the bracket drawing must agree —
+/// they render the same entrants, and a reader comparing them should not find
+/// two different orders. A field nobody has seeded is therefore pure tiering,
+/// and a fully seeded one pure seed order.
+pub(crate) fn display_order(entries: &[TournamentEntry]) -> Vec<&TournamentEntry> {
+    let tiering = suggested_order(entries);
+    let rank = |user_id: i64| tiering.iter().position(|id| *id == user_id).unwrap_or(usize::MAX);
+
+    let mut field = seedable(entries);
+    field.sort_by_key(|e| (e.seed.unwrap_or(i64::MAX), rank(e.user_id)));
+    field
+}
+
 /// Moves `user_id` to `new_seed` (1-based) and shifts everyone between, returning
 /// the whole new order.
 ///

@@ -26,27 +26,45 @@ const MIN_ENTRANTS: usize = 2;
 /// draft preset, which is what lets it exist during registration.
 const RENDER_ONLY_BEST_OF: u8 = 1;
 
+/// The draw order: one entrant per bracket position, each carrying the seed it
+/// should be drawn with.
+///
+/// Seeds win once they exist (§6) — they are what `start` builds from, so an
+/// organizer's override has to be visible here — and the rating tiering orders
+/// whoever has no seed yet.
+///
+/// `seeding::display_order` decides who stands where, so the drawing and the
+/// seeding panel cannot disagree; this only turns that into drawable entrants.
+fn draw_order(entries: &[TournamentEntry]) -> Vec<render::Entrant> {
+    let field = seeding::display_order(entries);
+
+    // Seeds are shown as stored — a withdrawal leaves gaps, and renumbering by
+    // position would contradict the panel. Latecomers continue past the last
+    // one rather than reusing a number that is already taken.
+    let mut unseeded = field.iter().filter_map(|e| e.seed).max().unwrap_or(0);
+    field
+        .iter()
+        .filter_map(|e| {
+            let seed = e.seed.unwrap_or_else(|| {
+                unseeded += 1;
+                unseeded
+            });
+            Some(render::Entrant {
+                seed: u32::try_from(seed).ok()?,
+                name: e.display_name.clone(),
+            })
+        })
+        .collect()
+}
+
 /// The provisional bracket implied by the current field.
 ///
-/// Ordered by `seeding::suggested_order`, so it is genuinely informative once
-/// ELO lands at sign-up (chunk 28) and exact once seeding has run. `None` below
-/// two entrants, where `bracket::build` correctly refuses.
+/// `None` below two entrants, where `bracket::build` correctly refuses.
 pub(crate) fn preview_rounds(entries: &[TournamentEntry]) -> Option<Vec<render::Round>> {
-    let order = seeding::suggested_order(entries);
+    let order = draw_order(entries);
     if order.len() < MIN_ENTRANTS {
         return None;
     }
-
-    // Seed n is the nth entrant in the suggested order.
-    let names: Vec<&str> = order
-        .iter()
-        .filter_map(|user_id| {
-            entries
-                .iter()
-                .find(|e| e.user_id == *user_id)
-                .map(|e| e.display_name.as_str())
-        })
-        .collect();
 
     let round_count = bracket::round_count(bracket::size(order.len()));
     let built = bracket::build(order.len(), &vec![RENDER_ONLY_BEST_OF; round_count]).ok()?;
@@ -61,8 +79,8 @@ pub(crate) fn preview_rounds(entries: &[TournamentEntry]) -> Option<Vec<render::
                     .sets
                     .iter()
                     .map(|set| render::Match {
-                        slot1: entrant(set.slot1, &names),
-                        slot2: entrant(set.slot2, &names),
+                        slot1: entrant(set.slot1, &order),
+                        slot2: entrant(set.slot2, &order),
                         // Nothing has been played, so no scores and no winners —
                         // §8.6 wants a blank rather than a zero.
                         score: None,
@@ -74,13 +92,10 @@ pub(crate) fn preview_rounds(entries: &[TournamentEntry]) -> Option<Vec<render::
     )
 }
 
-fn entrant(seed: Option<u32>, names: &[&str]) -> Option<render::Entrant> {
-    let seed = seed?;
-    let name = names.get(seed as usize - 1)?;
-    Some(render::Entrant {
-        seed,
-        name: (*name).to_string(),
-    })
+/// `bracket::build` names slots by position in the draw, which is this vector's
+/// index — not necessarily the seed the entrant is drawn with.
+fn entrant(position: Option<u32>, order: &[render::Entrant]) -> Option<render::Entrant> {
+    order.get(position? as usize - 1).cloned()
 }
 
 /// Wraps the drawing with a heading, and says plainly that it is not the draw
@@ -237,6 +252,89 @@ mod tests {
             .find_map(|m| m.slot1.as_ref().filter(|e| e.seed == 1))
             .expect("seed 1 should be placed");
         assert_eq!(top.name, "Strong");
+    }
+
+    fn with_seed(mut entry: TournamentEntry, seed: i64) -> TournamentEntry {
+        entry.seed = Some(seed);
+        entry
+    }
+
+    /// Every entrant drawn in the opening round, in slot order.
+    fn drawn(rounds: &[render::Round]) -> Vec<&render::Entrant> {
+        rounds[0]
+            .matches
+            .iter()
+            .flat_map(|m| [m.slot1.as_ref(), m.slot2.as_ref()])
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_seed_override_beats_the_rating_it_contradicts() {
+        // The whole point of `/tournament seed set`: the tiering would put
+        // Strong first, and the organizer has said otherwise.
+        let entries = vec![
+            with_seed(entry(1, "Weak", Some(1000)), 1),
+            with_seed(entry(2, "Middle", Some(1500)), 2),
+            with_seed(entry(3, "Strong", Some(2000)), 3),
+        ];
+        let rounds = preview_rounds(&entries).unwrap();
+        let top = drawn(&rounds)
+            .into_iter()
+            .find(|e| e.seed == 1)
+            .expect("seed 1 should be placed");
+        assert_eq!(top.name, "Weak");
+    }
+
+    #[test]
+    fn seeds_left_with_gaps_keep_their_real_numbers() {
+        // A withdrawal after seeding leaves 1, 2, 4, 5. Renumbering those to
+        // 1..4 would make the drawing disagree with the seeding panel.
+        let entries = vec![
+            with_seed(entry(1, "A", Some(2000)), 1),
+            with_seed(entry(2, "B", Some(1900)), 2),
+            with_seed(entry(3, "C", Some(1800)), 4),
+            with_seed(entry(4, "D", Some(1700)), 5),
+        ];
+        let rounds = preview_rounds(&entries).unwrap();
+        let mut seeds: Vec<u32> = drawn(&rounds).into_iter().map(|e| e.seed).collect();
+        seeds.sort_unstable();
+        assert_eq!(seeds, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn a_part_seeded_field_keeps_the_seeds_it_has() {
+        // Reopening registration lets a latecomer in unseeded. That must not
+        // discard the seeds already assigned — the seeding panel still shows
+        // them, and the drawing has to agree.
+        let entries = vec![
+            with_seed(entry(1, "Weak", Some(1000)), 1),
+            entry(2, "Middle", Some(1500)),
+            entry(3, "Strong", Some(2000)),
+        ];
+        let rounds = preview_rounds(&entries).unwrap();
+        let placed: Vec<(u32, &str)> = drawn(&rounds).into_iter().map(|e| (e.seed, e.name.as_str())).collect();
+
+        // Seed 1 stands; the unseeded pair follow it in rating order.
+        assert!(placed.contains(&(1, "Weak")), "{placed:?}");
+        assert!(placed.contains(&(2, "Strong")), "{placed:?}");
+        assert!(placed.contains(&(3, "Middle")), "{placed:?}");
+    }
+
+    #[test]
+    fn latecomers_are_numbered_past_the_last_seed_not_over_it() {
+        // Seeds 1, 2 and 5 are taken, so the unseeded entrant becomes 6 —
+        // reusing 3 or 4 would put two entrants on the same number.
+        let entries = vec![
+            with_seed(entry(1, "A", Some(2000)), 1),
+            with_seed(entry(2, "B", Some(1900)), 2),
+            with_seed(entry(3, "C", Some(1800)), 5),
+            entry(4, "Latecomer", Some(1700)),
+        ];
+        let rounds = preview_rounds(&entries).unwrap();
+        let mut seeds: Vec<u32> = drawn(&rounds).into_iter().map(|e| e.seed).collect();
+        seeds.sort_unstable();
+        assert_eq!(seeds, vec![1, 2, 5, 6]);
     }
 
     #[test]

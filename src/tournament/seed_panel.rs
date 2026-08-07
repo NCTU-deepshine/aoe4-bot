@@ -10,7 +10,7 @@
 
 use crate::Error;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
-use crate::tournament::seeding::seedable;
+use crate::tournament::seeding::display_order;
 use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
 use sqlx::SqlitePool;
 
@@ -19,11 +19,11 @@ use sqlx::SqlitePool;
 /// (chunk 12) is what shows a large field in full.
 const SEED_DISPLAY_CAP: usize = 24;
 
-/// Pure. Sorted by `seed`, which is authoritative — `suggested_seed` is shown
-/// alongside only so an organizer can see what they overrode (§6).
+/// Pure. Ordered by `seeding::display_order`, the same key the bracket drawing
+/// uses — `seed` is authoritative, and `suggested_seed` is shown alongside only
+/// so an organizer can see what they overrode (§6).
 pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
-    let mut field = seedable(entries);
-    field.sort_by_key(|e| (e.seed.unwrap_or(i64::MAX), e.user_id));
+    let field = display_order(entries);
 
     if field.is_empty() {
         return format!("**{name} — 種子名單 / Seeding**\n\n*尚無已簽到的參賽者。 / No checked-in entrants yet.*");
@@ -132,6 +132,23 @@ mod tests {
         // ATR is rounded for display but each rating keeps its own column.
         assert!(content.contains("ATR 2293"), "{content}");
         assert!(content.contains("ELO 1400"), "{content}");
+    }
+
+    #[test]
+    fn unseeded_entrants_are_listed_after_the_seeded_ones_by_rating() {
+        // Registration order used to decide this, which put a stronger latecomer
+        // below a weaker one and disagreed with the bracket drawing.
+        let entries = vec![
+            entry(1, "Seeded", Some(1), None, Some(1000)),
+            entry(2, "Weaker", None, None, Some(1200)),
+            entry(3, "Stronger", None, None, Some(1800)),
+        ];
+        let content = render("Relic Cup", &entries);
+        let seeded = content.find("Seeded").unwrap();
+        let stronger = content.find("Stronger").unwrap();
+        let weaker = content.find("Weaker").unwrap();
+        assert!(seeded < stronger, "the seed outranks both:\n{content}");
+        assert!(stronger < weaker, "unseeded go by rating, not id:\n{content}");
     }
 
     #[test]

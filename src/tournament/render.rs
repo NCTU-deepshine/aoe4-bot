@@ -22,6 +22,7 @@ const MESSAGE_LIMIT: usize = 2000;
 /// Default display width of a name cell.
 pub(crate) const DEFAULT_WIDTH: usize = 12;
 
+#[derive(Clone)]
 pub(crate) struct Entrant {
     pub(crate) seed: u32,
     pub(crate) name: String,
