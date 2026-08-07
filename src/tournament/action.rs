@@ -13,6 +13,7 @@ pub(crate) enum Action {
     Checkin,
     SetDone,
     Redraft,
+    CallAdmin,
 }
 
 impl Action {
@@ -23,6 +24,7 @@ impl Action {
             Action::Checkin => "checkin",
             Action::SetDone => "setdone",
             Action::Redraft => "redraft",
+            Action::CallAdmin => "calladmin",
         }
     }
 
@@ -33,6 +35,7 @@ impl Action {
             "checkin" => Some(Action::Checkin),
             "setdone" => Some(Action::SetDone),
             "redraft" => Some(Action::Redraft),
+            "calladmin" => Some(Action::CallAdmin),
             _ => None,
         }
     }
@@ -68,12 +71,13 @@ pub(crate) fn parse_custom_id(custom_id: &str) -> Option<(Action, i64)> {
 mod tests {
     use super::*;
 
-    const ALL_ACTIONS: [Action; 5] = [
+    const ALL_ACTIONS: [Action; 6] = [
         Action::Register,
         Action::Withdraw,
         Action::Checkin,
         Action::SetDone,
         Action::Redraft,
+        Action::CallAdmin,
     ];
 
     #[test]
@@ -112,5 +116,6 @@ mod tests {
         assert!(!Action::Withdraw.requires_defer());
         assert!(!Action::Checkin.requires_defer());
         assert!(!Action::Redraft.requires_defer());
+        assert!(!Action::CallAdmin.requires_defer());
     }
 }

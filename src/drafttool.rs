@@ -20,7 +20,7 @@ use tracing::error;
 /// nullable `draft_base_url` column nothing writes yet.
 const DEFAULT_BASE_URL: &str = "https://aoe4banpick-production.up.railway.app";
 
-fn base_url() -> String {
+pub(crate) fn base_url() -> String {
     std::env::var("DRAFT_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
 }
 

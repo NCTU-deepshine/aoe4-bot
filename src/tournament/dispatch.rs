@@ -24,12 +24,21 @@ use serenity::async_trait;
 use serenity::prelude::*;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::error;
+
+/// How long a set thread waits before it may summon the organizers again. Far
+/// longer than the panel-edit window: this one costs somebody a notification
+/// rather than an API call.
+const CALL_ADMIN_MIN_INTERVAL: Duration = Duration::from_secs(300);
 
 pub(crate) struct Dispatcher {
     guilds: Guilds,
     pool: SqlitePool,
     panel_throttle: Arc<EditThrottle>,
+    /// Its own window, and not shared with `panel_throttle`, so a busy
+    /// registration panel can never suppress a call for help.
+    help_throttle: EditThrottle,
 }
 
 impl Dispatcher {
@@ -38,6 +47,7 @@ impl Dispatcher {
             guilds,
             pool,
             panel_throttle,
+            help_throttle: EditThrottle::new(CALL_ADMIN_MIN_INTERVAL),
         }
     }
 }
@@ -69,6 +79,7 @@ impl EventHandler for Dispatcher {
             Action::Register => self.handle_register(&ctx, &component, entity_id).await,
             Action::Withdraw => self.handle_withdraw(&ctx, &component, entity_id).await,
             Action::Checkin => self.handle_checkin(&ctx, &component, entity_id).await,
+            Action::CallAdmin => self.handle_call_admin(&ctx, &component, entity_id).await,
             Action::Redraft => {}, // chunk 20
             Action::SetDone => {}, // chunk 22
         }
@@ -117,6 +128,60 @@ impl Dispatcher {
             }
             self.refresh_panel(ctx, &tournament).await;
             self.reconcile_bracket(ctx, &tournament).await;
+        }
+    }
+
+    /// A player asking for an organizer from inside a set thread (§8.7).
+    ///
+    /// The entity is the **set**, not the tournament, because the button lives
+    /// on the set's panel and the ping should say which match needs attention.
+    /// Posted into the thread the button was pressed in, so it needs no stored
+    /// thread id and works even if one was never recorded.
+    async fn handle_call_admin(&self, ctx: &Context, component: &ComponentInteraction, set_id: i64) {
+        let Ok(Some(set)) = db::get_set(&self.pool, set_id).await else {
+            error!("call-admin button for unknown set {set_id}");
+            return;
+        };
+        let Ok(Some(tournament)) = db::get_tournament(&self.pool, set.tournament_id).await else {
+            error!("call-admin button for set {set_id} with no tournament");
+            return;
+        };
+        let locale = Locale::from_discord_locale(&component.locale);
+
+        // Answer the presser first: the ping below is a second API call, and the
+        // ack window is three seconds.
+        let acknowledged = ephemeral_ack(
+            ctx,
+            component,
+            locale.pick("已通知管理員。", "The organizers have been notified."),
+        )
+        .await;
+        if !acknowledged {
+            return;
+        }
+
+        // One ping per set per window. A player waiting on an organizer will
+        // press this more than once, and each press is a notification to
+        // everyone running the event.
+        if !self.help_throttle.try_begin_edit(component.message.id, Instant::now()) {
+            return;
+        }
+
+        let admins = db::list_admins(&self.pool, tournament.id).await.unwrap_or_default();
+        let mentions: Vec<String> = admins.iter().map(|admin| format!("<@{}>", admin.user_id)).collect();
+        let content = format!(
+            "<@{}> 需要協助 / needs an organizer{}",
+            component.user.id,
+            if mentions.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", mentions.join(" "))
+            }
+        );
+
+        audit::log_action("call-admin", tournament.id, &tournament.slug, &component.user, &set_id);
+        if let Err(err) = component.channel_id.say(&ctx.http, content).await {
+            error!("failed to post the call-admin ping for set {set_id}: {err:?}");
         }
     }
 
@@ -249,6 +314,19 @@ impl Dispatcher {
 /// slower work (§8.5). Returns whether the defer succeeded — a failure here
 /// means the interaction is already unrecoverable, so the caller should not
 /// continue on to whatever real work it was about to do.
+/// Answers the presser immediately and privately. For the handlers that do not
+/// defer: the interaction still has to be acknowledged inside three seconds, and
+/// only the presser needs to see that it worked.
+async fn ephemeral_ack(ctx: &Context, component: &ComponentInteraction, content: &str) -> bool {
+    let response =
+        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().ephemeral(true).content(content));
+    if let Err(err) = component.create_response(&ctx.http, response).await {
+        error!("failed to acknowledge an interaction: {err:?}");
+        return false;
+    }
+    true
+}
+
 async fn defer(ctx: &Context, component: &ComponentInteraction, action: Action, entity_id: i64) -> bool {
     let response = CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
     if let Err(err) = component.create_response(&ctx.http, response).await {

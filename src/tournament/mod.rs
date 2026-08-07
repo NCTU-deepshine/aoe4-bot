@@ -49,6 +49,9 @@ pub(crate) mod seeding;
 // The seeding panel (chunk 11, §8.5): the seeded field, rendered into
 // `#{slug}-bracket` and edited in place as an organizer overrides seeds.
 pub(crate) mod seed_panel;
+// Set threads (chunk 16, §8.7): a private thread per set, its draft room and
+// the pinned panel telling each player which seat to take.
+pub(crate) mod set_thread;
 // `/tournament start` (chunk 12, §8.3, §5): the gates, then the generated
 // bracket persisted and round one opened.
 pub(crate) mod start;

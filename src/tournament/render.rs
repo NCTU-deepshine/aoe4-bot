@@ -300,7 +300,7 @@ fn sanitize(name: &str) -> String {
 /// Truncate to `width` display cells, with a single-cell ellipsis, then pad to exactly
 /// that many cells. Never splits a character, and counts a CJK character as the two
 /// cells it occupies.
-fn fit(text: &str, width: usize) -> String {
+pub(crate) fn fit(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut cells = 0;
 

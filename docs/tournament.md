@@ -1241,7 +1241,9 @@ Seats are first-come — if you end up in the wrong one, press 🔄 Regenerate d
 ```
 
 - `🔗 Watch draft` is a **link button** (`CreateButton::new_link(url)`) — no `custom_id`, no interaction, and it
-  renders as a real button rather than a bare URL.
+  renders as a real button rather than a bare URL. **It is the only one of the three chunk 16 ships**: the other
+  two need chunks 20 and 22, their `custom_id`s would route to nothing, and a button that silently does nothing
+  is worse than one that is not there yet. Until then the panel tells players to ask an admin instead.
 - `✅ Set complete` carries `custom_id = "setdone:<set_id>"` and runs exactly what `/set done` runs: one code
   path, two entry points. It must `Defer` first.
 - **Safe to press early.** It triggers a *sync*, and the draft tool is authoritative — an unfinished draft

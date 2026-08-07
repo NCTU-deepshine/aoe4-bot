@@ -11,8 +11,8 @@ use crate::tournament::access::{
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
-    audit, bracket_view, checkin, checkin_panel, panel, registration, seed_panel, seeding, setup as tournament_setup,
-    start as tournament_start, teardown,
+    audit, bracket_view, checkin, checkin_panel, panel, registration, seed_panel, seeding, set_thread,
+    setup as tournament_setup, start as tournament_start, teardown,
 };
 use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
@@ -1658,15 +1658,19 @@ async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_d
     (applied, failed)
 }
 
-// Turns the seeded field into a bracket and opens round one (§8.3, §5). No
+// Turns the seeded field into a bracket and opens round one (§8.3, §5, §8.7). No
 // confirmation: setup, status, seeds and the clock are four gates already, and
-// `/tournament cancel` is the way back.
-/// Starts the tournament: generates the bracket and opens round one.
+// `/tournament delete` is the only way back.
+/// Starts the tournament: generates the bracket, opens round one and its threads.
 #[poise::command(
     slash_command,
     guild_only,
     check = "tournament_only",
     check = "tournament_manage_only",
+    // Opening a set means a private thread and a panel inside it. Declared so
+    // Discord refuses the command outright rather than letting it half-run and
+    // 403 per set, which is how the channel-permission bug stayed invisible.
+    required_bot_permissions = "CREATE_PRIVATE_THREADS | SEND_MESSAGES_IN_THREADS",
     description_localized("zh-TW", "開賽：產生賽程表並開放第一輪。")
 )]
 pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
@@ -1686,9 +1690,31 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
         let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
         bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
         panel::refresh_now(ctx.http(), pool, &tournament).await?;
+        open_ready_sets(ctx, &tournament).await?;
     }
 
     ctx.say(outcome.message(&tournament.name, locale)).await?;
+    Ok(())
+}
+
+/// Opens a thread and a draft room for every set now playable (§8.7).
+///
+/// Best-effort per set, and a no-op for one that already has a thread: a set
+/// whose thread could not be created must not stop the rest of the round from
+/// opening, and an admin can retry afterwards.
+async fn open_ready_sets(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> Result<(), Error> {
+    let pool = &ctx.data().database;
+    for set in tournament_db::list_sets_for_tournament(pool, tournament.id).await? {
+        if set.status != "ready" {
+            continue;
+        }
+        if let Err(err) = set_thread::open(ctx.http(), pool, tournament, &set).await {
+            error!(
+                "failed to open set {} for tournament {}: {err:?}",
+                set.id, tournament.id
+            );
+        }
+    }
     Ok(())
 }
 
