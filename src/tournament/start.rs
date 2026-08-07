@@ -123,9 +123,19 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
     }
 
     let round_count = bracket::round_count(bracket::size(field.len()));
-    let Some(best_of) = setup::best_of_per_round(&presets, round_count) else {
+    // One resolution, two shapes taken off it: the series lengths the bracket is
+    // built from, and the preset ids its rounds record.
+    let Some(per_round) = setup::presets_per_round(&presets, round_count) else {
         return Ok(StartOutcome::NotConfigured);
     };
+    let Some(best_of) = per_round
+        .iter()
+        .map(|preset| u8::try_from(preset.best_of).ok())
+        .collect::<Option<Vec<u8>>>()
+    else {
+        return Ok(StartOutcome::NotConfigured);
+    };
+    let preset_ids: Vec<String> = per_round.iter().map(|p| p.draft_preset_id.clone()).collect();
     let Ok(built) = bracket::build(field.len(), &best_of) else {
         return Ok(StartOutcome::TooFewEntrants);
     };
@@ -135,7 +145,7 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
         .filter_map(|e| Some((u32::try_from(e.seed?).ok()?, e.user_id)))
         .collect();
 
-    db::insert_bracket(pool, tournament.id, &built, &seed_to_user).await?;
+    db::insert_bracket(pool, tournament.id, &built, &seed_to_user, &preset_ids).await?;
     open_round_one(pool, tournament.id).await?;
 
     db::update_tournament_status(pool, tournament.id, "running").await?;

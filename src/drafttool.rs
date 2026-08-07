@@ -135,17 +135,15 @@ pub(crate) struct PresetIssue {
     pub params: Option<HashMap<String, serde_json::Value>>,
 }
 
-/// The room the tool opened: `id` is our `draft_external_id`, `share_code` is
-/// what the player-facing link is built from (§8.7).
-//
-// Both fields are read by chunk 16, which writes them onto the set — until then
-// only this module's tests look at them. Remove the allow then.
-#[allow(dead_code)]
+/// The room the tool opened. `id` is our `draft_external_id`, and both the room
+/// and spectator links are derived from it.
+///
+/// The response also carries a `shareCode`; nothing in the tool or here consumes
+/// it (§3.2), and serde drops unknown fields, so it is not modelled.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreatedMatch {
     pub id: String,
-    pub share_code: String,
 }
 
 struct Credentials {
@@ -174,12 +172,6 @@ impl Credentials {
 }
 
 /// Opens a room on the tool for `preset_id`, signing in if the session has gone.
-/// Consumed by chunk 16.
-//
-// Until set threads land only this module's tests exercise the client, and they
-// call `create_match_at` directly to avoid the environment — remove the allow
-// then.
-#[allow(dead_code)]
 pub(crate) async fn create_match(preset_id: &str) -> Result<CreatedMatch, DraftError> {
     let credentials = Credentials::from_env()?;
     create_match_at(client(), &base_url(), &credentials, preset_id).await
@@ -418,7 +410,6 @@ mod tests {
             .await
             .expect("the retry should succeed");
         assert_eq!(created.id, "65f1");
-        assert_eq!(created.share_code, "a1b2c3d4");
     }
 
     #[tokio::test]
@@ -522,7 +513,6 @@ mod tests {
         .await
         .expect("a public preset should open a room");
         assert!(!created.id.is_empty());
-        assert!(!created.share_code.is_empty());
     }
 
     #[test]

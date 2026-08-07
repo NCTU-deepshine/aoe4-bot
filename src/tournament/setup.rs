@@ -33,11 +33,7 @@ pub(crate) fn start_time_is_default(tournament: &Tournament) -> bool {
     tournament.scheduled_start_at == Some(tournament.created_at + DEFAULT_START_LEAD)
 }
 
-/// Whether the event may begin. Consumed by chunk 12.
-//
-// Until `/tournament start` lands only this module's tests exercise it — remove
-// the allow then.
-#[allow(dead_code)]
+/// Whether the event may begin.
 pub(crate) fn may_start_at(scheduled_start_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     scheduled_start_at.is_none_or(|at| now >= at)
 }
@@ -46,43 +42,73 @@ pub(crate) fn may_start_at(scheduled_start_at: Option<DateTime<Utc>>, now: DateT
 /// final. Rounds are numbered 1 = final, 2 = semi, 3 = Ro8, so 0 is free.
 pub(crate) const DEFAULT_DEPTH: i64 = 0;
 
+impl RoundPreset {
+    /// How deep into the bracket this assignment reaches. The default covers every
+    /// round, so it reaches past any real depth.
+    fn reach(&self) -> i64 {
+        if self.from_depth == DEFAULT_DEPTH {
+            i64::MAX
+        } else {
+            self.from_depth
+        }
+    }
+}
+
 /// Resolves which preset a round uses, given how far it is from the final.
 ///
-/// An assignment covers its own depth **and everything after it**, so the winner
-/// is the one with the smallest threshold at or beyond this round — a preset set
-/// at Ro8 claims Ro8, the semi and the final, and one set at the final takes the
-/// final back off it. `DEFAULT_DEPTH` is the fallback and loses to any real
-/// assignment that reaches this round.
+/// An assignment covers its own depth **and everything after it**, so the winner is
+/// the one that reaches least far while still reaching this round — a preset set at
+/// Ro8 claims Ro8, the semi and the final, and one set at the final takes the final
+/// back off it. The default reaches furthest, so any real assignment that reaches
+/// this round beats it.
 pub(crate) fn preset_for_depth(assignments: &[RoundPreset], depth: i64) -> Option<&RoundPreset> {
     assignments
         .iter()
-        .filter(|a| a.from_depth != DEFAULT_DEPTH && a.from_depth >= depth)
-        .min_by_key(|a| a.from_depth)
-        .or_else(|| assignments.iter().find(|a| a.from_depth == DEFAULT_DEPTH))
+        .filter(|a| a.reach() >= depth)
+        .min_by_key(|a| a.reach())
 }
 
-/// A round's distance from the final: the last round is 1, the one before it 2.
-/// `ordinal` is 1-based from the outermost round.
+/// Translates between the two ways a round is numbered: its **ordinal**, 1-based
+/// from the outermost round, which is how rounds are stored and iterated; and its
+/// **depth**, 1 = final, which is how presets are configured, because rounds do not
+/// exist until `start` and how many there are depends on the field size (§3.3).
 ///
-// Consumed by chunk 12, which turns a bracket's rounds into `best_of` values.
-// Until that lands only this module's tests exercise it — remove the allow then.
-#[allow(dead_code)]
+/// `round_count - x + 1` is its own inverse, so this converts either way and there
+/// is no opposite helper to keep straight.
 pub(crate) fn depth_from_final(ordinal: usize, round_count: usize) -> i64 {
     i64::try_from(round_count.saturating_sub(ordinal) + 1).unwrap_or(1)
 }
 
-/// One `best_of` per round, outermost first — the shape `bracket::build` takes.
-/// `None` if any round has no preset covering it, which `missing` reports first.
+/// The preset each round runs, outermost first. `None` if any round has no preset
+/// covering it, which is what stops a half-configured field from starting.
 ///
-// Consumed by chunk 12; see `depth_from_final`.
-#[allow(dead_code)]
-pub(crate) fn best_of_per_round(assignments: &[RoundPreset], round_count: usize) -> Option<Vec<u8>> {
+/// The **only** place an ordinal becomes a depth, so it is the only place the two
+/// numbering schemes meet. Callers take what they need off each preset — `best_of`
+/// for `bracket::build`, the id for `insert_bracket` — which is what keeps the two
+/// from ever disagreeing about which preset a round runs.
+pub(crate) fn presets_per_round(assignments: &[RoundPreset], round_count: usize) -> Option<Vec<&RoundPreset>> {
     (1..=round_count)
-        .map(|ordinal| {
-            let preset = preset_for_depth(assignments, depth_from_final(ordinal, round_count))?;
-            u8::try_from(preset.best_of).ok()
-        })
+        .map(|ordinal| preset_for_depth(assignments, depth_from_final(ordinal, round_count)))
         .collect()
+}
+
+/// Which depths a newly assigned preset is written to, default first.
+///
+/// A scoped assignment made while no default exists becomes the default as well, so
+/// **the first preset an organizer sets always covers the whole bracket**. Without
+/// it, "Final only" as an opening move leaves every earlier round with no preset,
+/// and `start` refuses with `NotConfigured` while `/tournament setup` — which
+/// cannot know the field size — reports nothing missing.
+///
+/// Default first so that a failure between the two writes leaves the bracket
+/// covered rather than scoped to one round.
+pub(crate) fn depths_to_assign(existing: &[RoundPreset], depth: i64) -> Vec<i64> {
+    let has_default = existing.iter().any(|a| a.from_depth == DEFAULT_DEPTH);
+    if depth == DEFAULT_DEPTH || has_default {
+        vec![depth]
+    } else {
+        vec![DEFAULT_DEPTH, depth]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,9 +132,12 @@ impl Missing {
 /// The entrant cap is never listed: it is `not null default 32`, so it is always
 /// answered. Consumed both by `/tournament setup`'s reply and by chunk 12's gate,
 /// so the two cannot disagree about what "configured" means.
+///
+/// Only asks whether *any* preset exists. Whether one covers every round depends on
+/// the field size, which is not known here — `presets_per_round` decides it.
 pub(crate) fn missing(assignments: &[RoundPreset]) -> Vec<Missing> {
     let mut missing = Vec::new();
-    if preset_for_depth(assignments, DEFAULT_DEPTH).is_none() && assignments.is_empty() {
+    if assignments.is_empty() {
         missing.push(Missing::Preset);
     }
     missing
@@ -138,6 +167,15 @@ impl PresetCheck {
     pub(crate) fn best_of(&self) -> Option<i64> {
         match self {
             PresetCheck::Ok { best_of, .. } => Some(*best_of),
+            _ => None,
+        }
+    }
+
+    /// The preset's name on the tool, stored so the setup panel can link it by name
+    /// rather than by id.
+    pub(crate) fn name(&self) -> Option<&str> {
+        match self {
+            PresetCheck::Ok { name, .. } => Some(name),
             _ => None,
         }
     }
@@ -212,6 +250,7 @@ mod tests {
             tournament_id: 1,
             from_depth,
             draft_preset_id: preset.to_string(),
+            preset_name: None,
             best_of,
             assigned_at: Utc::now(),
         }
@@ -279,20 +318,88 @@ mod tests {
     }
 
     #[test]
-    fn best_of_per_round_is_outermost_first() {
+    fn converting_between_ordinal_and_depth_is_its_own_inverse() {
+        // Which is why there is one helper and not a pair pointing opposite ways:
+        // applying it to a depth hands back the ordinal it came from.
+        for round_count in 1..=5 {
+            for ordinal in 1..=round_count {
+                let depth = depth_from_final(ordinal, round_count);
+                let back = depth_from_final(usize::try_from(depth).unwrap(), round_count);
+                assert_eq!(back, i64::try_from(ordinal).unwrap(), "R{ordinal} of {round_count}");
+            }
+        }
+    }
+
+    /// The `best_of` each round runs, outermost first — what `start` derives from
+    /// `presets_per_round` to build the bracket.
+    fn best_of_per_round(assignments: &[RoundPreset], round_count: usize) -> Option<Vec<i64>> {
+        Some(
+            presets_per_round(assignments, round_count)?
+                .iter()
+                .map(|preset| preset.best_of)
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn presets_resolve_per_round_outermost_first() {
         let a = [
             assignment(DEFAULT_DEPTH, "A", 3),
             assignment(3, "B", 5),
             assignment(1, "C", 7),
         ];
         // 4 rounds: Ro16(depth 4) Ro8(3) semi(2) final(1).
+        let per_round = presets_per_round(&a, 4).expect("every round is covered");
+        let ids: Vec<&str> = per_round.iter().map(|p| p.draft_preset_id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B", "B", "C"]);
+        // The series lengths come off the same resolution, so they cannot disagree.
         assert_eq!(best_of_per_round(&a, 4), Some(vec![3, 5, 5, 7]));
     }
 
     #[test]
-    fn best_of_per_round_is_none_when_a_round_is_uncovered() {
+    fn presets_per_round_is_none_when_a_round_is_uncovered() {
         let a = [assignment(1, "C", 7)];
-        assert_eq!(best_of_per_round(&a, 3), None);
+        assert!(presets_per_round(&a, 3).is_none());
+    }
+
+    #[test]
+    fn the_first_preset_becomes_the_default_whatever_scope_it_was_given() {
+        // "Final only" as an opening move would otherwise leave every earlier round
+        // with no preset at all.
+        assert_eq!(depths_to_assign(&[], 1), vec![DEFAULT_DEPTH, 1]);
+        assert_eq!(depths_to_assign(&[], DEFAULT_DEPTH), vec![DEFAULT_DEPTH]);
+    }
+
+    #[test]
+    fn a_later_scoped_preset_leaves_an_existing_default_alone() {
+        let a = [assignment(DEFAULT_DEPTH, "A", 3)];
+        assert_eq!(depths_to_assign(&a, 3), vec![3], "A stays the default");
+        assert_eq!(
+            depths_to_assign(&a, DEFAULT_DEPTH),
+            vec![DEFAULT_DEPTH],
+            "replaced in place"
+        );
+    }
+
+    #[test]
+    fn a_scoped_preset_still_defaults_when_only_other_scoped_ones_exist() {
+        // Reachable for a tournament configured before the default was written
+        // alongside: nothing covers the rounds before depth 1.
+        let a = [assignment(1, "C", 7)];
+        assert_eq!(depths_to_assign(&a, 2), vec![DEFAULT_DEPTH, 2]);
+    }
+
+    #[test]
+    fn the_first_preset_covers_every_round_of_any_bracket() {
+        // The point of the rule: what `depths_to_assign` writes is always startable.
+        let opening = depths_to_assign(&[], 1);
+        let written: Vec<RoundPreset> = opening.iter().map(|d| assignment(*d, "A", 3)).collect();
+        for round_count in 1..=5 {
+            assert!(
+                presets_per_round(&written, round_count).is_some(),
+                "{round_count} rounds should be covered"
+            );
+        }
     }
 
     fn tournament(scheduled: bool) -> Tournament {
@@ -363,7 +470,7 @@ mod tests {
     #[test]
     fn a_preset_that_does_not_cover_every_round_still_counts_as_configured() {
         // `missing` only asks whether any preset exists; whether it covers every
-        // round depends on the field size, which start checks via best_of_per_round.
+        // round depends on the field size, which start checks via presets_per_round.
         assert_eq!(missing(&[assignment(1, "C", 7)]), vec![]);
     }
 

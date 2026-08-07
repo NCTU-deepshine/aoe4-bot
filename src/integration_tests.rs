@@ -1576,7 +1576,7 @@ mod tests {
         crate::tournament::db::set_seed_order(pool, tournament.id, &order, true)
             .await
             .unwrap();
-        crate::tournament::db::upsert_round_preset(pool, tournament.id, 0, "preset", 3)
+        crate::tournament::db::upsert_round_preset(pool, tournament.id, 0, "preset", "Standard Bo3", 3)
             .await
             .unwrap();
         crate::tournament::db::set_scheduled_start_at(pool, tournament.id, chrono::Utc::now())
@@ -1669,6 +1669,37 @@ mod tests {
         let final_set = sets.last().unwrap();
         assert_eq!(final_set.slot1_user_id, Some(1));
         assert_eq!(final_set.status, "pending", "still waiting on the other half");
+    }
+
+    #[tokio::test]
+    async fn starting_snapshots_each_rounds_preset_onto_the_round_row() {
+        // The round row is where `set_thread::open` looks for a preset, so a null
+        // here costs every set its draft room — and says so only in a log.
+        let pool = test_pool().await;
+        let tournament = setup_startable(&pool, 4).await;
+        // `setup_startable` assigns "preset" to every round; give the final its own.
+        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 1, "final-preset", "Grand Final Bo5", 3)
+            .await
+            .unwrap();
+
+        crate::tournament::start::start(&pool, &tournament).await.unwrap();
+
+        let stage = crate::tournament::db::list_stages_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .remove(0);
+        let rounds = crate::tournament::db::list_rounds_for_stage(&pool, stage.id)
+            .await
+            .unwrap();
+        assert_eq!(rounds.len(), 2, "a 4-bracket is two rounds");
+        // Ordered by ordinal, so outermost first — the same order the presets are
+        // resolved in, which is the mapping that could silently come out reversed.
+        assert_eq!(rounds[0].draft_preset_id.as_deref(), Some("preset"));
+        assert_eq!(
+            rounds[1].draft_preset_id.as_deref(),
+            Some("final-preset"),
+            "an assignment at depth 1 covers the final and nothing else"
+        );
     }
 
     #[tokio::test]
@@ -1959,14 +1990,14 @@ mod tests {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "seeding").await;
 
-        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 0, "A", 3)
+        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 0, "A", "Standard Bo3", 3)
             .await
             .unwrap();
-        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 1, "C", 7)
+        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 1, "C", "Final Bo7", 7)
             .await
             .unwrap();
         // Re-assigning the same depth replaces rather than duplicating.
-        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 1, "C2", 5)
+        crate::tournament::db::upsert_round_preset(&pool, tournament.id, 1, "C2", "Final Bo5", 5)
             .await
             .unwrap();
 
@@ -1977,6 +2008,10 @@ mod tests {
         assert_eq!(presets[0].from_depth, 0);
         assert_eq!(presets[1].draft_preset_id, "C2");
         assert_eq!(presets[1].best_of, 5);
+        // The display name is replaced with the rest, not left pointing at the
+        // preset it superseded.
+        assert_eq!(presets[0].preset_name.as_deref(), Some("Standard Bo3"));
+        assert_eq!(presets[1].preset_name.as_deref(), Some("Final Bo5"));
     }
 
     // Self-unbind gate tests.
@@ -2187,7 +2222,7 @@ mod tests {
         crate::tournament::db::upsert_bracket_message(pool, tournament_id, 1, 555)
             .await
             .unwrap();
-        crate::tournament::db::upsert_round_preset(pool, tournament_id, 0, "preset", 3)
+        crate::tournament::db::upsert_round_preset(pool, tournament_id, 0, "preset", "Standard Bo3", 3)
             .await
             .unwrap();
 

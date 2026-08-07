@@ -299,6 +299,9 @@ pub(crate) struct RoundPreset {
     pub tournament_id: i64,
     pub from_depth: i64,
     pub draft_preset_id: String,
+    /// The preset's name on the tool when it was assigned, for display only. Goes
+    /// stale on a rename, which is why the panel links the id's live page.
+    pub preset_name: Option<String>,
     pub best_of: i64,
     pub assigned_at: DateTime<Utc>,
 }
@@ -310,14 +313,16 @@ pub(crate) async fn upsert_round_preset(
     tournament_id: i64,
     from_depth: i64,
     draft_preset_id: &str,
+    preset_name: &str,
     best_of: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r"
-        insert into tournament_round_presets (tournament_id, from_depth, draft_preset_id, best_of)
-        values (?1, ?2, ?3, ?4)
+        insert into tournament_round_presets (tournament_id, from_depth, draft_preset_id, preset_name, best_of)
+        values (?1, ?2, ?3, ?4, ?5)
         on conflict (tournament_id, from_depth) do update set
             draft_preset_id = excluded.draft_preset_id,
+            preset_name = excluded.preset_name,
             best_of = excluded.best_of,
             assigned_at = datetime('now')
         ",
@@ -325,6 +330,7 @@ pub(crate) async fn upsert_round_preset(
     .bind(tournament_id)
     .bind(from_depth)
     .bind(draft_preset_id)
+    .bind(preset_name)
     .bind(best_of)
     .execute(pool)
     .await
@@ -335,7 +341,7 @@ pub(crate) async fn upsert_round_preset(
 pub(crate) async fn list_round_presets(pool: &SqlitePool, tournament_id: i64) -> Result<Vec<RoundPreset>, sqlx::Error> {
     sqlx::query_as(
         r"
-        select tournament_id, from_depth, draft_preset_id, best_of, assigned_at
+        select tournament_id, from_depth, draft_preset_id, preset_name, best_of, assigned_at
         from tournament_round_presets
         where tournament_id = ?1
         order by from_depth
@@ -1203,13 +1209,21 @@ pub(crate) async fn insert_set(
 ///
 /// `seed_to_user` maps a seed to the entrant holding it; a seed with no entrant
 /// is a bye slot and is simply absent.
+///
+/// `preset_ids` holds one draft-preset id per round in `bracket.rounds` order, so
+/// each round records the preset its drafts are created from — without it
+/// `set_thread::create_room` has no preset and no set ever gets a room (§8.3).
 pub(crate) async fn insert_bracket(
     pool: &SqlitePool,
     tournament_id: i64,
     bracket: &crate::tournament::bracket::Bracket,
     seed_to_user: &std::collections::HashMap<u32, i64>,
+    preset_ids: &[String],
 ) -> Result<(), sqlx::Error> {
     use crate::tournament::bracket::Slot;
+
+    // A short slice would write nulls and silently disable draft creation.
+    debug_assert_eq!(preset_ids.len(), bracket.rounds.len());
 
     let mut tx = pool.begin().await.inspect_err(log_db_error)?;
 
@@ -1231,14 +1245,15 @@ pub(crate) async fn insert_bracket(
     for round in &bracket.rounds {
         let round_id = sqlx::query(
             r"
-            insert into tournament_rounds (stage_id, ordinal, name, best_of)
-            values (?1, ?2, ?3, ?4)
+            insert into tournament_rounds (stage_id, ordinal, name, best_of, draft_preset_id)
+            values (?1, ?2, ?3, ?4, ?5)
             ",
         )
         .bind(stage)
         .bind(i64::try_from(round.ordinal).unwrap())
         .bind(&round.name)
         .bind(i64::from(round.best_of))
+        .bind(preset_ids.get(round.ordinal - 1).map(String::as_str))
         .execute(&mut *tx)
         .await
         .inspect_err(log_db_error)?

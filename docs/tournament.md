@@ -521,13 +521,17 @@ create table if not exists tournament_players (
 --     because rounds do not exist until start and how many there are depends on
 --     the field size — and §5 already names rounds from the end for the same
 --     reason. an assignment covers its depth and everything after it, so the
---     resolved preset is the one with the smallest threshold >= the round's
---     depth, falling back to 0. best_of is snapshotted at assignment so a preset
---     edited on the tool later cannot change a bracket already built from it.
+--     resolved preset is the one reaching least far that still reaches this
+--     round, with 0 reaching furthest and therefore losing to every real
+--     assignment. best_of is snapshotted at assignment so a preset edited on the
+--     tool later cannot change a bracket already built from it.
+--     a scoped assignment made while no 0 row exists writes one too, so the first
+--     preset an organizer sets always covers the whole bracket (§8.3).
 create table if not exists tournament_round_presets (
   tournament_id integer not null references tournaments(id) on delete cascade,
   from_depth integer not null check (from_depth >= 0),
   draft_preset_id text not null,
+  preset_name text,                         -- display only; the id is the identity (§8.3)
   best_of integer not null check (best_of % 2 = 1),
   assigned_at timestamp not null default (datetime('now')),
   primary key (tournament_id, from_depth)
@@ -951,6 +955,44 @@ defensive extra: with 5 entrants in an 8-bracket, round two's lower set is fed b
 immediately. Byes never cascade further, because `next_power_of_two` leaves under half the slots empty and
 reflection puts each against a distinct seed, so no set is ever fully empty.
 
+**The setup panel links each preset rather than printing its id.** One line per assignment, naming the rounds it
+covers and linking the preset's own public page on the tool:
+
+```
+Draft presets:
+· Default preset: [Standard Bo3](…/presets/6a43…) (Bo3)
+· Semifinal onwards: [Deep Run Bo5](…/presets/6b12…) (Bo5)
+· Final: [Grand Final Bo7](…/presets/6c99…) (Bo7)
+```
+
+- **Round names come from `bracket::round_name`**, not a second table of names, so the panel and the bracket
+  cannot disagree about what to call a round. Depth 1 covers only the final, so it reads as a round rather than
+  a range; every other depth reads "onwards".
+- **The closing three rounds are named in Chinese for a `zh-TW` reader** — 決賽, 準決賽, 八強 — via
+  `bracket::localize_round_name` (§8.10). `RoX` is left alone: it is already language-neutral, and 十六強 buys
+  nothing a number does not. `tournament_rounds.name` still stores the English name, so there is one canonical
+  value in the database and the translation happens per reader.
+- **`preset_name` is snapshotted at assignment**, like `best_of`, so rendering the panel costs no HTTP calls. It
+  goes stale if the preset is renamed on the tool, which is why the link points at the live page and the id
+  stays the identity. An assignment written before the column existed falls back to showing the id.
+- **The link is `[name](<url>)`.** The angle brackets suppress Discord's embed: six assignments would otherwise
+  unfurl six previews under one short message. The page is public and server-rendered
+  (`app/presets/[id]/page.tsx`), so it exists to be linked.
+
+**The first preset assigned always becomes the default too.** `/tournament preset` with a `from_round` scope
+writes the `from_depth = 0` row as well whenever there isn't one, because otherwise "Final only" as an opening
+move leaves every earlier round with no preset — and the two commands that would tell an organizer so cannot:
+`start` refuses with "setup isn't finished", while `/tournament setup` does not know the field size and so
+reports nothing missing. A later scoped assignment leaves an existing default alone; the reply says when a
+default was written alongside, so two lines appearing in the summary are not a surprise.
+
+**`start` snapshots each round's preset onto the round row**, resolving it by depth exactly as it resolves
+`best_of` — `tournament_round_presets` is keyed by distance from the final, and rounds do not exist until here
+(§4). Both values are snapshotted for the same reason: a preset reassigned afterwards must not change a bracket
+already built from it. It is also what makes drafts possible at all, since `tournament_rounds.draft_preset_id`
+is where §8.7's set threads look for the preset to create a room from; leaving it null costs every set its
+draft room, and reports nothing but a panel saying an admin should look at it.
+
 **The schedule is enforced, and has no override.** A new tournament's `scheduled_start_at` defaults to a week
 out, which is a tripwire rather than a convenience: check-in cannot open until an hour before it, and the event
 cannot start until it passes. The only way past either is to set the real time, which keeps the schedule honest
@@ -1362,6 +1404,15 @@ notices) use the reader's own locale. **Panels** — content and button labels a
 `報名 / Register`. Only their fixed chrome doubles; rosters, counts and timestamps appear once. A consequence
 worth noting: `panel::render` and `checkin_panel::render` take no `locale` parameter at all, so no locale has to
 be threaded down the panel-refresh paths.
+
+**Round names are the one piece of bracket *data* that localizes.** `bracket::localize_round_name` gives a
+`zh-TW` reader 決賽, 準決賽 and 八強 for the closing three; everything earlier stays `RoX`, which is already
+language-neutral. It maps the stored English name rather than taking a bracket position, so any surface holding a
+`tournament_rounds.name` can render it without knowing the bracket's shape, and `tournament_rounds.name` keeps
+one canonical value. Latin inside a Chinese label takes a space (`Ro16 之後`) and a translated name must not
+(`八強之後`) — a distinction the setup panel's tests pin, since getting it wrong is invisible to a reader of
+either language alone. A paired test walks every name the generator can emit and fails if one is neither
+translated nor a `RoX` form, so adding a round name without translating it cannot ship quietly.
 
 **Scope: the tournament feature's own dynamic reply text, plus the shared plumbing behind it.** Outcome
 messages (`RegisterOutcome`, `WithdrawOutcome`, `RebindOutcome`, `CheckinOutcome`, `OpenCheckinOutcome`,

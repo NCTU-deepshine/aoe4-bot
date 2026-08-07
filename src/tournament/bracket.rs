@@ -5,6 +5,7 @@
 //! — the seed order, where byes land, which set feeds which — are testable on their
 //! own.
 
+use crate::locale::Locale;
 use std::fmt::{Display, Formatter};
 
 /// Which of a set's two slots a winner lands in.
@@ -172,7 +173,11 @@ pub(crate) fn build(entrants: usize, best_of: &[u8]) -> Result<Bracket, BracketE
     Ok(Bracket { rounds })
 }
 
-fn round_name(set_count: usize, last: bool) -> String {
+/// Also used by the setup panel to name a preset's scope, so the two agree.
+///
+/// Always English: this is what goes into `tournament_rounds.name`, so it stays one
+/// canonical value in the database. `localize_round_name` renders it for a reader.
+pub(crate) fn round_name(set_count: usize, last: bool) -> String {
     if last {
         return "Final".to_owned();
     }
@@ -180,6 +185,20 @@ fn round_name(set_count: usize, last: bool) -> String {
         4 => "Semifinal".to_owned(),
         8 => "Quarterfinal".to_owned(),
         entrants => format!("Ro{entrants}"),
+    }
+}
+
+/// A round's name as a reader sees it. Only the closing three have Chinese names
+/// worth giving them; `RoX` is already language-neutral and stays as it is.
+///
+/// Maps the stored English name rather than taking a depth, so every surface holding
+/// a `tournament_rounds.name` can use it without knowing the bracket's shape.
+pub(crate) fn localize_round_name(name: &str, locale: Locale) -> String {
+    match (locale, name) {
+        (Locale::ZhTw, "Final") => "決賽".to_owned(),
+        (Locale::ZhTw, "Semifinal") => "準決賽".to_owned(),
+        (Locale::ZhTw, "Quarterfinal") => "八強".to_owned(),
+        _ => name.to_owned(),
     }
 }
 
@@ -476,6 +495,38 @@ mod tests {
         assert_eq!(names(6), vec!["Quarterfinal", "Semifinal", "Final"]);
         assert_eq!(names(16), vec!["Ro16", "Quarterfinal", "Semifinal", "Final"]);
         assert_eq!(names(17), vec!["Ro32", "Ro16", "Quarterfinal", "Semifinal", "Final"]);
+    }
+
+    #[test]
+    fn the_closing_rounds_have_chinese_names_and_the_rest_keep_ro_x() {
+        use super::localize_round_name;
+        use crate::locale::Locale;
+
+        assert_eq!(localize_round_name("Final", Locale::ZhTw), "決賽");
+        assert_eq!(localize_round_name("Semifinal", Locale::ZhTw), "準決賽");
+        assert_eq!(localize_round_name("Quarterfinal", Locale::ZhTw), "八強");
+        assert_eq!(localize_round_name("Ro16", Locale::ZhTw), "Ro16", "already neutral");
+        assert_eq!(localize_round_name("Final", Locale::En), "Final");
+    }
+
+    #[test]
+    fn every_name_the_bracket_produces_is_translated_or_deliberately_not() {
+        // The drift guard: renaming a round in `round_name` without teaching
+        // `localize_round_name` about it would otherwise silently ship English into
+        // a Chinese line, which is exactly what this pair exists to prevent.
+        use super::localize_round_name;
+        use crate::locale::Locale;
+
+        for entrants in 2..=64 {
+            for round in bracket_for(entrants).rounds {
+                let zh = localize_round_name(&round.name, Locale::ZhTw);
+                assert!(
+                    !zh.is_ascii() || round.name.starts_with("Ro"),
+                    "{} is neither translated nor a RoX form",
+                    round.name
+                );
+            }
+        }
     }
 
     #[test]

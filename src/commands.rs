@@ -11,7 +11,7 @@ use crate::tournament::access::{
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
-    audit, bracket_view, checkin, checkin_panel, panel, registration, seed_panel, seeding, set_thread,
+    audit, bracket, bracket_view, checkin, checkin_panel, panel, registration, seed_panel, seeding, set_thread,
     setup as tournament_setup, start as tournament_start, teardown,
 };
 use crate::{Context, Data, Error};
@@ -1057,6 +1057,25 @@ pub async fn setup(
 }
 
 /// The whole configuration in one reply, plus what start is still waiting on.
+/// Which rounds an assignment covers, named the way the bracket names them.
+///
+/// The round name comes from `bracket::round_name` rather than a second table of
+/// names, so the setup panel and the bracket can never disagree. Depth 1 is the
+/// final and covers nothing else, so it reads as a round rather than a range.
+fn preset_scope(from_depth: i64, locale: Locale) -> String {
+    if from_depth == tournament_setup::DEFAULT_DEPTH {
+        return locale.pick("預設（所有輪次）", "Default preset").to_string();
+    }
+    let sets = 1usize << u32::try_from(from_depth - 1).unwrap_or(0).min(16);
+    let name = bracket::localize_round_name(&bracket::round_name(sets, from_depth == 1), locale);
+    if from_depth == 1 {
+        return name;
+    }
+    // Latin inside Chinese takes a space, as elsewhere in this file; 八強之後 must not.
+    let space = if name.is_ascii() { " " } else { "" };
+    locale.pick(format!("{name}{space}之後"), format!("{name} onwards"))
+}
+
 fn setup_summary(
     tournament: &tournament_db::Tournament,
     presets: &[tournament_db::RoundPreset],
@@ -1068,21 +1087,24 @@ fn setup_summary(
         || locale.pick("未設定", "not set").to_string(),
         |at| format!("<t:{}:F>", at.timestamp()),
     );
+    let base = tournament
+        .draft_base_url
+        .clone()
+        .unwrap_or_else(crate::drafttool::base_url);
     let preset_lines = if presets.is_empty() {
         locale.pick("未設定", "not set").to_string()
     } else {
         presets
             .iter()
             .map(|p| {
-                let scope = if p.from_depth == tournament_setup::DEFAULT_DEPTH {
-                    locale.pick("所有輪次", "all rounds").to_string()
-                } else {
-                    locale.pick(
-                        format!("距決賽 {} 輪之後", p.from_depth),
-                        format!("{} round(s) out from the final, onwards", p.from_depth),
-                    )
-                };
-                format!("· {scope}: `{}` (Bo{})", p.draft_preset_id, p.best_of)
+                // `<url>` inside the link suppresses Discord's embed: six presets
+                // would otherwise unfurl six previews under one short message.
+                let link = format!(
+                    "[{}](<{base}/presets/{}>)",
+                    crate::ranked::escape(p.preset_name.as_deref().unwrap_or(&p.draft_preset_id)),
+                    p.draft_preset_id
+                );
+                format!("· {}: {link} (Bo{})", preset_scope(p.from_depth, locale), p.best_of)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1166,13 +1188,28 @@ pub async fn preset(
 
     let depth = from_round.unwrap_or(FromRound::All).depth();
     let pool = &ctx.data().database;
-    tournament_db::upsert_round_preset(pool, tournament.id, depth, &preset_id, best_of).await?;
+    let depths =
+        tournament_setup::depths_to_assign(&tournament_db::list_round_presets(pool, tournament.id).await?, depth);
+    let preset_name = check.name().unwrap_or(&preset_id);
+    for depth in &depths {
+        tournament_db::upsert_round_preset(pool, tournament.id, *depth, &preset_id, preset_name, best_of).await?;
+    }
+
+    // Say so rather than let two lines appear in the summary unexplained.
+    let also_default = if depths.len() > 1 {
+        locale.pick(
+            "\n（之前沒有預設，所以這個也設為所有輪次的預設。）",
+            "\n(There was no default yet, so this is now the default for every round too.)",
+        )
+    } else {
+        ""
+    };
 
     let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
     let presets = tournament_db::list_round_presets(pool, tournament.id).await?;
     let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
     ctx.say(format!(
-        "{}\n\n{}",
+        "{}{also_default}\n\n{}",
         check.message(locale),
         setup_summary(&tournament, &presets, &entries, locale)
     ))
@@ -1808,8 +1845,55 @@ async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_start_time, read_only_overwrites};
+    use super::{FromRound, parse_start_time, preset_scope, read_only_overwrites};
+    use crate::locale::Locale;
     use serenity::all::{PermissionOverwriteType, Permissions, RoleId, UserId};
+
+    #[test]
+    fn a_presets_scope_reads_as_the_rounds_it_covers() {
+        assert_eq!(preset_scope(0, Locale::En), "Default preset");
+        assert_eq!(preset_scope(1, Locale::En), "Final", "the final covers only itself");
+        assert_eq!(preset_scope(2, Locale::En), "Semifinal onwards");
+        assert_eq!(preset_scope(3, Locale::En), "Quarterfinal onwards");
+        assert_eq!(preset_scope(4, Locale::En), "Ro16 onwards");
+        assert_eq!(preset_scope(5, Locale::En), "Ro32 onwards");
+    }
+
+    #[test]
+    fn every_scope_an_organizer_can_pick_reads_back_as_the_round_they_picked() {
+        // The two directions are written independently — `FromRound` maps a choice to
+        // a depth, `preset_scope` maps a depth to a label — so this is what stops the
+        // panel naming a round the organizer never chose.
+        for (choice, label) in [
+            (FromRound::Ro32, "Ro32"),
+            (FromRound::Ro16, "Ro16"),
+            (FromRound::Quarterfinal, "Quarterfinal"),
+            (FromRound::Semifinal, "Semifinal"),
+            (FromRound::Final, "Final"),
+        ] {
+            assert!(
+                preset_scope(choice.depth(), Locale::En).starts_with(label),
+                "{label} should round-trip, got {}",
+                preset_scope(choice.depth(), Locale::En)
+            );
+        }
+    }
+
+    #[test]
+    fn the_closing_rounds_are_named_in_chinese() {
+        assert_eq!(preset_scope(1, Locale::ZhTw), "決賽");
+        assert_eq!(preset_scope(2, Locale::ZhTw), "準決賽之後");
+        assert_eq!(preset_scope(3, Locale::ZhTw), "八強之後");
+        assert_eq!(preset_scope(0, Locale::ZhTw), "預設（所有輪次）");
+    }
+
+    #[test]
+    fn the_earlier_rounds_keep_ro_x_and_take_a_space_before_the_chinese() {
+        // `RoX` is language-neutral, so it is not translated — but Latin inside
+        // Chinese takes a space, which a translated name must not.
+        assert_eq!(preset_scope(4, Locale::ZhTw), "Ro16 之後");
+        assert_eq!(preset_scope(5, Locale::ZhTw), "Ro32 之後");
+    }
 
     #[test]
     fn an_output_channel_denies_everyone_but_still_lets_the_bot_post() {
