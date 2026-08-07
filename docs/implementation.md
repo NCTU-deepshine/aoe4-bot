@@ -146,9 +146,21 @@ Design: §8.3, §5, §8.6.
 Gate: §10's lifecycle list — starting before check-in closes, non-contiguous seeds, registering after start all
 rejected.
 
-**13. `/tournament bracket` and `/tournament cancel`**
-Refresh or repost the bracket, the per-round companion view, and cancellation. Small.
-Design: §8.4, §8.6.
+**13. `/tournament bracket` and `/tournament cancel` — dropped, not built**
+Neither half earned its place, so Phase D closes at chunk 12 plus 25–29.
+
+`/tournament bracket` was to refresh or repost the bracket and offer a per-round companion view. But
+the bracket is already reconciled on every registration, withdrawal, `seed set`, `start` and
+`refresh`, so it is current without being asked; and `#…-bracket` denies `SEND_MESSAGES` to
+`@everyone`, so nothing can bury it except the seeding panel sharing the channel. That left a jump
+link as the command's only value. The per-round list has a better home than a command nobody knows to
+type — the round-opening announcement (chunks 16–18), where every player sees it. So
+`render::render_round_list` stays written and unused until then.
+
+`/tournament cancel` was to move any status to `canceled`. Without an un-cancel it ends an event
+without ending it, and `/tournament delete` already removes one; keeping a read-only record of an
+abandoned event was not worth a terminal state nothing can leave. `canceled` remains in the schema's
+`check` constraint — dropping it would mean editing a landed migration — but nothing writes it.
 
 **25. `/tournament reopen-registration`**
 The one backward lifecycle edge, for admin mistakes. Reverts `checkin` or `seeding` to `registration`:

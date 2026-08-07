@@ -906,10 +906,12 @@ running ──(final set completes)──▶ completed
 checkin | seeding ──/tournament reopen-registration──▶ registration
     │  no_show entries → status 'active'; every checked_in_at cleared
     │  the check-in panel is deleted; checkin_message_id and checkin_closes_at nulled
-any ──/tournament cancel──▶ canceled
 ```
 
 `tournaments.status` is `registration | checkin | seeding | running | completed | canceled`.
+**Nothing writes `canceled`.** `/tournament cancel` was planned and dropped: with no un-cancel it ends an event
+without ending it, and `/tournament delete` already removes one. The value stays in the schema's `check`
+constraint because dropping it would mean editing a landed migration.
 
 **Check-in gates the bracket**: the field is whoever checked in, not whoever registered, so no-shows never
 occupy a slot.
@@ -939,8 +941,9 @@ stored, the reply says so, and `/tournament seed refresh` retries.
 **One backward edge, and it is a full reset.** `reopen-registration` exists for admin mistakes — check-in opened
 too early, or closed before a late entrant arrived. It rewinds the whole check-in round rather than partially
 undoing it: no-shows go back to `active`, every `checked_in_at` is cleared, and the check-in panel message is
-deleted so a later `open-checkin` starts from a clean `0/N`. Past `seeding` there is no rewind — the recovery is
-`/tournament cancel`.
+deleted so a later `open-checkin` starts from a clean `0/N`. Past `seeding` there is no rewind at all: the only
+way out is `/tournament delete`, which takes the channels and the record with it. That asymmetry is deliberate —
+an event far enough along to have a bracket should be finished or abandoned outright, not half-rewound.
 
 **`delete` is not a status.** `canceled` is the terminal state for an event that happened and was called off; it
 stays in the database and its channels stay readable. `/tournament delete` is the inverse of `create` — the row
@@ -968,8 +971,6 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament preset preset_id [from_round]` | admin | Set a round's draft preset, and so its `best_of` |
 | `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
 | `/tournament start` | admin | Generates the bracket, resolves byes, opens every playable set |
-| `/tournament bracket [round]` | anyone | Reposts/refreshes the bracket |
-| `/tournament cancel` | admin | Cancels the event |
 | `/tournament delete confirm:<slug>` | creator | Deletes the tournament and the four channels it created |
 | `/set draft` | admin | Creates the draft if a set somehow has none, and reposts the links |
 | `/set redraft` | either player, or admin | Abandons the current draft and creates a fresh one · also a button |
@@ -1168,13 +1169,17 @@ Names truncate to a fixed display width (default 12) with a single-cell ellipsis
 split in half — the cell is padded back up instead.
 
 Mobile is this format's known weakness — a 16-player bracket is already wider than a phone's code block. So
-`/tournament bracket round:<n>` should also offer a plain per-round list as a companion view:
+there is also a plain per-round list, `render::render_round_list`:
 
 ```
 **Quarterfinals**
 `1` MarineLorD  2 – 1  Beasty  `8`
 `5` VortiX      0 – 2  Anotand `4`
 ```
+
+It **belongs in the round-opening announcement** (chunks 16–18), not behind a command. A command nobody knows
+to type is no answer to a readability problem; a message posted when the round opens reaches every player
+without being asked for. So the function is written and tested but has no caller until then.
 
 The renderer is a **pure function** — `fn render(sets: &[Set], width: usize) -> Vec<String>` — so it is testable
 with golden strings and no Discord involved.
