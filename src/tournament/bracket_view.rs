@@ -11,7 +11,7 @@
 //! messages, which is what `reconcile` is about.
 
 use crate::Error;
-use crate::tournament::db::{self, Tournament, TournamentEntry};
+use crate::tournament::db::{self, Tournament, TournamentEntry, TournamentRound, TournamentSet};
 use crate::tournament::seeding;
 use crate::tournament::{bracket, render};
 use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
@@ -98,6 +98,68 @@ fn entrant(position: Option<u32>, order: &[render::Entrant]) -> Option<render::E
     order.get(position? as usize - 1).cloned()
 }
 
+/// The real bracket, read back from the rows `start` wrote — so it shows the
+/// seeds actually used and the bye winners already advanced, neither of which a
+/// preview recomputed from ratings can know.
+///
+/// Pure over already-fetched data, like `preview_rounds`. Rounds are drawn in
+/// the order given (`db::list_rounds_for_stage` returns them by ordinal, and
+/// concatenating stages in order keeps that true); sets are sorted by position.
+pub(crate) fn played_rounds(
+    rounds: &[TournamentRound],
+    sets: &[TournamentSet],
+    entries: &[TournamentEntry],
+) -> Vec<render::Round> {
+    rounds
+        .iter()
+        .map(|round| {
+            let mut round_sets: Vec<&TournamentSet> = sets.iter().filter(|s| s.round_id == round.id).collect();
+            round_sets.sort_by_key(|s| s.position);
+
+            render::Round {
+                name: round.name.clone(),
+                matches: round_sets.iter().map(|set| played_match(set, entries)).collect(),
+            }
+        })
+        .collect()
+}
+
+fn played_match(set: &TournamentSet, entries: &[TournamentEntry]) -> render::Match {
+    let slot = |user_id: Option<i64>| {
+        let user_id = user_id?;
+        let entry = entries.iter().find(|e| e.user_id == user_id)?;
+        Some(render::Entrant {
+            // A started bracket has seeded everyone, so the fallback is unreachable.
+            seed: entry.seed.and_then(|s| u32::try_from(s).ok()).unwrap_or_default(),
+            name: entry.display_name.clone(),
+        })
+    };
+
+    let winner = set
+        .winner_user_id
+        .and_then(|winner| match (set.slot1_user_id, set.slot2_user_id) {
+            (Some(one), _) if one == winner => Some(bracket::Slot::One),
+            (_, Some(two)) if two == winner => Some(bracket::Slot::Two),
+            _ => None,
+        });
+
+    // §8.6 wants a blank rather than a zero, which also stops a bye — decided
+    // without anyone playing — from reading `0-0`.
+    let score = (set.slot1_wins + set.slot2_wins > 0).then(|| {
+        (
+            u8::try_from(set.slot1_wins).unwrap_or(u8::MAX),
+            u8::try_from(set.slot2_wins).unwrap_or(u8::MAX),
+        )
+    });
+
+    render::Match {
+        slot1: slot(set.slot1_user_id),
+        slot2: slot(set.slot2_user_id),
+        score,
+        winner,
+    }
+}
+
 /// Wraps the drawing with a heading, and says plainly that it is not the draw
 /// yet while the tournament has not started. Bilingual: one shared message with
 /// many readers (§8.10).
@@ -127,6 +189,26 @@ fn decorate(name: &str, chunks: Vec<String>, provisional: bool) -> Vec<String> {
 /// three. Each chunk is therefore edited if a message already holds that
 /// ordinal, posted if not, and any surplus tail deleted — otherwise the bottom
 /// of a bigger bracket lingers under a smaller one.
+/// The drawn bracket once `start` has written one, `None` while it has not —
+/// which is what separates the real thing from a preview.
+async fn persisted_rounds(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    entries: &[TournamentEntry],
+) -> Result<Option<Vec<render::Round>>, Error> {
+    let sets = db::list_sets_for_tournament(pool, tournament_id).await?;
+    if sets.is_empty() {
+        return Ok(None);
+    }
+
+    let mut rounds = Vec::new();
+    for stage in db::list_stages_for_tournament(pool, tournament_id).await? {
+        rounds.extend(db::list_rounds_for_stage(pool, stage.id).await?);
+    }
+
+    Ok(Some(played_rounds(&rounds, &sets, entries)))
+}
+
 pub(crate) async fn reconcile(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> Result<(), Error> {
     let Some(bracket_channel_id) = tournament.bracket_channel_id else {
         return Ok(());
@@ -134,10 +216,15 @@ pub(crate) async fn reconcile(http: impl CacheHttp, pool: &SqlitePool, tournamen
     let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
 
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-    let Some(rounds) = preview_rounds(&entries) else {
-        return Ok(());
+    // Whether this is still a preview is the same question as which drawing we
+    // have, so it is answered once rather than read off the status separately.
+    let (rounds, provisional) = match persisted_rounds(pool, tournament.id, &entries).await? {
+        Some(rounds) => (rounds, false),
+        None => match preview_rounds(&entries) {
+            Some(rounds) => (rounds, true),
+            None => return Ok(()),
+        },
     };
-    let provisional = tournament.status != "running" && tournament.status != "completed";
     let chunks = decorate(
         &tournament.name,
         render::render(&rounds, render::DEFAULT_WIDTH),
@@ -351,6 +438,140 @@ mod tests {
         // Three entrants play a 4-bracket: two rounds, one bye.
         assert_eq!(rounds.len(), 2);
         assert_eq!(rounds[0].matches.len(), 2);
+    }
+
+    fn round(id: i64, ordinal: i64, name: &str) -> TournamentRound {
+        TournamentRound {
+            id,
+            stage_id: 1,
+            ordinal,
+            name: name.to_string(),
+            best_of: 3,
+            bracket: None,
+            draft_preset_id: None,
+            rules: None,
+        }
+    }
+
+    fn set(id: i64, round_id: i64, position: i64, slot1: Option<i64>, slot2: Option<i64>) -> TournamentSet {
+        TournamentSet {
+            id,
+            tournament_id: 1,
+            round_id,
+            position,
+            slot1_user_id: slot1,
+            slot2_user_id: slot2,
+            slot1_wins: 0,
+            slot2_wins: 0,
+            winner_user_id: None,
+            status: "pending".to_string(),
+            draft_external_id: None,
+            draft_synced_at: None,
+            draft_announce_message_id: None,
+            redraft_count: 0,
+            thread_id: None,
+            winner_advances_to_set_id: None,
+            winner_advances_to_slot: None,
+            loser_advances_to_set_id: None,
+            loser_advances_to_slot: None,
+            scheduled_at: None,
+            completed_at: None,
+        }
+    }
+
+    /// A seeded field, as `start` leaves it.
+    fn seeded_field(n: i64) -> Vec<TournamentEntry> {
+        (1..=n)
+            .map(|i| with_seed(entry(i, &format!("P{i}"), None), i))
+            .collect()
+    }
+
+    #[test]
+    fn the_persisted_bracket_takes_names_and_seeds_from_the_entries() {
+        let played = played_rounds(
+            &[round(10, 1, "Final")],
+            &[set(100, 10, 1, Some(1), Some(2))],
+            &seeded_field(2),
+        );
+        assert_eq!(played.len(), 1);
+        assert_eq!(played[0].name, "Final");
+
+        let m = &played[0].matches[0];
+        assert_eq!(m.slot1.as_ref().unwrap().name, "P1");
+        assert_eq!(m.slot1.as_ref().unwrap().seed, 1);
+        assert_eq!(m.slot2.as_ref().unwrap().seed, 2);
+    }
+
+    #[test]
+    fn sets_are_drawn_by_position_whatever_order_they_arrive_in() {
+        let played = played_rounds(
+            &[round(10, 1, "Semifinal")],
+            &[set(101, 10, 2, Some(2), Some(3)), set(100, 10, 1, Some(1), Some(4))],
+            &seeded_field(4),
+        );
+        let top: Vec<&str> = played[0]
+            .matches
+            .iter()
+            .map(|m| m.slot1.as_ref().unwrap().name.as_str())
+            .collect();
+        assert_eq!(top, vec!["P1", "P2"]);
+    }
+
+    #[test]
+    fn an_unplayed_set_shows_no_score() {
+        let played = played_rounds(
+            &[round(10, 1, "Final")],
+            &[set(100, 10, 1, Some(1), Some(2))],
+            &seeded_field(2),
+        );
+        assert!(played[0].matches[0].score.is_none(), "§8.6 wants a blank, not a zero");
+        assert!(played[0].matches[0].winner.is_none());
+    }
+
+    #[test]
+    fn a_completed_set_shows_both_counts_and_the_winner() {
+        let mut decided = set(100, 10, 1, Some(1), Some(2));
+        decided.slot1_wins = 1;
+        decided.slot2_wins = 2;
+        decided.winner_user_id = Some(2);
+        decided.status = "completed".to_string();
+
+        let played = played_rounds(&[round(10, 1, "Final")], &[decided], &seeded_field(2));
+        assert_eq!(played[0].matches[0].score, Some((1, 2)));
+        assert_eq!(played[0].matches[0].winner, Some(bracket::Slot::Two));
+    }
+
+    #[test]
+    fn a_bye_advances_its_occupant_without_a_scoreline() {
+        let mut bye = set(100, 10, 1, Some(1), None);
+        bye.winner_user_id = Some(1);
+        bye.status = "bye".to_string();
+
+        let played = played_rounds(&[round(10, 1, "Semifinal")], &[bye], &seeded_field(2));
+        let m = &played[0].matches[0];
+        assert!(m.slot2.is_none());
+        assert!(m.score.is_none(), "nobody played, so 0-0 would be a lie");
+        assert_eq!(m.winner, Some(bracket::Slot::One));
+    }
+
+    #[test]
+    fn starting_does_not_visibly_redraw_the_tree() {
+        // The preview and the real bracket of the same field are the same
+        // shape, so `/tournament start` only changes the label and the scores.
+        let entries = seeded_field(4);
+        let preview = preview_rounds(&entries).unwrap();
+        let played = played_rounds(
+            &[round(10, 1, "Semifinal"), round(11, 2, "Final")],
+            &[
+                set(100, 10, 1, Some(1), Some(4)),
+                set(101, 10, 2, Some(2), Some(3)),
+                set(102, 11, 1, None, None),
+            ],
+            &entries,
+        );
+
+        let shape = |rounds: &[render::Round]| rounds.iter().map(|r| r.matches.len()).collect::<Vec<_>>();
+        assert_eq!(shape(&preview), shape(&played));
     }
 
     #[test]
