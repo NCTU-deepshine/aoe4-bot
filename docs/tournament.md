@@ -381,6 +381,12 @@ A seat can only be claimed by a logged-in account, so **every entrant must regis
 their first set. That is an event-running task, not a bot feature: check-in is the natural place to remind
 people (§8.3).
 
+> **The draft tool and aoe4world are two unrelated identities, and only the aoe4world one is optional.** An
+> entrant invited by an admin (§8.3) has no aoe4world profile — that is the point of the verb — but they still
+> need a **draft-tool** account, because that is what claims a seat. Nothing about invited entrants relaxes the
+> requirement in this section. An invite-only event whose players are new to both will need the reminder more
+> than an open one, not less, and its organizers have no roster of aoe4world names to check against.
+
 Two properties of tool identity to keep in mind, both enforced in `lib/socket/matchHandlers.ts`:
 
 - **Display names are player-editable**, to 32 characters, at any time. Never match entrants by name.
@@ -453,6 +459,10 @@ create table if not exists tournaments (
   draft_base_url text,                      -- per-tournament override; normally null, the
                                             -- instance comes from env (§3, chunk 14)
   entrant_cap integer not null default 32,  -- registration refuses a sign-up past this (§8.3)
+  registration_mode text not null default 'open'
+    check (registration_mode in ('open','invite_only')),  -- invite_only closes public sign-ups (§8.3, chunk 33)
+  seed_source text not null default 'suggested'
+    check (seed_source in ('suggested','manual')),        -- 'manual' survives the rating pass (§6, chunk 30)
   scheduled_start_at timestamp,             -- when the event is meant to begin; stored utc.
                                             -- defaults to a week out, set by insert_tournament in the
                                             -- same statement as created_at so the two share a clock and
@@ -511,8 +521,10 @@ create table if not exists tournament_rounds (
 --    entries are never deleted, so even a withdrawn one blocks it.
 create table if not exists tournament_players (
   user_id bigint primary key,               -- discord user; one main profile each
-  aoe4_id bigint not null unique,           -- and one user per profile
-  display_name text not null,               -- player-editable; seeded from aoe4world at first sign-up
+  aoe4_id bigint unique,                    -- and one user per profile. NULL = an admin's invitee,
+                                            -- who has no aoe4world profile at all (§8.3, chunk 31)
+  display_name text not null,               -- player-editable; from aoe4world at first sign-up, or the
+                                            -- organizer's assertion for an invitee
   bound_at timestamp not null default (datetime('now')),
   updated_at timestamp
 );
@@ -546,7 +558,8 @@ create table if not exists tournament_round_presets (
 create table if not exists tournament_entries (
   tournament_id integer not null references tournaments(id) on delete cascade,
   user_id bigint not null references tournament_players(user_id),
-  aoe4_id bigint not null,                  -- snapshot, not a fk; see above
+  aoe4_id bigint,                           -- snapshot, not a fk; see above. NULL for an invitee
+  invited_by bigint,                        -- null = self-registered; set = an admin put them in (§8.3)
   seed integer,                             -- FINAL seed; the organizer may override
   suggested_seed integer,                   -- what the bot computed, kept for audit
   display_name text not null,               -- copy of tournament_players.display_name, kept in sync; see notes
@@ -663,6 +676,23 @@ create table if not exists tournament_games (
 - **No `map_picked_by` column.** `MAP_SELECT` records who picked, in the draft.
 - **Foreign keys.** sqlx enables `pragma foreign_keys` by default on `SqliteConnectOptions`. Assert this in a
   test — every `references` above is inert if it ever changes.
+- **`aoe4_id` is nullable, and that is what an invitee is.** An admin can put a Discord member straight into a
+  field (§8.3, `/tournament invite`), and such an entrant has no aoe4world profile at all. `unique` on a
+  nullable column is exactly the constraint wanted: SQLite treats NULLs as distinct, so a tournament may hold any
+  number of unbound players while "one Discord user per real profile" is still enforced. What the bot gives up
+  for them is everything derived from that profile — no ELO, no ATR, so §6's tiering sorts them last by name; no
+  cross-check against aoe4world results (§11); and a `display_name` that is an organizer's assertion rather than
+  a verified name, which is why §8.7's set panel marks it as unverified. Binding later is an ordinary
+  `/tournament register` or `/tournament rebind`, after which they are indistinguishable from anyone else.
+- **Relaxing this column is a table rebuild, not an `alter table`.** SQLite has no `ALTER COLUMN`, and
+  `tournament_players(user_id)` is referenced by `tournament_entries`, `tournament_sets` (twice) and
+  `tournament_games`, so `drop table` fires an implicit delete that violates them. The rebuild therefore needs
+  `pragma foreign_keys = off`, which is a **no-op inside a transaction** — so that migration is sqlx's
+  `-- no-transaction` kind, and it must create-copy-drop-rename rather than renaming the old table first, which
+  with `legacy_alter_table` off would rewrite the `REFERENCES` clauses in all three dependants. Those same keys
+  are why an invitee cannot live in a table of their own: one reaching a set would fail `tournament_sets`' key.
+- **`invited_by` is on the entry, not the player.** Being invited is a fact about one tournament — the same
+  person may be invited to one and sign up for the next — and §8.3's no-show sweep needs it per entry.
 
 ## 5. Bracket generation
 
@@ -724,6 +754,30 @@ This writes `suggested_seed` and copies it to `seed`. The organizer then reviews
 per entrant and may reassign any seed; only `seed` is authoritative. The tiering is a defensible default for a
 mixed professional/guild field, **not** a claim that ATR and ELO are comparable — say so in the command output
 as well as here.
+
+An entrant with **neither** rating — an invitee with no aoe4world profile (§4), or anyone the ELO fetch failed
+for — sorts after every rated entrant, then by name. That is the reason every rating column is nullable and the
+reason seeding must never drop an unrated player.
+
+### A hand-made order outlives the rating pass
+
+`tournaments.seed_source` says whether the field's order is the bot's suggestion or the organizers' own:
+
+- **`'suggested'`** — the default. Refreshing ratings re-tiers the whole field, as above.
+- **`'manual'`** — set by `/tournament seed set` and by a seeded `/tournament invite`. Refreshing ratings still
+  updates every ELO and ATR snapshot, but **keeps the organizers' order**; the reply says so and names
+  `/tournament seed refresh` as the way to take the suggestion back, which also returns the field to
+  `'suggested'`.
+
+Without this, an order set before check-in closes is destroyed by the seeding pass that closing runs, and by
+`/tournament reopen-registration`, which nulls every seed. Both are silent. A curated field (§8.3) exists
+precisely to be arranged by hand, so the arrangement has to survive the rest of the lifecycle.
+
+**Keeping an order still rewrites the whole field**, because seeds are written as a complete 1..n order rather
+than per row (§4 notes). Two consequences to know: the first `seed set` takes the *entire* field manual, not just
+that entrant; and later self-registrants land at the end of it, by the tiering, rather than being merged into it —
+until someone refreshes. Keeping the order also **compacts** it, closing any gap a no-show or a withdrawal left,
+which is what keeps §8.3's contiguity requirement true without a separate renumber step.
 
 ### Reuse
 
@@ -936,6 +990,10 @@ running ──(final set completes)──▶ completed
 checkin | seeding ──/tournament reopen-registration──▶ registration
     │  no_show entries → status 'active'; every checked_in_at cleared
     │  the check-in panel is deleted; checkin_message_id and checkin_closes_at nulled
+
+registration ──/tournament lock──▶ seeding          [invite_only only]
+    │  an invited field was never called to check in, so there is no
+    │  check-in to close and NO no-show sweep runs on this edge
 ```
 
 `tournaments.status` is `registration | checkin | seeding | running | completed | canceled`.
@@ -951,6 +1009,47 @@ the panel's buttons go with it; `/tournament reopen-registration` is the way bac
 broader and stays open until the event begins (§8.4) — leaving late and joining late are different. One
 consequence: a withdrawal during `seeding` leaves a gap in the seed order, and `start` refuses until
 `/tournament seed refresh` renumbers.
+
+#### Invited entrants, and an invite-only field
+
+**An admin can put a Discord member straight into the field.** `/tournament invite` writes the entry itself,
+with an in-game name the admin supplies and optionally a seed — no aoe4world profile, no sign-up, no
+autocomplete against a profile that may not exist (§4). It is how a curated event is composed: the organizers
+already know who is playing and in what order.
+
+- **The in-game name is required, not derived from Discord.** §8.7's set panel puts it in front of each player as
+  the name to search for in the game's lobby browser, so a Discord handle there is a wrong instruction at the
+  moment two players are trying to find each other. An admin who does not know it can type the Discord name and
+  own that choice, which is better than the bot silently substituting one. Re-inviting the same person updates
+  the name, so a typo needs no separate verb.
+- **An invitee is exempt from the no-show sweep**, because check-in was never asked of them: the sweep skips
+  entries with an `invited_by`. The alternative — stamping `checked_in_at` at invite time — is a lie that
+  unravels twice, since `reopen-registration` clears that column and the check-in counter would then report a
+  full field nobody confirmed. Invitees are also left out of that counter for the same reason. They may still
+  press Check In; it is harmless, and a genuine signal that they are around.
+- **`/tournament uninvite` is the inverse**, and exists because `invite` is the first way an entry can exist that
+  its subject did not create — the person least likely to know `/tournament withdraw` exists. It is scoped to
+  entries that were invited, so it deliberately does not answer whether an admin may remove a self-registered
+  player (§12). Removing an invitee re-writes the seed order so the field stays startable.
+- **The cap still applies.** An invite past `entrant_cap` is refused like a sign-up would be (§8.5's "an
+  over-full field never happens" holds for both doors).
+
+**Invite-only mode** (`registration_mode = 'invite_only'`, set through `/tournament setup`) closes the public
+door: `/tournament register` and the panel's Register button are refused with an explanation that says so rather
+than the generic "registration is closed", which would send people looking for a reopen. Withdrawal stays open —
+an invited player pulling out before the event is legitimate — so the panel's two buttons move independently in
+this state, which they never had to before.
+
+**An invite-only event skips check-in entirely.** There is nothing to confirm: the field is exactly who the
+organizers put in it, none of whom can be swept. So `/tournament lock` takes it straight from `registration` to
+`seeding`, running no sweep. It is a second entry point to the same code as `close-checkin` rather than a second
+implementation of it, because "close check-in" is nonsense for an event that never opened one.
+
+> **One accepted wart.** `/tournament refresh` decides which panels a tournament should have from its status
+> alone, and every status from `seeding` onwards expects a check-in panel — deliberately, so that a panel whose
+> original post failed still gets repaired. For an invite-only event that never ran check-in, refresh will
+> therefore post a closed, empty one. Keying off `checkin_message_id` instead would skip exactly the case that
+> needs repairing, so the wart is preferred to the fix until something better presents itself.
 
 **Opening a bracket is decided by slots, not by round number.** Round one's real sets become `ready` at
 start, and a bye — one occupant, which §5 places against the top seeds — is settled there and then, recorded
@@ -1029,15 +1128,18 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament register [in_game_name]` | anyone | Autocompleted by in-game name, first sign-up only · also a button |
 | `/tournament rebind in_game_name` | anyone | Change which game account you're linked to; refused during a running event |
 | `/tournament unbind` | anyone | Unlink your game account entirely; refused while you have any entry |
-| `/tournament withdraw` | anyone | Before start only · also a button |
+| `/tournament withdraw` | anyone | Before start only · also a button · stays available in invite-only |
+| `/tournament invite user in_game_name [seed]` | admin | Puts a server member in the field with no aoe4world profile; the name is theirs in game |
+| `/tournament uninvite user` | admin | Removes an invited entrant; refused for a self-registered one (§12) |
+| `/tournament lock` | admin | Invite-only only: closes registration straight to `seeding`, with no check-in |
 | `/tournament open-checkin [minutes]` | admin | Posts the check-in panel |
 | `/tournament checkin` | anyone | Self check-in · also a button |
-| `/tournament close-checkin` | admin | Marks no-shows, runs suggested seeding |
+| `/tournament close-checkin` | admin | Marks no-shows (never invitees), refreshes ratings, seeds unless the order is manual |
 | `/tournament reopen-registration` | admin | Reverts to `registration`; clears check-ins and no-shows |
-| `/tournament setup [cap] [start_time]` | admin | Configure the event; with no options, reports what's missing. The start time gates check-in and start |
+| `/tournament setup [cap] [start_time] [invite_only]` | admin | Configure the event; with no options, reports what's missing. The start time gates check-in and start |
 | `/tournament refresh` | admin | Repair channel permissions and repost any missing panel; reports each item's outcome ephemerally |
 | `/tournament preset preset_id [from_round]` | admin | Set a round's draft preset, and so its `best_of` |
-| `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
+| `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed (which makes the order manual); re-fetch ratings and take the suggestion back |
 | `/tournament start` | admin | Generates the bracket, resolves byes, opens every playable set |
 | `/tournament delete confirm:<slug>` | creator | Deletes the tournament and the four channels it created |
 | `/set draft` | admin | Creates the draft if a set somehow has none, and reposts the links |
@@ -1095,6 +1197,29 @@ MarineLorD · Puppypaw · Wam01 · Anotand · …
 - **Changing your display name** is a separate action from rebind — it never touches which aoe4 profile is
   bound, and unlike rebind is not blocked by a running tournament, since a name carries no result attribution
   (§4 notes). It writes through to every active entry immediately.
+- **An invitee binding for the first time** uses the same `/tournament register in_game_name:<profile>` as anyone
+  else. They already have a player row, with no profile on it, so registering claims one — and their real
+  aoe4world name replaces the organizer's guess. From then on they are an ordinary entrant with ratings.
+
+**Invite-only changes the panel's heading, its explanation, and only one of its buttons:**
+
+```
+📝 **Relic Cup — registration is INVITE-ONLY**
+Bo3 single elimination · check-in required before start
+本賽事為邀請制，參賽名單由主辦方決定。
+This event is invite-only — the organizers pick the field.
+
+**Registered (8/8)**
+MarineLorD · Puppypaw · Wam01 · Anotand · …
+
+[ 📝 Register ]  [ ❌ Withdraw ]
+      ↑ disabled       ↑ still live
+```
+
+The roster and the counter are unchanged — an invited field is a field. **Register disables and Withdraw does
+not**, which is the first state where the two buttons differ: registration being shut does not mean an entrant
+has lost the right to pull out (§8.4). The gate that refuses a sign-up and the state the panel renders must come
+from one place, or the panel will eventually advertise a door that is closed.
 
 Registration must give unmistakable feedback:
 
@@ -1587,6 +1712,9 @@ than panicking (buttons from an older deploy will be pressed).
 
 Tracked separately; not part of this design.
 
+- **An unbound entrant cannot be cross-checked.** The follow-up below is keyed on `profile_id`, which an
+  invited entrant does not have (§4), so any such check has to skip them rather than treat a missing result as a
+  discrepancy. The same is true of every future feature that resolves an entrant through aoe4world.
 - **Result cross-checking.** `GET /api/v0/players/:profile_id/games?opponent_profile_id=X` returns games
   between two players with map, civs and winner, and supports `since=`/`updated_since=` for cheap incremental
   polling. This could verify the draft tool's results independently. Once migrations exist, adding
@@ -1612,6 +1740,12 @@ Tracked separately; not part of this design.
   tool's own history under that account. Worth disclosing rather than looking like an unusually busy player.
 - **How many redrafts before `/set redraft` becomes admin-only?** Each one strands an undeletable room on
   someone else's server, and a button either player can press will occasionally be pressed in frustration.
+- **May an admin remove a *self-registered* entrant?** `/tournament uninvite` (§8.3) deliberately does not answer
+  this: it is scoped to entries an admin created, so it is the inverse of `/tournament invite` and nothing more.
+  The cap design assumed no kick was needed because everyone in the field put themselves there — an assumption
+  invites do not break, since removing an invitee is undoing the organizer's own action. If a self-registered
+  player ever needs removing, the question is what stops it being used to settle an argument, and the answer is
+  probably a reason string in the audit log rather than a new rule.
 - **How do entrants learn they need a draft-tool account,** and should check-in verify it rather than discovering
   it when a set opens? Discord login (§3.6) would retire this question rather than answer it.
 - **If Discord login lands, does the seat instruction go away entirely,** or stay as the fallback for players who

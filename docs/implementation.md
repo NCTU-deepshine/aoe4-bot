@@ -208,6 +208,82 @@ Gate: no draw below two entrants; byes on the top seeds for a non-power-of-two f
 suggested seeding rather than registration; the tail delete removing exactly the surplus and nothing from
 another tournament.
 
+### Invited entrants and invite-only events (chunks 30–34)
+
+Four chunks plus one optional, in this order. **30 first** because it fixes a bug that exists today and depends
+on nothing; **31 before 32** because an invite cannot insert against a `not null` column; **33 after 32** because
+invite-only with no `invite` verb is a tournament nobody can enter; **34 last** because it is the only piece whose
+cost is arguably not worth paying, and it is written down so it can be dropped the way 13 and 15 were.
+
+**30. A hand-made seed order survives the rating pass**
+`tournaments.seed_source` (`'suggested' | 'manual'`, borrowing `atr_source`'s vocabulary), a pure
+`seeding::SeedPolicy`, and `refresh_ratings` taking it: ratings are always refreshed, only the ordering branches.
+`KeepManual` feeds `seeding::display_order` back through `set_seed_order(.., false)`, which preserves the
+organizers' relative order **and compacts it**, so `start`'s 1..n requirement holds with no separate renumber.
+`seed set` writes `'manual'`, `seed refresh` writes `'suggested'` — which makes its "discards any override" doc
+comment true — and `clear_checkins` splits so `reopen-registration` stops nulling a manual order.
+**Fixes a live bug**: `seed set` has no status gate, so an order set during `registration` is destroyed by
+`close-checkin`'s seeding pass and by `reopen-registration`, both silently, invites or no invites.
+Design: §6 ("A hand-made order outlives the rating pass"), §8.3.
+Gate: the policy mapping as a pure function; `KeepManual` preserving relative order while closing a gap a
+no-show left; `Suggest` still discarding an override; the new outcome rendering in both locales.
+
+**31. `aoe4_id` becomes optional**
+No new command and nothing user-visible — the schema simply starts permitting an unbound entrant that nothing yet
+creates. `Option<i64>` on both row types, guards where the ratings pass assumed a profile (skip the write
+entirely for an unbound entrant rather than storing `(None, None, None)`), `snapshot_entry_elo` widened so its two
+call sites need no guard of their own, and three fixes the nullability exposes: `register` currently refuses an
+unbound player who supplies a profile, `unbind` should answer "not bound" rather than "blocked by entries", and
+`rebind` should finally write the display name through `db::set_player_display_name`, which has had no production
+caller since it was written.
+**This migration is a table rebuild, not an `alter table`, and cannot run in sqlx's transaction** — see §4's
+notes for why and for the exact shape. It is the highest-risk commit in this group by a distance.
+Design: §4 (the schema block and its notes on nullable `aoe4_id`).
+Gate: the migrator against a **populated** database preserves every row and leaves `pragma foreign_key_check`
+clean — every existing migrator test starts from empty, so none of them would catch a data-losing rebuild. Also:
+many null `aoe4_id`s accepted while a duplicate real one is still rejected; foreign keys enforced again
+afterwards; the ratings pass making no HTTP call for an unbound entrant.
+
+**32. `/tournament invite` and `/tournament uninvite`**
+`tournament_entries.invited_by`, and the no-show sweep skipping entries that have one — with the reasoning
+recorded, because stamping `checked_in_at` instead is the tempting version and it unravels twice.
+`db::invite_player_and_entry` mirrors `register_new_player_and_entry`: one transaction, null `aoe4_id`. The
+optional seed goes through `seeding::reorder` + `set_seed_order`, never a direct `seed` write, so
+`unique (tournament_id, seed)` is never touched. `in_game_name` is required free text — not the profile
+autocomplete, whose whole purpose is resolving a profile that here does not exist. `uninvite` is scoped to
+invited entries and re-writes the order so the field stays startable. `set_thread::Player` gains `verified`, and
+the seat line marks an unverified name: chunk 16's panel presents that name as the one to search for in the lobby
+browser, which is the only landed code whose *behaviour*, not just its types, is wrong for an unbound entrant.
+Design: §8.3 ("Invited entrants, and an invite-only field"), §8.4, §8.5, §8.7.
+Gate: §10 — an invitee survives `close-checkin` without checking in while a self-registered no-show does not; the
+check-in counter excludes invitees; an invite past the cap is refused; `uninvite` refuses a self-registered entry;
+re-inviting updates the name everywhere it is shown; a seeded invite leaves the field contiguous.
+
+**33. Invite-only registration**
+`tournaments.registration_mode`, and one pure three-state type replacing the `open: bool` that the registration
+gate and the three panel renderers currently share — so the gate and what the panel advertises cannot disagree.
+`RegisterOutcome` gains a variant that explains invite-only rather than reusing "registration is closed", whose
+wording sends people looking for a reopen. **Register disables while Withdraw stays live**, the first state where
+the two buttons differ. Configured through `/tournament setup`, which already owns per-tournament settings and
+already reports them. Fixes a live bug on the way: `panel::post_initial` hardcodes the open state, so
+`/tournament refresh` already reposts an OPEN registration panel for a tournament in `checkin`.
+Design: §8.3, §8.5, §8.4, §4.
+Gate: the three-state resolution as a pure function; a sign-up and the button both refused with the invite-only
+wording; withdrawal still permitted; the panel rendering all three states; `/tournament refresh` reposting the
+panel in the state the tournament is actually in.
+
+**34. Invite-only skips check-in** *(optional; drop if the wart below outweighs it)*
+A pure `checkin::closeable(status, invite_only)`, `close` skipping the sweep when it ran from `registration`, and
+`/tournament lock` as a second entry point to the same code rather than a second implementation of it — the
+pattern §8.7 already uses for `/set done` and its button. Needs `panel::refresh_now` on that path, since the
+refresh that closes the registration panel lives only in `open-checkin` today.
+**Accepted wart:** `/tournament refresh` will post a closed, empty check-in panel for an event that never ran
+check-in, because panel expectations are derived from status and the alternative skips exactly the case that
+needs repair. Recorded in §8.3.
+Design: §8.3 (the `registration ──lock──▶ seeding` edge).
+Gate: the gate as a pure function — closeable from `checkin` always, from `registration` only when invite-only,
+never otherwise; no entry marked `no_show` on that edge; the registration panel closed afterwards.
+
 ## Phase E — the draft tool
 
 **14. Draft-tool client**
@@ -293,6 +369,9 @@ live fetch is blocked.
 
 **23. Boot-time panel reconciliation**
 Confirm each stored panel message still exists on startup and recreate it if an organizer deleted it.
+If chunk 33 has landed, derive the registration panel's state from its three-state resolution rather than
+hardcoding the open one — that is the bug chunk 33 fixes in `panel::post_initial`, and a reconciler that reposts
+from scratch is the obvious place to reintroduce it.
 Design: §8.5.
 
 ## Phase F — localization
