@@ -483,7 +483,7 @@ pub(crate) async fn update_stage_status(pool: &SqlitePool, id: i64, status: &str
     Ok(())
 }
 
-// 3. tournament_rounds — consumed by chunk 12 (`/tournament start`) and chunk 15 (round presets)
+// 3. tournament_rounds — consumed by chunk 12 (`/tournament start`) and chunk 27 (round presets)
 
 #[derive(FromRow)]
 pub(crate) struct TournamentRound {

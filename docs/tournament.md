@@ -346,9 +346,13 @@ presets: the cap constrains organizers — a Bo3 bracket with a Bo5 final needs 
 - **Host powers are latent, not used.** The host may override a game result and force-start. Both are out of
   scope here; `/set report` (§7) stays a bot-side manual override rather than a call into the tool.
 
-**Validate the round's preset when it is configured, not when a set opens.** `validatePreset`
-(`lib/draft/validate.ts`) is a hard block at creation and returns `400` with an `issues` list. Discovering that a
-preset cannot produce a Bo5 at the moment two players are waiting is the wrong time.
+**We do not run the tool's own `validatePreset`, and cannot.** It lives in `lib/draft/validate.ts` and runs in
+exactly one place — inside `POST /api/matches`, which creates a room on success. There is no validate endpoint,
+and `app/api/matches/[id]` is GET-only, so a probe would leave a room nobody can delete. Porting the rules here
+would mean modelling the whole step/civ/map config §2 gives to the tool, and a port that gets one of its ten
+interacting checks wrong would reject **valid** presets — worse than not checking. So the tool's `400` with its
+`issues` list is caught and reported (`DraftError::PresetRejected`) rather than pre-empted. The tool's editor
+already warns while a preset is authored, which is where a malformed one is most cheaply caught.
 
 **What we validate, and the line it sits on.** Only properties the bot itself depends on — a preset that
 breaks one of these breaks *us*, not somebody's idea of a good draft (§2). All are checkable from the preset's

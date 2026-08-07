@@ -216,12 +216,20 @@ and reading a preset's config. Base URL and credentials from env, alongside `DIS
 Design: §3.3.
 Gate: preset-config deserialization from a saved payload; the handshake against a stub. No live calls.
 
-**15. Round presets: the tool's own validation**
-Chunk 27 assigns presets and checks what the bot depends on (public, `resultMode: "vote"`, odd `bestOf`). What
-remains is running the tool's own `validatePreset` (`lib/draft/validate.ts`) and surfacing its `issues`, so a
-preset malformed by the tool's rules is caught here rather than at `POST /api/matches` with two players waiting.
-Design: §3.3.
-Gate: the tool's `issues` surfaced alongside our own.
+**15. Round presets: the tool's own validation — dropped, not built**
+It would have run `validatePreset` (`lib/draft/validate.ts`) when a round was configured, so a preset the tool
+considers unplayable was caught before two players were waiting on it. The tool offers no way to do that.
+
+`validatePreset` runs in exactly one place — inside `POST /api/matches` — and that call creates a room on
+success. There is no validate endpoint, and `app/api/matches/[id]` is GET-only, so every probe would leave a
+room nobody can delete. The alternative, porting the rules to Rust, means modelling the whole step/civ/map
+config that chunk 27 deliberately left to the tool (§2), reproducing about ten interacting checks that are still
+being fixed upstream, and drifting silently from then on — and a port that gets a rule wrong rejects **valid**
+presets, which is worse than not checking.
+
+What already covers it: the tool's own editor warns while a preset is being authored, chunk 27 checks the three
+properties the bot depends on, and chunk 14 keeps the tool's `issues` in `DraftError::PresetRejected`. So a
+malformed preset is reported when it bites rather than prevented beforehand.
 
 **16. Set threads and draft creation**
 Thread on `ready`, members added, draft created as the bot's account, pinned panel carrying the room link and

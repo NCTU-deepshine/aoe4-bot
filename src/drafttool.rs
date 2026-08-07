@@ -99,8 +99,9 @@ pub(crate) enum DraftError {
     Unauthorized,
     /// The preset is private and belongs to somebody else.
     Forbidden,
-    /// The tool's own `validatePreset` refused the preset. Chunk 15 surfaces
-    /// these; chunk 14's job is to not throw them away.
+    /// The tool's own `validatePreset` refused the preset. We cannot run that
+    /// check ahead of time (§3.3), so keeping its issues is the only way anyone
+    /// learns which rule was broken.
     PresetRejected {
         issues: Vec<PresetIssue>,
     },
