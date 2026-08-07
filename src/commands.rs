@@ -740,6 +740,7 @@ pub async fn open_checkin(
             tournament.id,
             &tournament.name,
             closes_at,
+            true,
         )
         .await?;
         tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
@@ -1372,102 +1373,256 @@ async fn delete_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournam
     guild_only,
     check = "tournament_only",
     check = "tournament_manage_only",
-    required_bot_permissions = "MANAGE_CHANNELS",
+    // `create_permission` is Discord's *edit channel permissions* endpoint,
+    // which needs MANAGE_ROLES — declaring only MANAGE_CHANNELS let the command
+    // run and 403 on every overwrite, reporting nothing.
+    required_bot_permissions = "MANAGE_CHANNELS | MANAGE_ROLES",
     // `refresh` is taken by the home guild's ranked-board command, so the Rust
     // name differs from the one Discord shows.
     rename = "refresh",
     description_localized("zh-TW", "修復賽事頻道權限，並重新張貼遺失的面板。")
 )]
 pub async fn refresh_panels(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.defer().await?;
+    // Ephemeral: this is a diagnostic for whoever ran it, not narration for the
+    // channel — and a per-reader locale is only correct for a single reader.
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
     };
     let pool = &ctx.data().database;
-    let mut repaired: Vec<&str> = Vec::new();
 
-    if reapply_channel_permissions(ctx, &tournament).await {
-        repaired.push(locale.pick("頻道權限", "channel permissions"));
-    }
+    // One line per item, always, saying what happened to it. An earlier version
+    // listed only repairs, so a run that fixed nothing and failed at everything
+    // reported "nothing needed repairing" — the two outcomes a repair tool most
+    // needs to tell apart.
+    let mut lines: Vec<String> = Vec::new();
 
-    // Each panel: edit if the message is still there, repost if it is not. A
-    // message someone deleted leaves a stale id, and editing that fails.
-    if panel::refresh_now(ctx.http(), pool, &tournament).await.is_err()
-        && let Some(register_channel_id) = tournament.register_channel_id
-    {
-        let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
-        let message_id = panel::post_initial(
-            ctx.http(),
-            channel_id,
-            tournament.id,
-            &tournament.name,
-            tournament.entrant_cap,
+    let (applied, failed) = reapply_channel_permissions(ctx, &tournament).await;
+    lines.push(if failed > 0 {
+        locale.pick(
+            format!("頻道權限：{failed} 個頻道套用失敗，機器人可能缺少「管理身分組」權限。"),
+            format!("Channel permissions: {failed} channel(s) failed — the bot may lack Manage Roles."),
         )
-        .await?;
-        tournament_db::set_register_message_id(pool, tournament.id, i64::try_from(message_id.get()).unwrap()).await?;
-        repaired.push(locale.pick("報名面板", "the registration panel"));
-    }
-
-    if tournament.checkin_message_id.is_some()
-        && checkin_panel::refresh_now(ctx.http(), pool, &tournament).await.is_err()
-        && let Some(register_channel_id) = tournament.register_channel_id
-    {
-        let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
-        let message_id = checkin_panel::post_initial(
-            ctx.http(),
-            pool,
-            channel_id,
-            tournament.id,
-            &tournament.name,
-            tournament.checkin_closes_at,
-        )
-        .await?;
-        tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
-            .await?;
-        repaired.push(locale.pick("簽到面板", "the check-in panel"));
-    }
-
-    if tournament.seed_message_id.is_some()
-        && seed_panel::refresh(ctx.http(), pool, &tournament).await.is_err()
-        && let Some(bracket_channel_id) = tournament.bracket_channel_id
-    {
-        let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
-        let message_id =
-            seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await?;
-        tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap())).await?;
-        repaired.push(locale.pick("種子名單", "the seeding panel"));
-    }
-
-    if bracket_view::reconcile(ctx.http(), pool, &tournament).await.is_ok() {
-        repaired.push(locale.pick("賽程表", "the bracket"));
-    }
-
-    let summary = if repaired.is_empty() {
+    } else if applied > 0 {
         locale
-            .pick("沒有需要修復的項目。", "Nothing needed repairing.")
+            .pick("頻道權限：已重新套用。", "Channel permissions: reapplied.")
             .to_string()
     } else {
-        format!(
-            "{} {}",
-            locale.pick("已修復：", "Repaired:"),
-            repaired.join(locale.pick("、", ", "))
-        )
-    };
-    ctx.say(summary).await?;
+        locale
+            .pick(
+                "頻道權限：沒有可套用的頻道。",
+                "Channel permissions: no output channels.",
+            )
+            .to_string()
+    });
+
+    lines.push(refresh_register_panel(ctx, &tournament, locale).await?);
+    lines.push(refresh_checkin_panel(ctx, &tournament, locale).await?);
+    lines.push(refresh_seed_panel(ctx, &tournament, locale).await?);
+
+    lines.push(match bracket_view::reconcile(ctx.http(), pool, &tournament).await {
+        Ok(bracket_view::ReconcileOutcome::NoChannel) => locale
+            .pick(
+                "賽程表：這場賽事沒有賽程頻道。",
+                "Bracket: this tournament has no bracket channel.",
+            )
+            .to_string(),
+        Ok(bracket_view::ReconcileOutcome::TooFewEntrants) => locale
+            .pick(
+                "賽程表：報名者不足兩人，還畫不出對戰表。",
+                "Bracket: fewer than two entrants, so there is nothing to draw yet.",
+            )
+            .to_string(),
+        Ok(outcome) if outcome.changed() => locale.pick("賽程表：已重新張貼。", "Bracket: reposted.").to_string(),
+        Ok(_) => locale.pick("賽程表：已更新。", "Bracket: updated.").to_string(),
+        Err(err) => {
+            error!("failed to redraw the bracket for tournament {}: {err:?}", tournament.id);
+            locale
+                .pick(
+                    "賽程表：無法張貼，請確認機器人可在賽程頻道發言。",
+                    "Bracket: could not post — check the bot can send messages in the bracket channel.",
+                )
+                .to_string()
+        },
+    });
+
+    ephemeral(ctx, lines.join("\n")).await?;
     Ok(())
 }
 
+/// The registration panel: edited if it is there, posted if it is not.
+async fn refresh_register_panel(
+    ctx: Context<'_>,
+    tournament: &tournament_db::Tournament,
+    locale: Locale,
+) -> Result<String, Error> {
+    let pool = &ctx.data().database;
+    let Some(register_channel_id) = tournament.register_channel_id else {
+        return Ok(locale
+            .pick(
+                "報名面板：這場賽事沒有報名頻道。",
+                "Registration panel: no register channel.",
+            )
+            .to_string());
+    };
+
+    if tournament.register_message_id.is_some() && panel::refresh_now(ctx.http(), pool, tournament).await.is_ok() {
+        return Ok(locale
+            .pick("報名面板：已更新。", "Registration panel: updated.")
+            .to_string());
+    }
+
+    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+    match panel::post_initial(
+        ctx.http(),
+        channel_id,
+        tournament.id,
+        &tournament.name,
+        tournament.entrant_cap,
+    )
+    .await
+    {
+        Ok(message_id) => {
+            tournament_db::set_register_message_id(pool, tournament.id, i64::try_from(message_id.get()).unwrap())
+                .await?;
+            Ok(locale
+                .pick("報名面板：已重新張貼。", "Registration panel: reposted.")
+                .to_string())
+        },
+        Err(err) => {
+            error!(
+                "failed to repost the registration panel for tournament {}: {err:?}",
+                tournament.id
+            );
+            Ok(locale
+                .pick("報名面板：無法張貼。", "Registration panel: could not post.")
+                .to_string())
+        },
+    }
+}
+
+/// The check-in panel, which only belongs in the channel once check-in has opened.
+async fn refresh_checkin_panel(
+    ctx: Context<'_>,
+    tournament: &tournament_db::Tournament,
+    locale: Locale,
+) -> Result<String, Error> {
+    let pool = &ctx.data().database;
+    if !checkin::checkin_panel_expected(&tournament.status) {
+        return Ok(locale
+            .pick(
+                "簽到面板：尚未開始簽到。",
+                "Check-in panel: check-in has not opened yet.",
+            )
+            .to_string());
+    }
+    let Some(register_channel_id) = tournament.register_channel_id else {
+        return Ok(locale
+            .pick(
+                "簽到面板：這場賽事沒有報名頻道。",
+                "Check-in panel: no register channel.",
+            )
+            .to_string());
+    };
+
+    if tournament.checkin_message_id.is_some() && checkin_panel::refresh_now(ctx.http(), pool, tournament).await.is_ok()
+    {
+        return Ok(locale
+            .pick("簽到面板：已更新。", "Check-in panel: updated.")
+            .to_string());
+    }
+
+    let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+    match checkin_panel::post_initial(
+        ctx.http(),
+        pool,
+        channel_id,
+        tournament.id,
+        &tournament.name,
+        tournament.checkin_closes_at,
+        // Past check-in this must come back closed, not inviting presses.
+        checkin::checkin_is_open(&tournament.status),
+    )
+    .await
+    {
+        Ok(message_id) => {
+            tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
+                .await?;
+            Ok(locale
+                .pick("簽到面板：已重新張貼。", "Check-in panel: reposted.")
+                .to_string())
+        },
+        Err(err) => {
+            error!(
+                "failed to repost the check-in panel for tournament {}: {err:?}",
+                tournament.id
+            );
+            Ok(locale
+                .pick("簽到面板：無法張貼。", "Check-in panel: could not post.")
+                .to_string())
+        },
+    }
+}
+
+/// The seeding panel, which only belongs in the channel from `seeding` onward.
+async fn refresh_seed_panel(
+    ctx: Context<'_>,
+    tournament: &tournament_db::Tournament,
+    locale: Locale,
+) -> Result<String, Error> {
+    let pool = &ctx.data().database;
+    if !seeding::seed_panel_expected(&tournament.status) {
+        return Ok(locale
+            .pick(
+                "種子名單：尚未進入排種階段。",
+                "Seeding panel: seeding has not started yet.",
+            )
+            .to_string());
+    }
+    let Some(bracket_channel_id) = tournament.bracket_channel_id else {
+        return Ok(locale
+            .pick("種子名單：這場賽事沒有賽程頻道。", "Seeding panel: no bracket channel.")
+            .to_string());
+    };
+
+    if tournament.seed_message_id.is_some() && seed_panel::refresh(ctx.http(), pool, tournament).await.is_ok() {
+        return Ok(locale.pick("種子名單：已更新。", "Seeding panel: updated.").to_string());
+    }
+
+    let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+    match seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await {
+        Ok(message_id) => {
+            tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
+                .await?;
+            Ok(locale
+                .pick("種子名單：已重新張貼。", "Seeding panel: reposted.")
+                .to_string())
+        },
+        Err(err) => {
+            error!(
+                "failed to repost the seeding panel for tournament {}: {err:?}",
+                tournament.id
+            );
+            Ok(locale
+                .pick("種子名單：無法張貼。", "Seeding panel: could not post.")
+                .to_string())
+        },
+    }
+}
+
 /// Re-applies the output channels' overwrites, so a tournament created before
-/// the bot was granted an explicit allow starts working. Best-effort per
-/// channel: one an admin has since deleted must not stop the others.
-async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> bool {
+/// the bot was granted an explicit allow starts working. Returns
+/// `(applied, failed)`: best-effort per channel, since one an admin has since
+/// deleted must not stop the others, and a caller that cannot see the failures
+/// cannot tell a repaired tournament from a broken one.
+async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> (usize, usize) {
     let Some(guild_id) = ctx.guild_id() else {
-        return false;
+        return (0, 0);
     };
     let overwrites = read_only_overwrites(guild_id.everyone_role(), ctx.cache().current_user().id);
 
-    let mut applied = false;
+    let (mut applied, mut failed) = (0, 0);
     for channel_id in [
         tournament.bracket_channel_id,
         tournament.draft_channel_id,
@@ -1480,12 +1635,13 @@ async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_d
         for overwrite in &overwrites {
             if let Err(err) = channel_id.create_permission(ctx.http(), overwrite.clone()).await {
                 error!("failed to reapply permissions on channel {channel_id}: {err:?}");
+                failed += 1;
             } else {
-                applied = true;
+                applied += 1;
             }
         }
     }
-    applied
+    (applied, failed)
 }
 
 // Turns the seeded field into a bracket and opens round one (§8.3, §5). No

@@ -20,6 +20,33 @@ use sqlx::SqlitePool;
 /// A bracket needs two sides; below that there is nothing to draw.
 const MIN_ENTRANTS: usize = 2;
 
+/// What `reconcile` did.
+///
+/// Two of these are ordinary quiet outcomes rather than errors, but a repair
+/// command reporting them as success is how a bracket that never appeared got
+/// announced as "repaired" — so they are named and returned instead of being
+/// folded into `Ok(())`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReconcileOutcome {
+    /// The tournament row has no bracket channel, so there is nowhere to draw.
+    NoChannel,
+    /// Under two active entrants — §8.6 has nothing to draw yet.
+    TooFewEntrants,
+    Drawn {
+        posted: usize,
+        edited: usize,
+        deleted: usize,
+    },
+}
+
+impl ReconcileOutcome {
+    /// Whether the channel's contents actually changed, as opposed to the
+    /// drawing already being current.
+    pub(crate) fn changed(&self) -> bool {
+        matches!(self, Self::Drawn { posted, deleted, .. } if *posted > 0 || *deleted > 0)
+    }
+}
+
 /// `bracket::build` insists on one `best_of` per round, but nothing rendered
 /// depends on it — `render::Round` carries a name and matches, and match length
 /// appears nowhere in the drawing. So the preview supplies a filler and needs no
@@ -181,14 +208,6 @@ fn decorate(name: &str, chunks: Vec<String>, provisional: bool) -> Vec<String> {
         .collect()
 }
 
-/// Draws the current bracket into `#{slug}-bracket`, reusing the messages that
-/// are already there.
-///
-/// The message count is **not stable**: it follows the bracket size, which jumps
-/// at powers of two, so a field growing from 8 to 9 turns one message into
-/// three. Each chunk is therefore edited if a message already holds that
-/// ordinal, posted if not, and any surplus tail deleted — otherwise the bottom
-/// of a bigger bracket lingers under a smaller one.
 /// The drawn bracket once `start` has written one, `None` while it has not —
 /// which is what separates the real thing from a preview.
 async fn persisted_rounds(
@@ -209,9 +228,21 @@ async fn persisted_rounds(
     Ok(Some(played_rounds(&rounds, &sets, entries)))
 }
 
-pub(crate) async fn reconcile(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> Result<(), Error> {
+/// Draws the current bracket into `#{slug}-bracket`, reusing the messages that
+/// are already there.
+///
+/// The message count is **not stable**: it follows the bracket size, which jumps
+/// at powers of two, so a field growing from 8 to 9 turns one message into
+/// three. Each chunk is therefore edited if a message already holds that
+/// ordinal, posted if not, and any surplus tail deleted — otherwise the bottom
+/// of a bigger bracket lingers under a smaller one.
+pub(crate) async fn reconcile(
+    http: impl CacheHttp,
+    pool: &SqlitePool,
+    tournament: &Tournament,
+) -> Result<ReconcileOutcome, Error> {
     let Some(bracket_channel_id) = tournament.bracket_channel_id else {
-        return Ok(());
+        return Ok(ReconcileOutcome::NoChannel);
     };
     let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
 
@@ -222,7 +253,7 @@ pub(crate) async fn reconcile(http: impl CacheHttp, pool: &SqlitePool, tournamen
         Some(rounds) => (rounds, false),
         None => match preview_rounds(&entries) {
             Some(rounds) => (rounds, true),
-            None => return Ok(()),
+            None => return Ok(ReconcileOutcome::TooFewEntrants),
         },
     };
     let chunks = decorate(
@@ -231,6 +262,7 @@ pub(crate) async fn reconcile(http: impl CacheHttp, pool: &SqlitePool, tournamen
         provisional,
     );
 
+    let (mut posted, mut edited, mut deleted) = (0, 0, 0);
     let existing = db::list_bracket_messages(pool, tournament.id).await?;
     for (index, chunk) in chunks.iter().enumerate() {
         let ordinal = i64::try_from(index).unwrap();
@@ -240,13 +272,15 @@ pub(crate) async fn reconcile(http: impl CacheHttp, pool: &SqlitePool, tournamen
                 channel_id
                     .edit_message(&http, message_id, EditMessage::new().content(chunk))
                     .await?;
+                edited += 1;
             },
             None => {
-                let posted = channel_id
+                let message = channel_id
                     .send_message(&http, CreateMessage::new().content(chunk))
                     .await?;
-                db::upsert_bracket_message(pool, tournament.id, ordinal, i64::try_from(posted.id.get()).unwrap())
+                db::upsert_bracket_message(pool, tournament.id, ordinal, i64::try_from(message.id.get()).unwrap())
                     .await?;
+                posted += 1;
             },
         }
     }
@@ -261,11 +295,17 @@ pub(crate) async fn reconcile(http: impl CacheHttp, pool: &SqlitePool, tournamen
                 "failed to delete surplus bracket message {message_id} for tournament {}: {err:?}",
                 tournament.id
             );
+        } else {
+            deleted += 1;
         }
     }
     db::delete_bracket_messages_from(pool, tournament.id, surplus).await?;
 
-    Ok(())
+    Ok(ReconcileOutcome::Drawn {
+        posted,
+        edited,
+        deleted,
+    })
 }
 
 #[cfg(test)]
@@ -293,6 +333,39 @@ mod tests {
     fn field(n: i64) -> Vec<TournamentEntry> {
         // Descending ELO so the suggested order matches the numbering.
         (1..=n).map(|i| entry(i, &format!("P{i}"), Some(2000 - i))).collect()
+    }
+
+    #[test]
+    fn only_a_posted_or_deleted_message_counts_as_a_repair() {
+        // An edit means the drawing was already there and merely stale. Calling
+        // that a repair is how a bracket that never appeared got reported as
+        // fixed, so the distinction is the point of the type.
+        assert!(
+            ReconcileOutcome::Drawn {
+                posted: 1,
+                edited: 0,
+                deleted: 0
+            }
+            .changed()
+        );
+        assert!(
+            ReconcileOutcome::Drawn {
+                posted: 0,
+                edited: 0,
+                deleted: 2
+            }
+            .changed()
+        );
+        assert!(
+            !ReconcileOutcome::Drawn {
+                posted: 0,
+                edited: 3,
+                deleted: 0
+            }
+            .changed()
+        );
+        assert!(!ReconcileOutcome::NoChannel.changed());
+        assert!(!ReconcileOutcome::TooFewEntrants.changed());
     }
 
     #[test]

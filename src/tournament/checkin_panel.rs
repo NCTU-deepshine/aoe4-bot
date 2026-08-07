@@ -62,6 +62,10 @@ pub(crate) fn render(
 /// Posts the panel with the entrants registered so far — unlike the
 /// registration panel (posted at tournament creation, with nobody registered
 /// yet), check-in opens after registration has been running for a while.
+///
+/// `open` is a parameter rather than an assumption because `/tournament refresh`
+/// also posts this panel, and a tournament past check-in must get it back in its
+/// closed form instead of a live button nobody may press.
 pub(crate) async fn post_initial(
     http: impl CacheHttp,
     pool: &SqlitePool,
@@ -69,9 +73,10 @@ pub(crate) async fn post_initial(
     tournament_id: i64,
     name: &str,
     closes_at: Option<DateTime<Utc>>,
+    open: bool,
 ) -> Result<MessageId, Error> {
     let entries = db::list_entries_for_tournament(pool, tournament_id).await?;
-    let (content, components) = render(tournament_id, name, &entries, closes_at, true);
+    let (content, components) = render(tournament_id, name, &entries, closes_at, open);
     let message = channel_id
         .send_message(http, CreateMessage::new().content(content).components(components))
         .await?;

@@ -842,7 +842,11 @@ category: Relic Cup                 <- the invoking channel's parent_id
   else, and without its own overwrite every panel and bracket post into these channels fails with 403 Missing
   Permissions. That shipped once and was invisible, because those posts are best-effort and only log.
   `/tournament refresh` re-applies the overwrites, which is how a tournament created before the fix gets
-  repaired without being recreated.
+  repaired without being recreated. That repair needs **Manage Roles**, not Manage Channels: editing an
+  existing channel's overwrites is a different endpoint from creating a channel with them, and declaring
+  only the latter let the command run and 403 on every call while reporting nothing. Creating a channel
+  *with* overwrites needs only Manage Channels, so a tournament made after the fix never needs the repair —
+  Manage Roles is a migration requirement, not an ongoing one.
 - **`#…-draft` is the spectator surface.** Set threads are private, so nothing in them is watchable by the
   server; this channel carries one post per set, published when both seats are claimed, with the `/watch/` link
   (§8.7). Five channels per tournament is still far inside the 50-per-category limit.
@@ -954,7 +958,7 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament close-checkin` | admin | Marks no-shows, runs suggested seeding |
 | `/tournament reopen-registration` | admin | Reverts to `registration`; clears check-ins and no-shows |
 | `/tournament setup [cap] [start_time]` | admin | Configure the event; with no options, reports what's missing. The start time gates check-in and start |
-| `/tournament refresh` | admin | Repair channel permissions and repost any missing panel |
+| `/tournament refresh` | admin | Repair channel permissions and repost any missing panel; reports each item's outcome ephemerally |
 | `/tournament preset preset_id [from_round]` | admin | Set a round's draft preset, and so its `best_of` |
 | `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
 | `/tournament start` | admin | Generates the bracket, resolves byes, opens every playable set |
@@ -1067,7 +1071,8 @@ Same feedback rules: newly checked in, already checked in, not registered, check
 #### Seeding panel
 
 A persistent message in `#…-bracket`, posted when `/tournament close-checkin` computes the first seeding and
-edited in place on every `/tournament seed set|refresh`. It lists the checked-in field in `seed` order with
+edited in place on every `/tournament seed set|refresh`. It lists the checked-in field in `seeding::display_order` — seeded entrants first in seed order,
+anyone not yet seeded after them by §6's tiering, which is the same key the bracket drawing uses — with
 **ATR and ELO in separate columns** — never one blended number (§6) — and carries two things §6 requires in the
 output rather than only in this document: that the two are different scales and the order is a default, not a
 claim they are comparable; and credit to the ATR source.
@@ -1090,6 +1095,19 @@ An ASCII bracket in a code block, posted in `#…-bracket` and edited in place a
 implies, and the same messages become the real bracket once the event starts. Generation is pure and
 cheap, so redrawing on every sign-up costs nothing worth counting — what costs is Discord, which is
 why the redraw is throttled with the panels.
+
+**The preview is ordered by `seeding::display_order`, the same key the seeding panel uses** — so an
+organizer's `seed set` override reaches the picture, and the two surfaces cannot show the same field in
+two different orders. Seeds are drawn as stored rather than renumbered by position, so the gap a
+withdrawal leaves still matches the panel, and an unseeded latecomer is numbered past the last seed
+rather than reusing a free one.
+
+**Once sets exist the drawing comes from them, not from the preview.** `start` writes the bracket from
+`seed` and advances bye winners into round two, none of which a preview recomputed from ratings can
+know. Whether the drawing is labelled provisional follows which of the two produced it, rather than
+being read off the status separately. A set nobody has played shows no score rather than a zero, which
+also keeps a bye from reading `0-0`; its winner is derived from `winner_user_id`, so a bye shows its
+occupant advanced without inventing a scoreline.
 
 **The message count is not fixed.** It follows the bracket size, which jumps at powers of two: 8
 entrants render to one message and 9 to three. A redraw therefore edits the chunk that already has a

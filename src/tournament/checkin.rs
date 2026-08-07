@@ -17,6 +17,16 @@ pub(crate) fn checkin_is_open(status: &str) -> bool {
     status == "checkin"
 }
 
+/// Whether the check-in panel belongs in `#{slug}-register` right now: from the
+/// moment check-in opens, and afterwards in its closed form.
+///
+/// A repair has to ask the phase rather than whether `checkin_message_id` is
+/// set — if the original post failed, that id was never written, and keying off
+/// it means the one case needing repair is the one case skipped.
+pub(crate) fn checkin_panel_expected(status: &str) -> bool {
+    matches!(status, "checkin" | "seeding" | "running" | "completed")
+}
+
 /// The one backward edge in the lifecycle (§8.3) starts from exactly these:
 /// before them there is no check-in round to undo, after them the field is
 /// locked in and the recovery is `/tournament cancel` instead.
@@ -368,6 +378,18 @@ mod tests {
         assert!(en.contains("checked in"), "{en}");
         // Counts are data and must survive both renderings.
         assert!(zh.contains("1/2") && en.contains("1/2"));
+    }
+
+    #[test]
+    fn the_checkin_panel_is_expected_from_checkin_onward() {
+        // Repair keys off the phase, not off `checkin_message_id` — a panel
+        // whose first post failed has no id, and is the one needing repair.
+        for status in ["checkin", "seeding", "running", "completed"] {
+            assert!(checkin_panel_expected(status), "{status} should still show the panel");
+        }
+        for status in ["registration", "canceled"] {
+            assert!(!checkin_panel_expected(status), "{status} should not have one");
+        }
     }
 
     #[test]
