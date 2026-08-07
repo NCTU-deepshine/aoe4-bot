@@ -316,10 +316,21 @@ The bot creates every draft itself, from a normal account it owns. Registration 
 **Authentication is the awkward part.** `POST /api/matches` requires a session cookie
 (`app/api/matches/route.ts`), and the only provider is Auth.js Credentials with a JWT session
 (`auth.ts`). So the bot drives a browser flow headlessly: `GET /api/auth/csrf`, then
-`POST /api/auth/callback/credentials` carrying the CSRF double-submit cookie, keeping the resulting
-`authjs.session-token` in a `reqwest` cookie store and re-authenticating on the first 401. This works, but it is
+`POST /api/auth/callback/credentials` carrying the CSRF double-submit cookie, keeping the resulting session
+cookie in a `reqwest` cookie store and re-authenticating on the first 401. This works, but it is
 a browser handshake performed by a non-browser client and can break on an Auth.js upgrade — which is the real
 argument for an API-key-authenticated create endpoint later. It is not a blocker.
+
+Two details that are easy to get wrong, both settled in `src/drafttool.rs`. **The callback's status proves
+nothing**: Auth.js answers a *wrong password* with a 302 back to the sign-in page carrying `?error=`, which a
+redirect-following client reports as a clean 200 — so success is confirmed by probing `GET /api/auth/session`
+for a `user`, never by the POST. And **the cookie is never named in our code**: the `__Secure-` prefix differs
+between the https instance and a local one, so the store keeps whatever it is handed. Re-auth happens **once**
+per request and then fails; a loop against an endpoint 401-ing for some other reason would be a way to hammer
+the service the whole feature depends on.
+
+Credentials come from `DRAFT_USERNAME` and `DRAFT_PASSWORD`. Their absence is a clean "not configured" rather
+than a startup panic — a deployment without them loses draft creation and keeps the rest of the bot.
 
 **The bot needs no presets of its own.** That endpoint accepts any preset that is public or owned by the caller,
 so a round points at an organizer's **public** preset by id. That matters because the tool caps a user at two

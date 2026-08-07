@@ -26,6 +26,15 @@ DISCORD_TOKEN=<bot token>
 GUILD_ID=<discord guild id>
 ```
 
+Three more are optional, all for the draft tool. Without the credentials the bot
+runs normally and only draft creation is unavailable:
+
+```
+DRAFT_USERNAME=<draft tool account>
+DRAFT_PASSWORD=<draft tool password>
+DRAFT_BASE_URL=<defaults to the public instance>
+```
+
 `RUST_LOG` is optional and defaults to `info` — the usual `tracing` syntax, so
 `RUST_LOG=aoe4_bot=debug,serenity=warn` works.
 
