@@ -284,10 +284,12 @@ impl Line {
     }
 }
 
-/// Make a name safe inside a code fence, which is a much smaller job than escaping
-/// markdown: only a backtick can end the fence early, and only a newline or a control
-/// character can break the grid apart.
-fn sanitize(name: &str) -> String {
+/// Make a name safe inside a code fence — or an inline code span, which has the same
+/// hazard — which is a much smaller job than escaping markdown: only a backtick can
+/// end the span early, and only a newline or a control character can break the grid
+/// apart. Markdown escapes do not work inside code, so this replaces rather than
+/// escapes.
+pub(crate) fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             '`' => '\'',

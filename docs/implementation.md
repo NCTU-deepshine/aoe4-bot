@@ -238,11 +238,18 @@ Design: §8.7.
 Gate: thread names stay within 100 characters for worst-case names, using chunk 5's width helper.
 
 **17. Draft channel announcement**
-Post once both seats are claimed, via the `hasPlayer1`/`hasPlayer2` booleans; `draft_announce_message_id` as the
-idempotency guard; names omitted for an `anonymous` preset.
-Design: §8.7 ("Announcing the draft"), §3.1 (why that endpoint, and only for this).
-Gate: §10 — fires exactly once across repeated ticks, still fires when first seen with both seats claimed, omits
-names when anonymous.
+One post per set into `#…-draft` the moment the room is created, in the same call — the round, both seeds and
+names, and the `/watch/` link in a link button, with no mentions and an empty `allowed_mentions` so a display
+name cannot smuggle one. `draft_announce_message_id` is kept as the **handle** chunks 20 and 22 repoint, not as a guard.
+**No polling.** `open` is the only place a room is minted and it no-ops on a set that has a thread, so
+structural idempotency replaces the seat poll — which removes the second scheduler §7 wanted and the last use of
+`GET /api/matches/<id>`. Adds `bracket::round_name_bilingual` for a surface with no reader locale (§8.10).
+Anonymous presets are **not** supported, and §8.7 records why half-supporting them does not work.
+Design: §8.7 ("Announcing the draft").
+Gate: §10 — the watch link and never the room link, no mention syntax, both names escaped, a round name doubled
+only where a translation exists, the url in a button; plus the handle round-tripping in the database and being
+cleared by a redraft. Also fixes chunk 16's panel, which interpolated player names into markdown and into an
+inline code span unescaped.
 
 **18. Set completion and advancement**
 The completion transaction: winner, loser eliminated, winner written into the next set's slot, target set flipped

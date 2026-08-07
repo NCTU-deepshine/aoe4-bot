@@ -13,10 +13,15 @@
 use crate::Error;
 use crate::db::{to_channel_id, to_user_id};
 use crate::drafttool::{self, DraftError};
+use crate::ranked::escape;
 use crate::tournament::action::Action;
+use crate::tournament::bracket;
 use crate::tournament::db::{self, Tournament, TournamentRound, TournamentSet};
 use crate::tournament::render;
-use serenity::all::{ButtonStyle, CacheHttp, ChannelType, CreateActionRow, CreateButton, CreateMessage, CreateThread};
+use serenity::all::{
+    ButtonStyle, CacheHttp, ChannelType, CreateActionRow, CreateAllowedMentions, CreateButton, CreateMessage,
+    CreateThread,
+};
 use sqlx::SqlitePool;
 use tracing::{error, info};
 
@@ -53,9 +58,20 @@ pub(crate) fn render_panel(
     room: Option<&Room>,
     admins: &[i64],
 ) -> (String, Vec<CreateActionRow>) {
+    // Names are player-editable aoe4world strings, so they are escaped where they sit
+    // in markdown and `sanitize`d where they sit inside a code span — a backtick
+    // cannot be escaped inside one, only replaced.
     let header = format!(
         "**{} · Match {} — Bo{}**   <@{}>  <@{}>\n`{}` {}  vs  `{}` {}\n",
-        set.round_name, set.position, set.best_of, one.user_id, two.user_id, one.seed, one.name, two.seed, two.name
+        set.round_name,
+        set.position,
+        set.best_of,
+        one.user_id,
+        two.user_id,
+        one.seed,
+        escape(&one.name),
+        two.seed,
+        escape(&two.name)
     );
 
     let Some(room) = room else {
@@ -92,7 +108,15 @@ pub(crate) fn render_panel(
          **<@{}> takes seat Player 2** — opponent: `{}`\n\
          Draft 有任何問題，請找管理員重新產生。\n\
          If anything is wrong with the draft, ask an admin to regenerate it.\n",
-        room.match_url, one.user_id, two.name, two.user_id, one.name, one.user_id, two.name, two.user_id, one.name,
+        room.match_url,
+        one.user_id,
+        render::sanitize(&two.name),
+        two.user_id,
+        render::sanitize(&one.name),
+        one.user_id,
+        render::sanitize(&two.name),
+        two.user_id,
+        render::sanitize(&one.name),
     );
 
     // The call-admin button is what a player has instead of knowing who to ask:
@@ -106,6 +130,47 @@ pub(crate) fn render_panel(
         CreateButton::new(Action::CallAdmin.custom_id(set.id))
             .label("呼叫管理員 / Call an organizer")
             .style(ButtonStyle::Secondary),
+    ])];
+
+    (body, components)
+}
+
+/// The public post in `#…-draft` (§8.7): one per set, carrying the spectator link
+/// and nothing that can claim a seat.
+///
+/// **Posted when the room is created, not when both seats fill.** Detecting the
+/// latter meant polling an undocumented endpoint on a schedule this bot does not
+/// have (§3.1), so the room is announced empty and the accepted cost is that a
+/// reader who edits `/watch/` to `/match/` reaches it. `/set redraft` is the remedy.
+///
+/// Bilingual round name, because a public channel has many readers and so no one
+/// reader's locale to follow (§8.10). No mentions: names only.
+pub(crate) fn render_announcement(
+    set: &SetHeading,
+    one: &Player,
+    two: &Player,
+    room: &Room,
+) -> (String, Vec<CreateActionRow>) {
+    let body = format!(
+        "**{} · Match {} — Bo{}**\n`{}` {}  vs  `{}` {}\n",
+        bracket::round_name_bilingual(&set.round_name),
+        set.position,
+        set.best_of,
+        one.seed,
+        escape(&one.name),
+        two.seed,
+        escape(&two.name),
+    );
+
+    // The url is a button, never body text: a link button needs no permission beyond
+    // sending the message, where a url in the body renders as a link only with
+    // EMBED_LINKS — which the bot's own overwrite on this channel does not grant
+    // (`read_only_overwrites` allows SEND_MESSAGES and nothing else).
+    //
+    // The watch link, never the room link: `/watch/` has no seat control, which is
+    // the whole reason a public channel gets a link at all (§8.7).
+    let components = vec![CreateActionRow::Buttons(vec![
+        CreateButton::new_link(&room.watch_url).label("觀戰 / Watch draft"),
     ])];
 
     (body, components)
@@ -206,7 +271,71 @@ pub(crate) async fn open(
         error!("failed to pin the set panel for set {}: {err:?}", set.id);
     }
 
+    // Last, and best-effort: if the bot is being rate limited, the players' own
+    // instruction matters more than the spectator post.
+    if let Some(room) = room.as_ref() {
+        announce(&http, pool, tournament, &heading, &one, &two, room).await;
+    }
+
     Ok(())
+}
+
+/// Posts the set's spectator announcement in `#…-draft` and records its id (§8.7).
+///
+/// Returns nothing rather than a `Result`, so a caller cannot propagate a failed
+/// spectator post into a failed set. One post per set comes for free: `open` is a
+/// no-op once the set has a thread, so the room — and therefore this — happens
+/// once. `draft_announce_message_id` is the handle chunk 20 clears and chunk 22
+/// edits, not a guard against a second call.
+async fn announce(
+    http: &impl CacheHttp,
+    pool: &SqlitePool,
+    tournament: &Tournament,
+    set: &SetHeading,
+    one: &Player,
+    two: &Player,
+    room: &Room,
+) {
+    let Some(draft_channel_id) = tournament.draft_channel_id else {
+        // A live tournament without one means `/tournament create` half-failed.
+        // Said out loud, because §8.1 records that a silently-403ing best-effort
+        // post is how a permission bug survived two deploys.
+        error!(
+            "tournament {} has no draft channel, so set {} is unannounced",
+            tournament.id, set.id
+        );
+        return;
+    };
+
+    let (content, components) = render_announcement(set, one, two, room);
+    let message = to_channel_id(draft_channel_id)
+        .send_message(
+            http,
+            CreateMessage::new()
+                .content(content)
+                .components(components)
+                // Not belt-and-braces: `escape` leaves `<` and `@` alone, so an
+                // aoe4world display name of `<@123>` renders as a live mention of a
+                // stranger — in a public channel. An empty builder sends
+                // `parse: [], users: [], roles: []`, which pings nobody whatever a
+                // name contains.
+                .allowed_mentions(CreateAllowedMentions::new()),
+        )
+        .await;
+
+    match message {
+        // The watch url is in the log because this line is the only way an
+        // organizer recovers the post by hand.
+        Err(err) => error!(
+            "failed to announce set {} in channel {draft_channel_id}: {err:?} — watch link: {}",
+            set.id, room.watch_url
+        ),
+        Ok(message) => {
+            if let Err(err) = db::set_draft_announce_message(pool, set.id, crate::db::to_db_id(message.id)).await {
+                error!("failed to record the announcement for set {}: {err:?}", set.id);
+            }
+        },
+    }
 }
 
 /// A slot's occupant. An entry that has vanished falls back to the raw id
@@ -442,5 +571,142 @@ mod tests {
             !content.contains("it. \n"),
             "no dangling space where mentions would go: {content}"
         );
+    }
+
+    // The public draft-channel post (chunk 17).
+
+    #[test]
+    fn an_announcement_names_the_round_the_match_and_the_series() {
+        let (content, _) = render_announcement(
+            &heading(1, "Quarterfinal", 2, 5),
+            &player(7, 1, "A"),
+            &player(9, 4, "B"),
+            &room(),
+        );
+        // Bilingual, because a public channel has many readers (§8.10).
+        assert!(content.contains("**八強 / Quarterfinal · Match 2 — Bo5**"), "{content}");
+    }
+
+    #[test]
+    fn an_announcement_shows_each_players_seed_and_name() {
+        let (content, _) = render_announcement(
+            &heading(1, "Ro16", 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &room(),
+        );
+        assert!(content.contains("`1` MarineLorD  vs  `8` Beasty"), "{content}");
+    }
+
+    #[test]
+    fn the_public_post_carries_the_watch_link_and_never_the_room_link() {
+        // `Room` holds both urls, so this proves the seat-claiming one cannot
+        // escape into a public channel. The counterpart of
+        // `the_panel_carries_the_room_link_so_a_seat_can_be_claimed`: between them
+        // they state the whole `/match/` vs `/watch/` split.
+        let (content, components) = render_announcement(
+            &heading(1, "Final", 1, 5),
+            &player(7, 1, "A"),
+            &player(9, 2, "B"),
+            &room(),
+        );
+        let buttons = labels(&components);
+        assert!(buttons.contains("/watch/65f1"), "{buttons}");
+        assert!(!buttons.contains("/match/65f1"), "{buttons}");
+        assert!(!content.contains("/match/"), "{content}");
+    }
+
+    #[test]
+    fn the_public_post_never_pings_anybody() {
+        // The invariant that makes a public channel safe to post entrant names in.
+        let (content, _) = render_announcement(
+            &heading(1, "Final", 1, 5),
+            &player(7, 1, "A"),
+            &player(9, 2, "B"),
+            &room(),
+        );
+        assert!(!content.contains("<@"), "{content}");
+    }
+
+    #[test]
+    fn the_header_carries_the_round_the_match_and_the_series_and_nothing_else() {
+        let (content, _) = render_announcement(
+            &heading(1, "Final", 1, 5),
+            &player(7, 1, "A"),
+            &player(9, 2, "B"),
+            &room(),
+        );
+        assert!(content.starts_with("**決賽 / Final · Match 1 — Bo5**\n"), "{content}");
+    }
+
+    #[test]
+    fn a_name_containing_markdown_is_escaped_in_the_public_post() {
+        // Entrant names are remote aoe4world data, and this post is outside a code
+        // fence — unlike the bracket, which is fenced.
+        let (content, _) = render_announcement(
+            &heading(1, "Final", 1, 5),
+            &player(7, 1, "*Bea*sty_"),
+            &player(9, 2, "B"),
+            &room(),
+        );
+        assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
+    }
+
+    #[test]
+    fn a_display_name_cannot_smuggle_a_mention_into_the_public_post() {
+        // `escape` leaves `<` and `@` alone, so the rendered text still reads
+        // `<@42>` — this documents that the renderer is *not* what protects the
+        // channel. The empty `allowed_mentions` at the send site is, and that is not
+        // observable from a string, so this test exists to point at it.
+        let (content, _) = render_announcement(
+            &heading(1, "Final", 1, 5),
+            &player(7, 1, "<@42>"),
+            &player(9, 2, "B"),
+            &room(),
+        );
+        assert!(content.contains("<@42>"), "the name is not rewritten: {content}");
+    }
+
+    #[test]
+    fn the_announcement_offers_only_link_buttons() {
+        // Nothing on a public message should route to a handler.
+        let (_, components) = render_announcement(
+            &heading(77, "Final", 1, 5),
+            &player(7, 1, "A"),
+            &player(9, 2, "B"),
+            &room(),
+        );
+        let buttons = labels(&components);
+        assert_eq!(components.len(), 1, "one row");
+        assert!(!buttons.contains("custom_id"), "{buttons}");
+        assert!(!buttons.contains("calladmin"), "{buttons}");
+    }
+
+    #[test]
+    fn a_backtick_in_a_name_cannot_break_the_panels_code_span() {
+        // The opponent's game id sits inside inline code, where a markdown escape
+        // does nothing — a raw backtick would close the span and mangle the rest of
+        // the line, so it is replaced instead.
+        let (content, _) = render_panel(
+            &heading(1, "Round 1", 1, 3),
+            &player(7, 1, "a`b"),
+            &player(9, 8, "B"),
+            Some(&room()),
+            &[],
+        );
+        assert!(content.contains("opponent: `a'b`"), "{content}");
+        assert!(!content.contains("a`b"), "no raw backtick survives: {content}");
+    }
+
+    #[test]
+    fn a_name_containing_markdown_is_escaped_in_the_panel_header() {
+        let (content, _) = render_panel(
+            &heading(1, "Round 1", 1, 3),
+            &player(7, 1, "*Bea*sty_"),
+            &player(9, 8, "B"),
+            Some(&room()),
+            &[],
+        );
+        assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
     }
 }

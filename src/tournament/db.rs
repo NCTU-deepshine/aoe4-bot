@@ -1210,7 +1210,7 @@ pub(crate) async fn insert_set(
 /// `seed_to_user` maps a seed to the entrant holding it; a seed with no entrant
 /// is a bye slot and is simply absent.
 ///
-/// `preset_ids` holds one draft-preset id per round in `bracket.rounds` order, so
+/// `per_round` holds the resolved preset for each round in `bracket.rounds` order, so
 /// each round records the preset its drafts are created from — without it
 /// `set_thread::create_room` has no preset and no set ever gets a room (§8.3).
 pub(crate) async fn insert_bracket(
@@ -1218,12 +1218,12 @@ pub(crate) async fn insert_bracket(
     tournament_id: i64,
     bracket: &crate::tournament::bracket::Bracket,
     seed_to_user: &std::collections::HashMap<u32, i64>,
-    preset_ids: &[String],
+    per_round: &[&RoundPreset],
 ) -> Result<(), sqlx::Error> {
     use crate::tournament::bracket::Slot;
 
     // A short slice would write nulls and silently disable draft creation.
-    debug_assert_eq!(preset_ids.len(), bracket.rounds.len());
+    debug_assert_eq!(per_round.len(), bracket.rounds.len());
 
     let mut tx = pool.begin().await.inspect_err(log_db_error)?;
 
@@ -1253,7 +1253,7 @@ pub(crate) async fn insert_bracket(
         .bind(i64::try_from(round.ordinal).unwrap())
         .bind(&round.name)
         .bind(i64::from(round.best_of))
-        .bind(preset_ids.get(round.ordinal - 1).map(String::as_str))
+        .bind(per_round.get(round.ordinal - 1).map(|p| p.draft_preset_id.as_str()))
         .execute(&mut *tx)
         .await
         .inspect_err(log_db_error)?

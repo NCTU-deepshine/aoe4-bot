@@ -135,7 +135,6 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
     else {
         return Ok(StartOutcome::NotConfigured);
     };
-    let preset_ids: Vec<String> = per_round.iter().map(|p| p.draft_preset_id.clone()).collect();
     let Ok(built) = bracket::build(field.len(), &best_of) else {
         return Ok(StartOutcome::TooFewEntrants);
     };
@@ -145,7 +144,7 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
         .filter_map(|e| Some((u32::try_from(e.seed?).ok()?, e.user_id)))
         .collect();
 
-    db::insert_bracket(pool, tournament.id, &built, &seed_to_user, &preset_ids).await?;
+    db::insert_bracket(pool, tournament.id, &built, &seed_to_user, &per_round).await?;
     open_round_one(pool, tournament.id).await?;
 
     db::update_tournament_status(pool, tournament.id, "running").await?;

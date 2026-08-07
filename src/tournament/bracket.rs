@@ -202,6 +202,16 @@ pub(crate) fn localize_round_name(name: &str, locale: Locale) -> String {
     }
 }
 
+/// `決賽 / Final`, for a surface with many readers and so no one reader's locale to
+/// follow (§8.10).
+///
+/// Collapsed to a single name when the two languages coincide: `Ro16 / Ro16` is
+/// noise rather than bilingualism.
+pub(crate) fn round_name_bilingual(name: &str) -> String {
+    let zh = localize_round_name(name, Locale::ZhTw);
+    if zh == name { zh } else { format!("{zh} / {name}") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Advancement, Bracket, BracketError, Slot, build, round_count, seed_order, size};
@@ -507,6 +517,18 @@ mod tests {
         assert_eq!(localize_round_name("Quarterfinal", Locale::ZhTw), "八強");
         assert_eq!(localize_round_name("Ro16", Locale::ZhTw), "Ro16", "already neutral");
         assert_eq!(localize_round_name("Final", Locale::En), "Final");
+    }
+
+    #[test]
+    fn a_shared_surface_names_a_round_in_both_languages() {
+        use super::round_name_bilingual;
+
+        assert_eq!(round_name_bilingual("Final"), "決賽 / Final");
+        assert_eq!(round_name_bilingual("Semifinal"), "準決賽 / Semifinal");
+        assert_eq!(round_name_bilingual("Quarterfinal"), "八強 / Quarterfinal");
+        // Collapsed, not doubled: `Ro16 / Ro16` is noise, not bilingualism.
+        assert_eq!(round_name_bilingual("Ro16"), "Ro16");
+        assert_eq!(round_name_bilingual("Ro32"), "Ro32");
     }
 
     #[test]

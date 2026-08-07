@@ -50,7 +50,7 @@ within. Mixing them into this table invites someone to revisit a position nobody
 | Draft creation | The bot creates each draft itself, from an account of its own (§3.3) |
 | Seats | Higher seed takes Player 1, by instruction — seats cannot be reserved, so compliance is assumed (§8.7) |
 | Redraft | `/set redraft` in the set thread, either player or an admin — the remedy for a mis-seated draft |
-| Draft channel | A public channel carrying the spectator link once both seats are claimed (§8.1) |
+| Draft channel | A public channel carrying each set's spectator link, posted when its draft room is created (§8.1) |
 | Map order | The loser of game N picks from **the whole pool** — a requirement on the round's preset, not something we enforce (§3.3) |
 | Ratings | ATR (external tournament Elo) and ELO (`rm_1v1_elo`) |
 | Seeding | Bot suggests; organizer finalizes and may override any seed |
@@ -203,9 +203,9 @@ Every content sub-resource returns 404 (`/state`, `/steps`, `/actions`, `/events
 scrape either.
 
 **Do not build against `/api/matches/<id>` for draft content.** It is undocumented, unversioned, carries none,
-and its `status` cannot show completion (see above). It has **one sanctioned use**: `hasPlayer1` / `hasPlayer2`
-are the only unauthenticated signal that both seats are claimed, which §8.7 needs to announce a draft. Item 1
-below should absorb that signal so even this use goes away.
+and its `status` cannot show completion (see above). **Nothing in this design uses it at all.** Its one intended
+use was `hasPlayer1`/`hasPlayer2` as a seat-claim gate for §8.7's announcement; that announcement now goes out
+when the room is created, so the gate — and the poll schedule it would have needed — is gone.
 
 **Preset config is already readable, unauthenticated.** `GET /api/presets/:id` returns the full `config` —
 civs, maps, steps, `options.bestOf` — for any public preset, and `GET /api/presets?scope=public` lists them
@@ -251,8 +251,10 @@ useful later.
   against theirs. Deriving it from `games` ourselves would just compare our tally against itself.
 - **`finished` must be explicit**, because the stored `status` never says so (§3.1).
 - **`status`** is what lets `/set done` answer "still in the lobby" or "paused" instead of a blank "not yet".
-- **`seats[].claimed`** is the gate for §8.7's announcement, and removes the one sanctioned use of
-  `/api/matches/<id>`.
+- **`seats[].claimed`** is what makes `/set done`'s "not yet" specific: "nobody has taken a seat" and "waiting
+  in the lobby" read differently to a player, and `status` alone cannot tell them apart. It is no longer §8.7's
+  announcement gate — that posts at room creation — and it still cannot say *who* sat down, which is why
+  `seats[].accountId` is named below as the next field worth adding.
 - **`updatedAt` and `ETag`** make polling cheap rather than wasteful.
 
 **Deliberately not asked for.** Nothing consumes any of these:
@@ -880,8 +882,10 @@ category: Relic Cup                 <- the invoking channel's parent_id
   *with* overwrites needs only Manage Channels, so a tournament made after the fix never needs the repair —
   Manage Roles is a migration requirement, not an ongoing one.
 - **`#…-draft` is the spectator surface.** Set threads are private, so nothing in them is watchable by the
-  server; this channel carries one post per set, published when both seats are claimed, with the `/watch/` link
-  (§8.7). Five channels per tournament is still far inside the 50-per-category limit.
+  server; this channel carries one post per set, published when that set's draft room is created, with the
+  `/watch/` link (§8.7). Five channels per tournament is still far inside the
+  50-per-category limit. Note the bot's own overwrite here allows `SEND_MESSAGES` and nothing else, so §8.7 puts
+  that url in a link button rather than in body text, which would need `EMBED_LINKS` to render as a link.
 - **Split of concerns:** `#…-register` holds the *interactive* panels and is where players act; the announcement
   channel holds narration (check-in is open, set results, bracket updates) and links to the panels. This keeps a
   busy panel channel from burying announcements.
@@ -1259,6 +1263,7 @@ When a set reaches `ready`:
    `draft_external_id`, `thread_id`. The bot is the draft's host.
 4. Post a pinned control panel **in the thread**, carrying the room link and the seat instruction, with both
    players @-mentioned so it pings them.
+5. Post the spectator announcement in `#…-draft` (below), best-effort — the private panel goes first.
 
 > **There is one room URL, not two seats.** `/match/<id>` is the same link for both players, and a seat is
 > claimed by whoever clicks an empty one first (§3.2 item 3). So the panel must say which seat to take:
@@ -1269,7 +1274,18 @@ When a set reaches `ready`:
 > both players plus admins (step 2) — so it scopes the room link without any DM machinery, without a closed-DM
 > fallback, and leaves a record both players can scroll back to mid-series. The cost is that admins see the link
 > too and could in principle claim a seat; they are trusted, and this is far better than a public channel. Every
-> public surface carries `/watch/<id>` instead, which cannot claim a seat (`app/watch/[id]/page.tsx`).
+> public surface carries `/watch/<id>` instead, and the spectator page offers no way to sit down
+> (`app/watch/[id]/page.tsx` renders `SpectatorStage` and nothing else).
+>
+> **But the two paths are one id space** (§3.1), so a reader who edits `/watch/` to `/match/` reaches the room,
+> and taking an empty seat there needs no account at all — a guest ticket minted in the browser is accepted and
+> recorded as `player1IsGuest` (`lib/socket/matchHandlers.ts`). Since §8.7's announcement is published while the
+> room is still empty, **that risk is accepted**: the window is the seconds between the post and both players
+> sitting down, the bot does not try to detect or prevent a hijack, and the remedy is the same as for a player
+> who takes the wrong seat — `/set redraft`. Closing the window meant holding the post until both seats were
+> claimed, which cost a poll schedule of its own and the only use of an undocumented endpoint. Note the room id
+> is **not** otherwise public before that: the tool's own feed lists only drafts with both seats filled, so our
+> post genuinely is the first public exposure.
 
 ```
 ⚔️ **Round 1 · Match 1 — Bo3**   @MarineLorD  @Beasty
@@ -1296,25 +1312,53 @@ Seats are first-come — if you end up in the wrong one, press 🔄 Regenerate d
 
 #### Announcing the draft
 
-Once **both seats are claimed**, the bot posts one message in `#…-draft` and stores its id in
-`draft_announce_message_id` — which doubles as the guard that stops a poll tick posting it twice:
+`set_thread::open` posts one message in `#…-draft` **in the same call that creates the room** — step 5 of the
+list above — and stores its id in `draft_announce_message_id`:
 
 ```
-⚔️ **Round 1 · Match 1** — Bo3 · Standard Bo3 (map BP, hand draft, offer & snipe)
-`1` MarineLorD  vs  Beasty `8`
-                                                        [ 🔗 Watch ]
+**準決賽 / Semifinal · Match 2 — Bo5**
+`1` MarineLorD  vs  `4` Beasty
+                                                        [ 觀戰 / Watch draft ]
 ```
 
 The same message is edited with the final score when the set completes, so the channel reads as a match log.
 
-- **Seat-claim detection** is `hasPlayer1` / `hasPlayer2` from `GET /api/matches/<id>` — the only
-  unauthenticated source for it today, and the one sanctioned use of that endpoint (§3.1). Item 1's
-  `seats[].claimed` is meant to replace it.
-- It tells us only *that* both seats are filled, never *who* took which. The post therefore states the mapping
-  the players were instructed to use; if it is wrong, that is what `/set redraft` is for (§4 notes).
-- **If the round's preset is `anonymous`, post seeds and the link without names.** Naming both players in a
-  public channel defeats `options.anonymous`, which the tool enforces by stripping seat names from every
-  non-participant (§3.4).
+- **Posted at creation, not on a seat claim.** The alternative was polling `hasPlayer1`/`hasPlayer2` on
+  `GET /api/matches/<id>`, which bought a delay on a link nobody is harmed by seeing early, and cost a second
+  scheduler (the existing cron runs twice a day, §7), a per-tick guard, and a dependency on an endpoint §3.1
+  says not to build against. All three are gone.
+- **Posted once because the room is created once.** `open` is a no-op for a set that already has a thread, so
+  a room is minted once per set and therefore announced once — by construction, not by a check.
+  `draft_announce_message_id` is the **handle** chunks 20 and 22 need, *not* a guard: an `is_none()` test would
+  be wrong here, because the row was read before `open` ran and `set_draft_pointer` nulls that column mid-call.
+- **Best-effort, with no retry.** A set can have a room and no post; the failure log carries the watch url,
+  because that line is the only manual-recovery path. It is sent last, after the thread panel, so a set whose
+  players were never told is never advertised either. The remedy is `/set redraft`; reconciliation belongs to
+  chunk 23.
+- **The url is a button, never body text.** A link button needs no permission beyond sending the message, where
+  a url in the body renders as a link only with `EMBED_LINKS` — which the bot's own overwrite on this channel
+  does not grant (§8.1). It also keeps the channel a one-match-per-line log with no unfurled previews.
+- **No mentions, and an empty `allowed_mentions`.** The body carries names, never `<@id>` — but
+  `ranked::escape` leaves `<` and `@` alone, so a display name of `<@123>` would render as a live mention of a
+  stranger. Names are player-editable on aoe4world (§3.4), so the send passes `parse: [], users: [], roles: []`
+  and pings nobody whatever a name contains.
+- **The format is neither named nor linked.** The round, the match number and the series length already say
+  which set this is, and the rules are in front of anyone who opens the room the watch button leads to. Both a
+  `/presets/<id>` button and a snapshotted preset name were built and dropped as redundant — the latter took a
+  column on `tournament_rounds` with no other consumer, so the column went with it.
+- It says only *that* the set exists, never *who* took which seat. The post states the mapping the players were
+  instructed to use; if it is wrong, that is what `/set redraft` is for (§4 notes).
+- **`anonymous` presets are not supported.** The original design was to post seeds and the link without names —
+  which would not have worked: the post still says which round, which format and when, and `#…-bracket` already
+  names both possible players. The tool reaches the same conclusion and excludes anonymous drafts from its own
+  public feed outright rather than redacting them (`app/api/matches/route.ts`), with the comment that a public
+  row saying when and which preset is usually enough to work out who. Refusing the preset at assignment is the
+  only coherent position; recorded as a §11 follow-up, since nothing reads `options.anonymous` today.
+- **Redraft ordering, for chunk 20.** `set_draft_pointer` clears the handle, so the old post is unreachable
+  afterwards. The order has to be: read the old handle → edit that post to strike the dead link → repoint →
+  announce the new room. Otherwise `#…-draft` accumulates a live-looking link to an orphaned room per redraft,
+  which is precisely that channel's failure mode.
+- **Chunk 22's edit touches the header line only**, so the message keeps its shape when the score lands.
 
 #### `/set redraft`
 
@@ -1414,6 +1458,12 @@ one canonical value. Latin inside a Chinese label takes a space (`Ro16 之後`) 
 either language alone. A paired test walks every name the generator can emit and fails if one is neither
 translated nor a `RoX` form, so adding a round name without translating it cannot ship quietly.
 
+**On a shared surface a localizing data field carries both languages, zh first, and one when they coincide.**
+This is the rule the bilingual-chrome rule above does not cover: a many-reader message has no locale to follow,
+so `bracket::round_name_bilingual` renders `準決賽 / Semifinal` for the closing three and plain `Ro16` for the
+rest, because `Ro16 / Ro16` is noise rather than bilingualism. §8.7's draft-channel post is the first user; the
+set-thread panel still renders the stored English, which is a known inconsistency rather than a decision.
+
 **Scope: the tournament feature's own dynamic reply text, plus the shared plumbing behind it.** Outcome
 messages (`RegisterOutcome`, `WithdrawOutcome`, `RebindOutcome`, `CheckinOutcome`, `OpenCheckinOutcome`,
 `CloseCheckinOutcome`, `ReopenRegistrationOutcome`, `DeleteCheck`, `SlugError`), both panels' content and button
@@ -1503,8 +1553,11 @@ than panicking (buttons from an older deploy will be pressed).
 - re-import overwrites `draft_import` rows and preserves `manual` ones;
 - **completion is derived, not read**: a payload with `status = "running"` and a Bo3 score of 2–0 completes the
   set, and one with `status = "running"` at 1–0 does not;
-- **the draft-channel post fires exactly once** across repeated poll ticks, still fires for a draft first
-  observed with both seats already claimed, and omits player names when the preset is `anonymous`;
+- **the draft-channel post** carries the `/watch/` link and never the `/match/` one; contains no mention syntax;
+  escapes both entrant names; doubles a round name only where a translation exists; keeps its one url in a link
+  button rather than in body text; and offers no button carrying a `custom_id`. It fires once
+  per draft **by construction** rather than by test — a room is minted once per set — and what is asserted in
+  the database is the handle: `draft_announce_message_id` round-trips, and a redraft clears it;
 - **redraft** overwrites the pointer, increments `redraft_count`, voids that set's `draft_import` games while
   preserving `manual` ones, clears the announcement handle, and is refused on a `completed` set;
 - a set reaching a majority of its games completes, eliminates the loser, and places the winner in the correct
@@ -1540,6 +1593,14 @@ Tracked separately; not part of this design.
   `aoe4world_game_id` is a one-line `alter table`.
 - **Autocomplete.** The `bind` autocomplete in `src/commands.rs` calls `players/search` on every keystroke with
   no caching; `GET /api/v0/players/autocomplete` is purpose-built for it.
+- **Refuse an `anonymous` preset at assignment.** §8.7 records that anonymity is not supported and cannot be
+  half-supported, but nothing enforces it: `drafttool::PresetOptions` models `best_of` and `result_mode` only,
+  so an organizer can still configure one and have it silently defeated by our own posts. One `#[serde(default)]
+  anonymous: bool` field and one `PresetCheck` variant turn the documented non-support into a refusal.
+- **`allowed_mentions` on the set-thread panel.** §8.7's public post sends an empty allowed-mentions list so a
+  display name cannot smuggle a mention; the panel cannot use the same builder because it *wants* to ping both
+  players, so it needs `.everyone(false).users([both players, admins])` instead. Lower severity — a private
+  thread — but the same root cause.
 
 ## 12. Open questions
 

@@ -1703,6 +1703,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn announcing_a_set_records_the_message_id_and_a_redraft_clears_it() {
+        // Chunk 17's half of chunk 20's contract: the announcement handle is stored
+        // so the post can be edited on completion, and dropped when a redraft makes
+        // it point at a superseded room.
+        let pool = test_pool().await;
+        let set_id = setup_set(&pool).await;
+
+        crate::tournament::db::set_draft_pointer(&pool, set_id, "65f1a0")
+            .await
+            .unwrap();
+        crate::tournament::db::set_draft_announce_message(&pool, set_id, 999)
+            .await
+            .unwrap();
+        let set = crate::tournament::db::get_set(&pool, set_id).await.unwrap().unwrap();
+        assert_eq!(set.draft_announce_message_id, Some(999));
+
+        crate::tournament::db::set_draft_pointer(&pool, set_id, "65f1b1")
+            .await
+            .unwrap();
+        let set = crate::tournament::db::get_set(&pool, set_id).await.unwrap().unwrap();
+        assert_eq!(set.draft_external_id.as_deref(), Some("65f1b1"));
+        assert_eq!(
+            set.draft_announce_message_id, None,
+            "a redraft must not leave the handle pointing at the old room's post"
+        );
+    }
+
+    #[tokio::test]
     async fn a_set_fed_by_two_byes_is_playable_immediately() {
         let pool = test_pool().await;
         // 5 in an 8-bracket: seeds 1, 2 and 3 are unopposed, and round two's
