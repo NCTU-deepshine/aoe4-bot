@@ -167,6 +167,79 @@ mod tests {
         assert!(err.contains("CHECK constraint failed"), "unexpected error: {err}");
     }
 
+    /// A tournament announcing in `announce`, with its own output channels.
+    async fn setup_tournament_in_channel(pool: &SqlitePool, slug: &str, announce: i64, base: i64) -> i64 {
+        let id = crate::tournament::db::insert_tournament(pool, slug, slug, 1)
+            .await
+            .unwrap();
+        crate::tournament::db::set_tournament_channels(
+            pool,
+            id,
+            crate::tournament::db::TournamentChannels {
+                category_id: None,
+                announce_channel_id: announce,
+                register_channel_id: base + 1,
+                bracket_channel_id: base + 2,
+                matches_channel_id: base + 3,
+                draft_channel_id: base + 4,
+            },
+        )
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn a_shared_announce_channel_resolves_to_the_live_tournament() {
+        // A finished tournament keeps its channel ids, so reusing the channel
+        // matches two rows. Without an ordering, resolution fell to row order
+        // and every command in the channel could hit last season's event.
+        let pool = test_pool().await;
+        let finished = setup_tournament_in_channel(&pool, "old", 900, 900).await;
+        crate::tournament::db::update_tournament_status(&pool, finished, "completed")
+            .await
+            .unwrap();
+        let live = setup_tournament_in_channel(&pool, "new", 900, 910).await;
+
+        let resolved = crate::tournament::db::get_tournament_by_any_channel_id(&pool, 900)
+            .await
+            .unwrap()
+            .expect("the channel should resolve to something");
+        assert_eq!(resolved.id, live, "the live tournament owns the channel");
+    }
+
+    #[tokio::test]
+    async fn a_live_tournament_holds_its_announce_channel() {
+        let pool = test_pool().await;
+        setup_tournament_in_channel(&pool, "cup", 900, 900).await;
+
+        let held = crate::tournament::db::get_live_tournament_by_announce_channel(&pool, 900)
+            .await
+            .unwrap()
+            .expect("a live tournament should block the channel");
+        assert_eq!(held.slug, "cup");
+    }
+
+    #[tokio::test]
+    async fn a_finished_tournament_frees_its_announce_channel_for_the_next_one() {
+        // Otherwise a recurring series could never run twice in the same
+        // channel without deleting its own history.
+        let pool = test_pool().await;
+        let finished = setup_tournament_in_channel(&pool, "cup", 900, 900).await;
+        for status in ["completed", "canceled"] {
+            crate::tournament::db::update_tournament_status(&pool, finished, status)
+                .await
+                .unwrap();
+            assert!(
+                crate::tournament::db::get_live_tournament_by_announce_channel(&pool, 900)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{status} should not hold the channel"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn tournament_entry_requires_a_tournament_players_row() {
         let pool = test_pool().await;

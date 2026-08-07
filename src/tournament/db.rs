@@ -351,11 +351,16 @@ pub(crate) async fn list_round_presets(pool: &SqlitePool, tournament_id: i64) ->
 /// channel (`/tournament create`'s invoking channel) or any of the four it
 /// created. Used by `/tournament admin add|remove|list`'s resolution, which has
 /// no slug argument to go on (see `tournament::access::tournament_admin_only`).
+/// The statuses a tournament is still live in — `completed` and `canceled` are
+/// history. Listed rather than negated so a new status has to be classified
+/// deliberately instead of defaulting to live.
+const LIVE_STATUSES: &str = "'registration', 'checkin', 'seeding', 'running'";
+
 pub(crate) async fn get_tournament_by_any_channel_id(
     pool: &SqlitePool,
     channel_id: i64,
 ) -> Result<Option<Tournament>, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(AssertSqlSafe(format!(
         r"
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
@@ -368,8 +373,46 @@ pub(crate) async fn get_tournament_by_any_channel_id(
            or bracket_channel_id = ?1
            or draft_channel_id = ?1
            or matches_channel_id = ?1
-        ",
-    )
+        -- A finished tournament keeps its channel ids, so an announce channel
+        -- reused for the next event matches two rows. Prefer the live one, then
+        -- the newer, rather than leaving the choice to row order.
+        order by case when status in ({LIVE_STATUSES}) then 0 else 1 end, id desc
+        limit 1
+        "
+    )))
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
+/// Enough to name the tournament holding a channel. The guard below reports it
+/// and does nothing else with it, so it does not read the whole row.
+#[derive(FromRow)]
+pub(crate) struct TournamentLabel {
+    pub name: String,
+    pub slug: String,
+}
+
+/// A live tournament already announcing in `channel_id`, if there is one.
+///
+/// `create` refuses in that case: two live tournaments sharing an announce
+/// channel makes every command run there ambiguous, and the organizer cannot
+/// see which one they hit.
+pub(crate) async fn get_live_tournament_by_announce_channel(
+    pool: &SqlitePool,
+    channel_id: i64,
+) -> Result<Option<TournamentLabel>, sqlx::Error> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        r"
+        select name, slug
+        from tournaments
+        where announce_channel_id = ?1
+          and status in ({LIVE_STATUSES})
+        order by id desc
+        limit 1
+        "
+    )))
     .bind(channel_id)
     .fetch_optional(pool)
     .await

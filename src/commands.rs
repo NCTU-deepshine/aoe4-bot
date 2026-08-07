@@ -324,6 +324,25 @@ pub async fn create(
     }
 
     let pool = &ctx.data().database;
+    let announce_channel_id = i64::try_from(announce_channel.id.get()).unwrap();
+    if let Some(existing) = tournament_db::get_live_tournament_by_announce_channel(pool, announce_channel_id).await? {
+        ephemeral(
+            ctx,
+            locale.pick(
+                format!(
+                    "這個頻道已經有進行中的賽事 **{}**（`{}`）。請改用其他頻道，或先結束或刪除該賽事。",
+                    existing.name, existing.slug
+                ),
+                format!(
+                    "This channel already hosts the tournament **{}** (`{}`). Use another channel, or finish or delete that one first.",
+                    existing.name, existing.slug
+                ),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
     if tournament_db::get_tournament_by_slug(pool, &slug).await?.is_some() {
         ephemeral(
             ctx,
@@ -350,7 +369,7 @@ pub async fn create(
         tournament_id,
         tournament_db::TournamentChannels {
             category_id: category_id.map(|id| i64::try_from(id.get()).unwrap()),
-            announce_channel_id: i64::try_from(announce_channel.id.get()).unwrap(),
+            announce_channel_id,
             register_channel_id: i64::try_from(register.id.get()).unwrap(),
             bracket_channel_id: i64::try_from(bracket.id.get()).unwrap(),
             matches_channel_id: i64::try_from(matches.id.get()).unwrap(),

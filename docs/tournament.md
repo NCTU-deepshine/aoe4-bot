@@ -837,6 +837,12 @@ category: Relic Cup                 <- the invoking channel's parent_id
 - The category comes from the invoking channel's `parent_id`. If that channel is top-level, create the siblings
   uncategorized and say so in the reply rather than failing.
 - Names are slug-prefixed so several tournaments can share one category.
+- **One live tournament per announcement channel.** `create` refuses if a live tournament already announces
+  in the invoking channel, naming it. Every command resolves its tournament from the channel it was run in, so
+  two live ones sharing a channel makes each of those commands ambiguous with nothing on screen to reveal it.
+  Only live tournaments hold a channel — `completed` and `canceled` release it, or a recurring series could
+  never run twice in the same place without deleting its own history. Because a finished tournament keeps its
+  channel ids, resolution prefers the live row and then the newer, rather than leaving the choice to row order.
 - `#…-bracket`, `#…-draft` and `#…-matches` deny `SEND_MESSAGES` to `@everyone` — they are output surfaces.
   They must **also carry an explicit allow for the bot**: a deny on `@everyone` applies to the bot like anyone
   else, and without its own overwrite every panel and bracket post into these channels fails with 403 Missing
