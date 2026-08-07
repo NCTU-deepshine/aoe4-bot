@@ -117,6 +117,21 @@ pub(crate) async fn close(http: impl CacheHttp, pool: &SqlitePool, tournament: &
     edit(http, pool, register_channel_id, message_id, tournament, false).await
 }
 
+/// An unconditional edit that keeps the panel's current open/closed state,
+/// unlike `close` which forces it shut. For `/tournament refresh`, which repairs
+/// a panel without changing what phase the tournament is in.
+pub(crate) async fn refresh_now(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> Result<(), Error> {
+    let (Some(checkin_message_id), Some(register_channel_id)) =
+        (tournament.checkin_message_id, tournament.register_channel_id)
+    else {
+        return Ok(());
+    };
+
+    let message_id = MessageId::new(u64::try_from(checkin_message_id).unwrap());
+    let open = crate::tournament::checkin::checkin_is_open(&tournament.status);
+    edit(http, pool, register_channel_id, message_id, tournament, open).await
+}
+
 async fn edit(
     http: impl CacheHttp,
     pool: &SqlitePool,

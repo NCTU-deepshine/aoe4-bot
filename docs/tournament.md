@@ -838,6 +838,11 @@ category: Relic Cup                 <- the invoking channel's parent_id
   uncategorized and say so in the reply rather than failing.
 - Names are slug-prefixed so several tournaments can share one category.
 - `#…-bracket`, `#…-draft` and `#…-matches` deny `SEND_MESSAGES` to `@everyone` — they are output surfaces.
+  They must **also carry an explicit allow for the bot**: a deny on `@everyone` applies to the bot like anyone
+  else, and without its own overwrite every panel and bracket post into these channels fails with 403 Missing
+  Permissions. That shipped once and was invisible, because those posts are best-effort and only log.
+  `/tournament refresh` re-applies the overwrites, which is how a tournament created before the fix gets
+  repaired without being recreated.
 - **`#…-draft` is the spectator surface.** Set threads are private, so nothing in them is watchable by the
   server; this channel carries one post per set, published when both seats are claimed, with the `/watch/` link
   (§8.7). Five channels per tournament is still far inside the 50-per-category limit.
@@ -949,6 +954,7 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament close-checkin` | admin | Marks no-shows, runs suggested seeding |
 | `/tournament reopen-registration` | admin | Reverts to `registration`; clears check-ins and no-shows |
 | `/tournament setup [cap] [start_time]` | admin | Configure the event; with no options, reports what's missing. The start time gates check-in and start |
+| `/tournament refresh` | admin | Repair channel permissions and repost any missing panel |
 | `/tournament preset preset_id [from_round]` | admin | Set a round's draft preset, and so its `best_of` |
 | `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed; re-fetch ratings |
 | `/tournament start` | admin | Generates the bracket, resolves byes, opens every playable set |

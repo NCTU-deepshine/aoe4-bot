@@ -19,7 +19,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use regex::Regex;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, MessageId, PermissionOverwrite,
-    PermissionOverwriteType, Permissions, User,
+    PermissionOverwriteType, Permissions, RoleId, User, UserId,
 };
 use serenity::json::json;
 use tracing::{error, info};
@@ -245,6 +245,7 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "close_checkin",
         "reopen_registration",
         "start",
+        "refresh_panels",
         "setup",
         "preset",
         "seed",
@@ -335,34 +336,12 @@ pub async fn create(
         return Ok(());
     }
 
-    let read_only_to_everyone = PermissionOverwrite {
-        allow: Permissions::empty(),
-        deny: Permissions::SEND_MESSAGES,
-        kind: PermissionOverwriteType::Role(ctx.guild_id().unwrap().everyone_role()),
-    };
+    let read_only = read_only_overwrites(ctx.guild_id().unwrap().everyone_role(), ctx.cache().current_user().id);
 
     let register = create_tournament_channel(ctx, &format!("{slug}-register"), category_id, vec![]).await?;
-    let bracket = create_tournament_channel(
-        ctx,
-        &format!("{slug}-bracket"),
-        category_id,
-        vec![read_only_to_everyone.clone()],
-    )
-    .await?;
-    let draft = create_tournament_channel(
-        ctx,
-        &format!("{slug}-draft"),
-        category_id,
-        vec![read_only_to_everyone.clone()],
-    )
-    .await?;
-    let matches = create_tournament_channel(
-        ctx,
-        &format!("{slug}-matches"),
-        category_id,
-        vec![read_only_to_everyone],
-    )
-    .await?;
+    let bracket = create_tournament_channel(ctx, &format!("{slug}-bracket"), category_id, read_only.clone()).await?;
+    let draft = create_tournament_channel(ctx, &format!("{slug}-draft"), category_id, read_only.clone()).await?;
+    let matches = create_tournament_channel(ctx, &format!("{slug}-matches"), category_id, read_only).await?;
 
     let user_id = i64::try_from(ctx.author().id.get()).unwrap();
     let tournament_id = tournament_db::insert_tournament(pool, &slug, &name, user_id).await?;
@@ -438,6 +417,30 @@ async fn category_name(ctx: Context<'_>, category_id: Option<ChannelId>) -> Resu
         .await?
         .guild()
         .map(|channel| channel.name))
+}
+
+/// The overwrites for an output channel (§8.1): `@everyone` may read but not
+/// post — **and the bot may post**.
+///
+/// The second half is not redundant. A deny on `@everyone` applies to the bot as
+/// much as to anyone else, and without an allow of its own every panel and
+/// bracket post into these channels fails with 403 Missing Permissions. That is
+/// exactly what happened in production: the bracket preview never worked once,
+/// and the failure was only visible in the logs because the redraw is
+/// best-effort.
+fn read_only_overwrites(everyone: RoleId, bot: UserId) -> Vec<PermissionOverwrite> {
+    vec![
+        PermissionOverwrite {
+            allow: Permissions::empty(),
+            deny: Permissions::SEND_MESSAGES,
+            kind: PermissionOverwriteType::Role(everyone),
+        },
+        PermissionOverwrite {
+            allow: Permissions::SEND_MESSAGES,
+            deny: Permissions::empty(),
+            kind: PermissionOverwriteType::Member(bot),
+        },
+    ]
 }
 
 async fn create_tournament_channel(
@@ -1349,6 +1352,135 @@ async fn delete_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournam
     }
 }
 
+// Repairs a tournament's Discord side (§8.1, §8.5) without recreating it.
+//
+// Two reasons it exists. `create` shapes channel permissions once, so a
+// tournament made before a permissions fix stays broken forever otherwise — and
+// the bot being unable to post in its own output channels is exactly the bug
+// this was written for. And a panel can be deleted, or never posted because a
+// call failed, with no other way to get it back.
+/// Repairs this tournament's channels and reposts any missing panel.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    required_bot_permissions = "MANAGE_CHANNELS",
+    // `refresh` is taken by the home guild's ranked-board command, so the Rust
+    // name differs from the one Discord shows.
+    rename = "refresh",
+    description_localized("zh-TW", "修復賽事頻道權限，並重新張貼遺失的面板。")
+)]
+pub async fn refresh_panels(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+    let pool = &ctx.data().database;
+    let mut repaired: Vec<&str> = Vec::new();
+
+    if reapply_channel_permissions(ctx, &tournament).await {
+        repaired.push(locale.pick("頻道權限", "channel permissions"));
+    }
+
+    // Each panel: edit if the message is still there, repost if it is not. A
+    // message someone deleted leaves a stale id, and editing that fails.
+    if panel::refresh_now(ctx.http(), pool, &tournament).await.is_err()
+        && let Some(register_channel_id) = tournament.register_channel_id
+    {
+        let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+        let message_id = panel::post_initial(
+            ctx.http(),
+            channel_id,
+            tournament.id,
+            &tournament.name,
+            tournament.entrant_cap,
+        )
+        .await?;
+        tournament_db::set_register_message_id(pool, tournament.id, i64::try_from(message_id.get()).unwrap()).await?;
+        repaired.push(locale.pick("報名面板", "the registration panel"));
+    }
+
+    if tournament.checkin_message_id.is_some()
+        && checkin_panel::refresh_now(ctx.http(), pool, &tournament).await.is_err()
+        && let Some(register_channel_id) = tournament.register_channel_id
+    {
+        let channel_id = ChannelId::new(u64::try_from(register_channel_id).unwrap());
+        let message_id = checkin_panel::post_initial(
+            ctx.http(),
+            pool,
+            channel_id,
+            tournament.id,
+            &tournament.name,
+            tournament.checkin_closes_at,
+        )
+        .await?;
+        tournament_db::set_checkin_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap()))
+            .await?;
+        repaired.push(locale.pick("簽到面板", "the check-in panel"));
+    }
+
+    if tournament.seed_message_id.is_some()
+        && seed_panel::refresh(ctx.http(), pool, &tournament).await.is_err()
+        && let Some(bracket_channel_id) = tournament.bracket_channel_id
+    {
+        let channel_id = ChannelId::new(u64::try_from(bracket_channel_id).unwrap());
+        let message_id =
+            seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await?;
+        tournament_db::set_seed_message_id(pool, tournament.id, Some(i64::try_from(message_id.get()).unwrap())).await?;
+        repaired.push(locale.pick("種子名單", "the seeding panel"));
+    }
+
+    if bracket_view::reconcile(ctx.http(), pool, &tournament).await.is_ok() {
+        repaired.push(locale.pick("賽程表", "the bracket"));
+    }
+
+    let summary = if repaired.is_empty() {
+        locale
+            .pick("沒有需要修復的項目。", "Nothing needed repairing.")
+            .to_string()
+    } else {
+        format!(
+            "{} {}",
+            locale.pick("已修復：", "Repaired:"),
+            repaired.join(locale.pick("、", ", "))
+        )
+    };
+    ctx.say(summary).await?;
+    Ok(())
+}
+
+/// Re-applies the output channels' overwrites, so a tournament created before
+/// the bot was granted an explicit allow starts working. Best-effort per
+/// channel: one an admin has since deleted must not stop the others.
+async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> bool {
+    let Some(guild_id) = ctx.guild_id() else {
+        return false;
+    };
+    let overwrites = read_only_overwrites(guild_id.everyone_role(), ctx.cache().current_user().id);
+
+    let mut applied = false;
+    for channel_id in [
+        tournament.bracket_channel_id,
+        tournament.draft_channel_id,
+        tournament.matches_channel_id,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let channel_id = ChannelId::new(u64::try_from(channel_id).unwrap());
+        for overwrite in &overwrites {
+            if let Err(err) = channel_id.create_permission(ctx.http(), overwrite.clone()).await {
+                error!("failed to reapply permissions on channel {channel_id}: {err:?}");
+            } else {
+                applied = true;
+            }
+        }
+    }
+    applied
+}
+
 // Turns the seeded field into a bracket and opens round one (§8.3, §5). No
 // confirmation: setup, status, seeds and the clock are four gates already, and
 // `/tournament cancel` is the way back.
@@ -1473,7 +1605,34 @@ async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db
 
 #[cfg(test)]
 mod tests {
-    use super::parse_start_time;
+    use super::{parse_start_time, read_only_overwrites};
+    use serenity::all::{PermissionOverwriteType, Permissions, RoleId, UserId};
+
+    #[test]
+    fn an_output_channel_denies_everyone_but_still_lets_the_bot_post() {
+        // The shape the production 403 came from: denying @everyone denies the
+        // bot too, so the allow is load-bearing rather than belt-and-braces.
+        let everyone = RoleId::new(1);
+        let bot = UserId::new(2);
+        let overwrites = read_only_overwrites(everyone, bot);
+
+        let deny = overwrites
+            .iter()
+            .find(|o| o.kind == PermissionOverwriteType::Role(everyone))
+            .expect("@everyone should be denied");
+        assert!(deny.deny.contains(Permissions::SEND_MESSAGES));
+
+        let allow = overwrites
+            .iter()
+            .find(|o| o.kind == PermissionOverwriteType::Member(bot))
+            .expect("the bot should be allowed");
+        assert!(allow.allow.contains(Permissions::SEND_MESSAGES));
+        assert!(
+            !allow.deny.contains(Permissions::SEND_MESSAGES),
+            "the bot's own overwrite must not deny what it allows"
+        );
+    }
+
     use chrono::{Datelike, Timelike};
     use regex::Regex;
 
