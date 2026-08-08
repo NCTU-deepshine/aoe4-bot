@@ -980,7 +980,8 @@ registration ──/tournament open-checkin──▶ checkin
     │  registration closes here; the panel goes CLOSED
 checkin ──/tournament close-checkin──▶ seeding
     │  entries without checked_in_at → status 'no_show'
-    │  suggested seeding runs over checked-in entrants only
+    │  ratings refresh over checked-in entrants only; the order is
+    │  re-tiered unless seed_source is 'manual' (§6)
 seeding ──/tournament start──▶ running
     │  requires a draft preset, seeds 1..n contiguous, and
     │  scheduled_start_at reached; generates the bracket in one
@@ -989,7 +990,9 @@ seeding ──/tournament start──▶ running
 running ──(final set completes)──▶ completed
 checkin | seeding ──/tournament reopen-registration──▶ registration
     │  no_show entries → status 'active'; every checked_in_at cleared
-    │  the check-in panel is deleted; checkin_message_id and checkin_closes_at nulled
+    │  a suggested seed order is dropped, a manual one survives (§6)
+    │  both panels are deleted; checkin_message_id, seed_message_id and
+    │  checkin_closes_at nulled
 
 registration ──/tournament lock──▶ seeding          [invite_only only]
     │  an invited field was never called to check in, so there is no
@@ -1107,8 +1110,10 @@ stored, the reply says so, and `/tournament seed refresh` retries.
 
 **One backward edge, and it is a full reset.** `reopen-registration` exists for admin mistakes — check-in opened
 too early, or closed before a late entrant arrived. It rewinds the whole check-in round rather than partially
-undoing it: no-shows go back to `active`, every `checked_in_at` is cleared, and the check-in panel message is
-deleted so a later `open-checkin` starts from a clean `0/N`. Past `seeding` there is no rewind at all: the only
+undoing it: no-shows go back to `active`, every `checked_in_at` is cleared, and both panel messages are deleted
+— with their ids nulled, or the next post edits a message that is no longer there — so a later `open-checkin`
+starts from a clean `0/N`. A seed order the organizers made by hand is the one thing spared (§6). Past `seeding`
+there is no rewind at all: the only
 way out is `/tournament delete`, which takes the channels and the record with it. That asymmetry is deliberate —
 an event far enough along to have a bracket should be finished or abandoned outright, not half-rewound.
 

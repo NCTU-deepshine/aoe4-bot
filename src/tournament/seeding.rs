@@ -66,6 +66,44 @@ pub(crate) fn display_order(entries: &[TournamentEntry]) -> Vec<&TournamentEntry
     field
 }
 
+/// The organizers' own order, as user ids — `display_order` without the rows.
+///
+/// Seeded entrants keep their relative order and anyone unseeded follows by the
+/// tiering, so writing this back **compacts** the field: a gap left by a no-show
+/// or a withdrawal closes, which is what keeps `start`'s contiguous 1..n
+/// requirement true with no separate renumber step (§6).
+pub(crate) fn manual_order(entries: &[TournamentEntry]) -> Vec<i64> {
+    display_order(entries).iter().map(|e| e.user_id).collect()
+}
+
+/// What a rating refresh does to the field's order (§6), from
+/// `tournaments.seed_source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeedPolicy {
+    /// Re-tier the whole field. The default.
+    Suggest,
+    /// Update every rating, keep the organizers' order.
+    KeepManual,
+}
+
+impl SeedPolicy {
+    /// Total on purpose: the column's `check` makes anything else unreachable, and
+    /// falling back to the default beats a panic on a value a future migration adds.
+    pub(crate) fn from_source(seed_source: &str) -> Self {
+        match seed_source {
+            "manual" => SeedPolicy::KeepManual,
+            _ => SeedPolicy::Suggest,
+        }
+    }
+
+    pub(crate) fn as_source(self) -> &'static str {
+        match self {
+            SeedPolicy::Suggest => "suggested",
+            SeedPolicy::KeepManual => "manual",
+        }
+    }
+}
+
 /// Moves `user_id` to `new_seed` (1-based) and shifts everyone between, returning
 /// the whole new order.
 ///
@@ -91,6 +129,11 @@ pub(crate) enum RefreshOutcome {
         total: usize,
         atr_count: usize,
     },
+    /// Ratings updated, the organizers' order left alone (§6).
+    KeptManual {
+        total: usize,
+        atr_count: usize,
+    },
     NoField,
 }
 
@@ -104,6 +147,17 @@ impl RefreshOutcome {
                 format!(
                     "Refreshed ratings and reseeded **{tournament_name}**: {total} entrants, \
                      {atr_count} with an ATR."
+                ),
+            ),
+            RefreshOutcome::KeptManual { total, atr_count } => locale.pick(
+                format!(
+                    "已更新 **{tournament_name}** 的評分：{total} 位參賽者，其中 {atr_count} 位有 ATR。\
+                     種子順序是手動排定的，因此保持不變；若要改回建議順序，請使用 `/tournament seed refresh`。"
+                ),
+                format!(
+                    "Refreshed ratings for **{tournament_name}**: {total} entrants, \
+                     {atr_count} with an ATR. The seed order was set by hand, so it was kept — \
+                     use `/tournament seed refresh` to take the suggestion back."
                 ),
             ),
             RefreshOutcome::NoField => locale.pick(
@@ -140,14 +194,22 @@ impl SeedOutcome {
     }
 }
 
-/// Re-fetches both ratings for the checked-in field and rewrites the suggested
-/// order (§6: snapshot at seeding time, no ratings cache).
+/// Re-fetches both ratings for the checked-in field and rewrites the seed order
+/// (§6: snapshot at seeding time, no ratings cache).
 ///
 /// ELO is one request per entrant — there is no bulk profile endpoint — while
 /// ATR for the whole field is one batched call. Both are tolerant: `ranked.rs`
 /// drops unrated players with `?`, and §6 notes seeding must not, which is why
 /// every rating column is nullable.
-pub(crate) async fn refresh_ratings(pool: &SqlitePool, tournament: &Tournament) -> Result<RefreshOutcome, sqlx::Error> {
+///
+/// **Ratings are always refreshed; only the ordering branches on `policy`** — an
+/// organizer who arranged the field by hand still wants current numbers on the
+/// panel, just not a re-tiering underneath them.
+pub(crate) async fn refresh_ratings(
+    pool: &SqlitePool,
+    tournament: &Tournament,
+    policy: SeedPolicy,
+) -> Result<RefreshOutcome, sqlx::Error> {
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
     let field = seedable(&entries);
     if field.is_empty() {
@@ -171,12 +233,20 @@ pub(crate) async fn refresh_ratings(pool: &SqlitePool, tournament: &Tournament) 
 
     // Re-read: the rows above are what the ordering must sort on.
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-    db::set_seed_order(pool, tournament.id, &suggested_order(&entries), true).await?;
-
-    Ok(RefreshOutcome::Refreshed {
-        total: field.len(),
-        atr_count,
-    })
+    let total = field.len();
+    match policy {
+        SeedPolicy::Suggest => {
+            db::set_seed_order(pool, tournament.id, &suggested_order(&entries), true).await?;
+            Ok(RefreshOutcome::Refreshed { total, atr_count })
+        },
+        // `also_suggested: false` — the order being kept is the organizers', so
+        // recording it as what the tiering proposed would erase the comparison
+        // the panel shows.
+        SeedPolicy::KeepManual => {
+            db::set_seed_order(pool, tournament.id, &manual_order(&entries), false).await?;
+            Ok(RefreshOutcome::KeptManual { total, atr_count })
+        },
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +332,87 @@ mod tests {
         assert_eq!(suggested_order(&entries), vec![1]);
     }
 
+    fn seeded(user_id: i64, display_name: &str, seed: i64, atr: Option<f64>, elo: Option<i64>) -> TournamentEntry {
+        TournamentEntry {
+            seed: Some(seed),
+            suggested_seed: Some(seed),
+            ..entry(user_id, display_name, atr, elo)
+        }
+    }
+
+    #[test]
+    fn the_policy_comes_from_the_column_and_is_total() {
+        assert_eq!(SeedPolicy::from_source("manual"), SeedPolicy::KeepManual);
+        assert_eq!(SeedPolicy::from_source("suggested"), SeedPolicy::Suggest);
+        // The `check` constraint makes these unreachable; defaulting beats panicking.
+        for unknown in ["", "MANUAL", "invited"] {
+            assert_eq!(SeedPolicy::from_source(unknown), SeedPolicy::Suggest, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn the_policy_round_trips_through_the_column_vocabulary() {
+        for policy in [SeedPolicy::Suggest, SeedPolicy::KeepManual] {
+            assert_eq!(SeedPolicy::from_source(policy.as_source()), policy);
+        }
+    }
+
+    #[test]
+    fn keeping_a_manual_order_preserves_it_while_closing_a_gap() {
+        // Seed 3 no-showed, so the field is 1, 2, 4. Writing this order back is
+        // what renumbers it 1..3 — §8.3's contiguity, with no separate step.
+        let mut no_show = seeded(3, "NoShow", 3, Some(2200.0), None);
+        no_show.status = "no_show".to_string();
+        let entries = vec![
+            seeded(4, "Fourth", 4, None, Some(900)),
+            seeded(1, "First", 1, None, Some(1000)),
+            no_show,
+            seeded(2, "Second", 2, None, Some(950)),
+        ];
+        assert_eq!(manual_order(&entries), vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn a_manual_order_wins_over_ratings_that_say_the_exact_opposite() {
+        // The organizers seeded the weakest player first and the strongest last,
+        // so the ratings disagree with every single position. Anything less than
+        // a total reversal would let a partly-rating-driven sort pass by luck.
+        let entries = vec![
+            seeded(1, "Weakest", 1, None, Some(900)),
+            seeded(2, "Middle", 2, None, Some(1200)),
+            seeded(3, "Strongest", 3, None, Some(1500)),
+        ];
+
+        assert_eq!(manual_order(&entries), vec![1, 2, 3], "the seeds decide, not the ELO");
+        // And the suggestion the override is overriding really is the reverse —
+        // otherwise the assertion above proves nothing.
+        assert_eq!(suggested_order(&entries), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn a_later_registrant_lands_at_the_end_of_a_manual_order_rather_than_inside_it() {
+        // §6 records this as the price of keeping an order: the newcomer is not
+        // merged in by rating, however strong they are, until someone refreshes.
+        let entries = vec![
+            seeded(1, "First", 1, None, Some(900)),
+            seeded(2, "Second", 2, None, Some(950)),
+            entry(3, "Latecomer", Some(2292.0), None),
+        ];
+        assert_eq!(manual_order(&entries), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn suggesting_still_discards_an_override() {
+        // The same field the two tests above keep: under `Suggest` the seeds
+        // count for nothing and the tiering decides.
+        let entries = vec![
+            seeded(1, "First", 1, None, Some(900)),
+            seeded(2, "Second", 2, None, Some(950)),
+            entry(3, "Latecomer", Some(2292.0), None),
+        ];
+        assert_eq!(suggested_order(&entries), vec![3, 2, 1]);
+    }
+
     #[test]
     fn reorder_moves_a_seed_up_and_shifts_the_rest_down() {
         assert_eq!(reorder(&[10, 20, 30, 40], 40, 2), vec![10, 40, 20, 30]);
@@ -328,5 +479,23 @@ mod tests {
         assert!(zh.contains("ATR"), "{zh}");
         assert!(en.contains("with an ATR"), "{en}");
         assert!(zh.contains('8') && en.contains('8'));
+    }
+
+    #[test]
+    fn a_kept_order_says_so_and_names_the_way_back_in_both_locales() {
+        let outcome = RefreshOutcome::KeptManual { total: 8, atr_count: 2 };
+        let zh = outcome.message("Relic Cup", Locale::ZhTw);
+        let en = outcome.message("Relic Cup", Locale::En);
+        assert_ne!(zh, en);
+        // §6: the reply has to name the command that takes the suggestion back,
+        // or a kept order looks like a refresh that did nothing.
+        assert!(zh.contains("/tournament seed refresh"), "{zh}");
+        assert!(en.contains("/tournament seed refresh"), "{en}");
+        assert!(zh.contains('8') && en.contains('8'));
+        // Not to be confused with the reseeding message.
+        assert_ne!(
+            zh,
+            RefreshOutcome::Refreshed { total: 8, atr_count: 2 }.message("Relic Cup", Locale::ZhTw)
+        );
     }
 }

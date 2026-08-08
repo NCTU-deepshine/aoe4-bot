@@ -826,45 +826,102 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
     }
 
     checkin_panel::close(ctx.http(), pool, &tournament).await?;
-    let seeded = seed_and_post_panel(ctx, &tournament, locale).await?;
+    // The order is whatever the organizers left it as — closing check-in is the
+    // edge that used to overwrite a hand-made one (§6).
+    let policy = seeding::SeedPolicy::from_source(&tournament.seed_source);
+    let seeded = seed_and_post_panel(ctx, &tournament, policy, locale).await?;
     ctx.say(format!("{}\n{seeded}", outcome.message(&tournament.name, locale)))
         .await?;
     Ok(())
 }
 
-/// Fetches ratings, writes the suggested order and posts the seeding panel,
-/// returning the line to append to the caller's reply.
+/// Fetches ratings, writes the seed order under `policy` and puts the seeding
+/// panel in front of the organizers, returning the line to append to the
+/// caller's reply.
 ///
 /// **Best-effort by design.** By the time this runs the tournament has already
 /// advanced to `seeding`, so an aoe4world outage must not fail the command and
 /// strand the lifecycle — it seeds from whatever ratings are stored, says so, and
-/// points at `/tournament seed refresh` (§6).
+/// points at `/tournament seed refresh` (§6). The panel is best-effort for the
+/// same reason, which is what `ensure_seed_panel` buys.
 async fn seed_and_post_panel(
     ctx: Context<'_>,
     tournament: &tournament_db::Tournament,
+    policy: seeding::SeedPolicy,
     locale: Locale,
 ) -> Result<String, Error> {
     let pool = &ctx.data().database;
-    let outcome = seeding::refresh_ratings(pool, tournament).await?;
+    let outcome = seeding::refresh_ratings(pool, tournament, policy).await?;
     audit::log_action("seed", tournament.id, &tournament.slug, ctx.author(), &outcome);
 
+    let message = outcome.message(&tournament.name, locale);
+    match ensure_seed_panel(ctx, tournament).await {
+        SeedPanelOutcome::Updated | SeedPanelOutcome::Reposted | SeedPanelOutcome::NoChannel => Ok(message),
+        // Said out loud rather than swallowed: the seeding itself succeeded, and
+        // an organizer who cannot see the panel needs to know it is the panel
+        // that is missing, not the seeding.
+        SeedPanelOutcome::Failed => Ok(format!(
+            "{message}\n{}",
+            locale.pick(
+                "種子名單：無法張貼，請確認機器人可在賽程頻道發言。",
+                "Seeding panel: could not post — check the bot can send messages in the bracket channel.",
+            )
+        )),
+    }
+}
+
+/// What `ensure_seed_panel` did, so each caller words it its own way.
+enum SeedPanelOutcome {
+    Updated,
+    Reposted,
+    NoChannel,
+    Failed,
+}
+
+/// Leaves `#{slug}-bracket` showing a current seeding panel, whatever state it
+/// was in: edited when the stored message is still there, re-posted when it is
+/// not.
+///
+/// **Never propagates.** A panel that has gone missing — a stale
+/// `seed_message_id`, or one an organizer deleted — used to turn `close-checkin`
+/// into an error that posted nothing, *after* the status had already moved to
+/// `seeding` and the no-shows had been marked. Recovering from that is the whole
+/// reason the fallback exists rather than a bare edit.
+async fn ensure_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> SeedPanelOutcome {
+    let pool = &ctx.data().database;
     // Always set by `create()`; the panel has nowhere to go without it.
     let Some(bracket_channel_id) = tournament.bracket_channel_id else {
-        return Ok(String::new());
+        return SeedPanelOutcome::NoChannel;
     };
-    let channel_id = to_channel_id(bracket_channel_id);
 
-    // A tournament reopened and re-closed already has a panel; edit rather than
-    // stacking a second one in the channel.
-    if tournament.seed_message_id.is_some() {
-        seed_panel::refresh(ctx.http(), pool, tournament).await?;
-    } else {
-        let message_id =
-            seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await?;
-        tournament_db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
+    if tournament.seed_message_id.is_some() && seed_panel::refresh(ctx.http(), pool, tournament).await.is_ok() {
+        return SeedPanelOutcome::Updated;
     }
 
-    Ok(outcome.message(&tournament.name, locale))
+    let channel_id = to_channel_id(bracket_channel_id);
+    match seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await {
+        Ok(message_id) => {
+            match tournament_db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await {
+                Ok(()) => SeedPanelOutcome::Reposted,
+                // The panel is up; only the handle to it is lost, so the next
+                // call posts a second one rather than editing this.
+                Err(err) => {
+                    error!(
+                        "failed to record the seeding panel for tournament {}: {err:?}",
+                        tournament.id
+                    );
+                    SeedPanelOutcome::Failed
+                },
+            }
+        },
+        Err(err) => {
+            error!(
+                "failed to post the seeding panel for tournament {}: {err:?}",
+                tournament.id
+            );
+            SeedPanelOutcome::Failed
+        },
+    }
 }
 
 // The one backward lifecycle edge (docs/tournament.md §8.3), for a check-in
@@ -1357,6 +1414,9 @@ pub async fn seed_set(
     // `also_suggested: false` — an override must not overwrite what the tiering
     // proposed, or the panel loses the comparison.
     tournament_db::set_seed_order(pool, tournament.id, &seeding::reorder(&current, target, seed), false).await?;
+    // Takes the *whole* field manual, not just this entrant (§6): seeds are
+    // written as one 1..n order, so there is no per-row notion of who was moved.
+    tournament_db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
 
     let outcome = seeding::SeedOutcome::Moved {
         display_name,
@@ -1388,16 +1448,21 @@ pub async fn seed_refresh(ctx: Context<'_>) -> Result<(), Error> {
     };
 
     // Discards any override — that is the point of asking for a refresh, and
-    // `seed set` is how you put one back.
-    let message = seed_and_post_panel(ctx, &tournament, locale).await?;
+    // `seed set` is how you put one back. Recorded before seeding rather than
+    // after, so the field and the column cannot disagree if the pass fails.
+    let policy = seeding::SeedPolicy::Suggest;
+    tournament_db::set_seed_source(&ctx.data().database, tournament.id, policy.as_source()).await?;
+    let message = seed_and_post_panel(ctx, &tournament, policy, locale).await?;
     bracket_view::reconcile(ctx.http(), &ctx.data().database, &tournament).await?;
     ctx.say(message).await?;
     Ok(())
 }
 
-/// Best-effort, for the same reason `delete_checkin_panel` is: reopening has
-/// already cleared the seeds this panel displayed, so a message someone removed
-/// by hand must not turn a successful reopen into a failure.
+/// The panel does not belong in the channel outside `seeding` onward
+/// (`seeding::seed_panel_expected`), so a reopen takes it down whether or not the
+/// order it displayed survived. Best-effort, for the same reason
+/// `delete_checkin_panel` is: a message someone removed by hand must not turn a
+/// successful reopen into a failure.
 async fn delete_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournament) {
     let (Some(seed_message_id), Some(bracket_channel_id)) = (tournament.seed_message_id, tournament.bracket_channel_id)
     else {
@@ -1623,7 +1688,6 @@ async fn refresh_seed_panel(
     tournament: &tournament_db::Tournament,
     locale: Locale,
 ) -> Result<String, Error> {
-    let pool = &ctx.data().database;
     if !seeding::seed_panel_expected(&tournament.status) {
         return Ok(locale
             .pick(
@@ -1632,34 +1696,15 @@ async fn refresh_seed_panel(
             )
             .to_string());
     }
-    let Some(bracket_channel_id) = tournament.bracket_channel_id else {
-        return Ok(locale
-            .pick("種子名單：這場賽事沒有賽程頻道。", "Seeding panel: no bracket channel.")
-            .to_string());
-    };
-
-    if tournament.seed_message_id.is_some() && seed_panel::refresh(ctx.http(), pool, tournament).await.is_ok() {
-        return Ok(locale.pick("種子名單：已更新。", "Seeding panel: updated.").to_string());
-    }
-
-    let channel_id = to_channel_id(bracket_channel_id);
-    match seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await {
-        Ok(message_id) => {
-            tournament_db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
-            Ok(locale
-                .pick("種子名單：已重新張貼。", "Seeding panel: reposted.")
-                .to_string())
+    Ok(match ensure_seed_panel(ctx, tournament).await {
+        SeedPanelOutcome::Updated => locale.pick("種子名單：已更新。", "Seeding panel: updated."),
+        SeedPanelOutcome::Reposted => locale.pick("種子名單：已重新張貼。", "Seeding panel: reposted."),
+        SeedPanelOutcome::NoChannel => {
+            locale.pick("種子名單：這場賽事沒有賽程頻道。", "Seeding panel: no bracket channel.")
         },
-        Err(err) => {
-            error!(
-                "failed to repost the seeding panel for tournament {}: {err:?}",
-                tournament.id
-            );
-            Ok(locale
-                .pick("種子名單：無法張貼。", "Seeding panel: could not post.")
-                .to_string())
-        },
+        SeedPanelOutcome::Failed => locale.pick("種子名單：無法張貼。", "Seeding panel: could not post."),
     }
+    .to_string())
 }
 
 /// Re-applies the output channels' overwrites, so a tournament created before

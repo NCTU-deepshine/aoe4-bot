@@ -6,6 +6,7 @@
 
 use crate::locale::Locale;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
+use crate::tournament::seeding::SeedPolicy;
 use crate::tournament::setup;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
@@ -313,9 +314,11 @@ impl ReopenRegistrationOutcome {
 
 /// Walks `checkin`/`seeding` back to `registration` as a full reset of the
 /// check-in round (§8.3): no-shows return to `active`, every `checked_in_at`
-/// clears, and the check-in panel's handles are dropped so `open` posts a fresh
-/// one rather than overwriting a live id. Deleting that message is the caller's
-/// job — this module stays Discord-free.
+/// clears, and both panels' handles are dropped so the next post is a fresh one
+/// rather than an edit of a message the caller has since deleted. Deleting those
+/// messages is the caller's job — this module stays Discord-free.
+///
+/// A seed order the organizers set by hand is the one thing that survives (§6).
 ///
 /// Not transactional, for the same reason `close` isn't (see its doc comment):
 /// each statement is independently atomic and nothing else races these rows.
@@ -334,9 +337,16 @@ pub(crate) async fn reopen_registration(
 
     let restored_count = db::revert_no_shows(pool, tournament.id).await?;
     let cleared_count = db::clear_checkins(pool, tournament.id).await?;
+    // A suggested order is stale the moment the field can change again; one the
+    // organizers made by hand is the whole point of a curated field, and survives
+    // (§6).
+    if SeedPolicy::from_source(&tournament.seed_source) == SeedPolicy::Suggest {
+        db::clear_seeds(pool, tournament.id).await?;
+    }
     db::update_tournament_status(pool, tournament.id, "registration").await?;
     db::set_checkin_closes_at(pool, tournament.id, None).await?;
     db::set_checkin_message_id(pool, tournament.id, None).await?;
+    db::set_seed_message_id(pool, tournament.id, None).await?;
 
     Ok(ReopenRegistrationOutcome::Reopened {
         restored_count,

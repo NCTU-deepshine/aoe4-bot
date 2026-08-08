@@ -40,6 +40,7 @@ pub(crate) struct Tournament {
     pub checkin_closes_at: Option<DateTime<Utc>>,
     pub entrant_cap: i64,
     pub scheduled_start_at: Option<DateTime<Utc>>,
+    pub seed_source: String,
     pub created_by: i64,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -80,7 +81,7 @@ pub(crate) async fn get_tournament(pool: &SqlitePool, id: i64) -> Result<Option<
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
                draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
-               entrant_cap, scheduled_start_at, created_by, created_at,
+               entrant_cap, scheduled_start_at, seed_source, created_by, created_at,
                started_at, completed_at
         from tournaments
         where id = ?1
@@ -98,7 +99,7 @@ pub(crate) async fn get_tournament_by_slug(pool: &SqlitePool, slug: &str) -> Res
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
                draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
-               entrant_cap, scheduled_start_at, created_by, created_at,
+               entrant_cap, scheduled_start_at, seed_source, created_by, created_at,
                started_at, completed_at
         from tournaments
         where slug = ?1
@@ -213,8 +214,11 @@ pub(crate) async fn set_checkin_message_id(
 
 /// The seeding panel's message id (docs/tournament.md §8.5) — set when
 /// `/tournament close-checkin` posts the panel, and back to `None` by
-/// `/tournament reopen-registration`, which deletes that message along with the
-/// seeds it displayed.
+/// `/tournament reopen-registration`, which deletes that message.
+///
+/// Nulling it there is what stops the next `close-checkin` from editing a message
+/// that no longer exists; `commands::ensure_seed_panel` recovers anyway, but only
+/// after a wasted round trip.
 pub(crate) async fn set_seed_message_id(
     pool: &SqlitePool,
     id: i64,
@@ -266,6 +270,19 @@ pub(crate) async fn set_scheduled_start_at(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(r"update tournaments set scheduled_start_at = ?1 where id = ?2")
         .bind(scheduled_start_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Whether the field's order is the bot's suggestion or the organizers' own
+/// (§6). `seeding::SeedPolicy` is the reader; `seed set` and `seed refresh` are
+/// the only writers.
+pub(crate) async fn set_seed_source(pool: &SqlitePool, id: i64, seed_source: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set seed_source = ?1 where id = ?2")
+        .bind(seed_source)
         .bind(id)
         .execute(pool)
         .await
@@ -371,7 +388,7 @@ pub(crate) async fn get_tournament_by_any_channel_id(
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
                draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
-               entrant_cap, scheduled_start_at, created_by, created_at,
+               entrant_cap, scheduled_start_at, seed_source, created_by, created_at,
                started_at, completed_at
         from tournaments
         where announce_channel_id = ?1
@@ -972,19 +989,38 @@ pub(crate) async fn revert_no_shows(pool: &SqlitePool, tournament_id: i64) -> Re
     Ok(result.rows_affected())
 }
 
-/// Wipes the whole check-in round for `/tournament reopen-registration` (§8.3).
-/// The seed columns go too: nothing writes them before chunk 11, but a reopen
-/// out of `seeding` is precisely when they would be stale, and the
-/// `unique (tournament_id, seed)` index tolerates repeated nulls.
+/// Wipes the check-in round for `/tournament reopen-registration` (§8.3).
+///
+/// Seeds are `clear_seeds`'s job, not this one's: a reopen only discards them
+/// when the order was the bot's own suggestion, and a manual order survives the
+/// rewind (§6).
 pub(crate) async fn clear_checkins(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         r"
         update tournament_entries
-        set checked_in_at = null,
-            seed = null,
+        set checked_in_at = null
+        where tournament_id = ?1
+          and checked_in_at is not null
+        ",
+    )
+    .bind(tournament_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(result.rows_affected())
+}
+
+/// Drops a suggested seed order that a reopen has invalidated (§8.3). The
+/// `unique (tournament_id, seed)` index tolerates repeated nulls, so this needs
+/// no ordering pass of its own.
+pub(crate) async fn clear_seeds(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r"
+        update tournament_entries
+        set seed = null,
             suggested_seed = null
         where tournament_id = ?1
-          and (checked_in_at is not null or seed is not null or suggested_seed is not null)
+          and (seed is not null or suggested_seed is not null)
         ",
     )
     .bind(tournament_id)

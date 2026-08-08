@@ -421,6 +421,7 @@ mod tests {
             checkin_closes_at: None,
             entrant_cap: 32,
             scheduled_start_at: scheduled.then(Utc::now),
+            seed_source: "suggested".to_string(),
             created_by: 1,
             created_at: Utc::now(),
             started_at: None,

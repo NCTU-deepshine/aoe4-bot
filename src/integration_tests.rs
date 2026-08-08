@@ -38,6 +38,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrating_a_populated_database_defaults_seed_source_to_suggested() {
+        // Every other migrator test starts from empty, so none of them would see
+        // a column added `not null` landing on rows that already exist.
+        let pool = test_pool().await;
+        let id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+
+        sqlx::migrate!().run(&pool).await.unwrap();
+
+        let tournament = crate::tournament::db::get_tournament(&pool, id).await.unwrap().unwrap();
+        assert_eq!(tournament.seed_source, "suggested");
+    }
+
+    #[tokio::test]
+    async fn seed_source_rejects_a_value_outside_its_vocabulary() {
+        let pool = test_pool().await;
+        let id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+
+        let result = crate::tournament::db::set_seed_source(&pool, id, "invited").await;
+        assert!(result.is_err(), "the check constraint should have refused it");
+    }
+
+    #[tokio::test]
     async fn foreign_keys_are_enforced() {
         // sqlx enables this by default on SqliteConnectOptions, which is the same
         // default main.rs relies on. Every `references` in the tournament schema is
@@ -1278,6 +1304,9 @@ mod tests {
         crate::tournament::db::set_checkin_message_id(pool, tournament.id, Some(999))
             .await
             .unwrap();
+        crate::tournament::db::set_seed_message_id(pool, tournament.id, Some(888))
+            .await
+            .unwrap();
         crate::tournament::db::set_checkin_closes_at(pool, tournament.id, Some(chrono::Utc::now()))
             .await
             .unwrap();
@@ -1394,10 +1423,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reopen_registration_clears_seeds() {
+    async fn reopen_registration_clears_a_suggested_seed_order() {
         let pool = test_pool().await;
         let tournament = setup_reopenable_tournament(&pool, "seeding").await;
-        // Nothing writes these before chunk 11, so seed them by hand.
         crate::tournament::db::set_entry_seed(&pool, tournament.id, 1, Some(1), Some(2))
             .await
             .unwrap();
@@ -1406,6 +1434,83 @@ mod tests {
             .await
             .unwrap();
 
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert!(entries.iter().all(|e| e.seed.is_none() && e.suggested_seed.is_none()));
+    }
+
+    #[tokio::test]
+    async fn reopen_registration_keeps_a_seed_order_the_organizers_made() {
+        // Chunk 30: a curated field exists to be arranged by hand, so the one
+        // backward edge in the lifecycle must not silently undo the arranging.
+        let pool = test_pool().await;
+        let tournament = setup_reopenable_tournament(&pool, "seeding").await;
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[2, 1], false)
+            .await
+            .unwrap();
+        crate::tournament::db::set_seed_source(&pool, tournament.id, "manual")
+            .await
+            .unwrap();
+        let tournament = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        crate::tournament::checkin::reopen_registration(&pool, &tournament)
+            .await
+            .unwrap();
+
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        let seed_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().seed;
+        assert_eq!(seed_of(2), Some(1), "the hand-made order should survive the rewind");
+        assert_eq!(seed_of(1), Some(2));
+        // The check-in round itself is still undone — only the order is spared.
+        assert!(entries.iter().all(|e| e.checked_in_at.is_none()));
+    }
+
+    #[tokio::test]
+    async fn reopen_registration_drops_both_panel_handles() {
+        // The panels are deleted by the caller, so leaving either id behind points
+        // the next post at a message that no longer exists.
+        let pool = test_pool().await;
+        let tournament = setup_reopenable_tournament(&pool, "seeding").await;
+
+        crate::tournament::checkin::reopen_registration(&pool, &tournament)
+            .await
+            .unwrap();
+
+        let after = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.checkin_message_id, None);
+        assert_eq!(after.seed_message_id, None);
+    }
+
+    #[tokio::test]
+    async fn clearing_checkins_and_clearing_seeds_are_separable() {
+        // The split is what lets a reopen undo one without the other.
+        let pool = test_pool().await;
+        let tournament = setup_reopenable_tournament(&pool, "seeding").await;
+        crate::tournament::db::set_entry_seed(&pool, tournament.id, 1, Some(1), Some(2))
+            .await
+            .unwrap();
+
+        crate::tournament::db::clear_checkins(&pool, tournament.id)
+            .await
+            .unwrap();
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        let seeded = entries.iter().find(|e| e.user_id == 1).unwrap();
+        assert!(seeded.checked_in_at.is_none());
+        assert_eq!(seeded.seed, Some(1), "clear_checkins must not touch the order");
+        assert_eq!(seeded.suggested_seed, Some(2));
+
+        crate::tournament::db::clear_seeds(&pool, tournament.id).await.unwrap();
         let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
             .await
             .unwrap();
@@ -2202,17 +2307,15 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_survives_a_reopen_which_clears_every_seed() {
-        // Chunk 25 clears seeds; chunk 11 must be able to write a fresh order
-        // afterwards without colliding with the ones it just removed.
+        // A reopen clears a suggested order; chunk 11 must be able to write a
+        // fresh one afterwards without colliding with the ones it just removed.
         let pool = test_pool().await;
         let tournament = setup_seedable_field(&pool, 3).await;
         crate::tournament::db::set_seed_order(&pool, tournament.id, &[1, 2, 3], true)
             .await
             .unwrap();
 
-        crate::tournament::db::clear_checkins(&pool, tournament.id)
-            .await
-            .unwrap();
+        crate::tournament::db::clear_seeds(&pool, tournament.id).await.unwrap();
         assert!(
             seeds_by_user(&pool, tournament.id)
                 .await
