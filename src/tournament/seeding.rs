@@ -25,6 +25,14 @@ pub(crate) fn seedable(entries: &[TournamentEntry]) -> Vec<&TournamentEntry> {
         .collect()
 }
 
+/// The profiles in a field there is anything to look up for.
+///
+/// Pure, so the property that matters — an entrant with no profile costs no
+/// request — is checked here rather than inferred from the loop below.
+pub(crate) fn rated_ids(field: &[&TournamentEntry]) -> Vec<i64> {
+    field.iter().filter_map(|e| e.aoe4_id).collect()
+}
+
 /// The default order, as user ids in seed order.
 ///
 /// ATR (~1000–2292, tournament-derived) and ELO are different scales and are
@@ -224,15 +232,20 @@ pub(crate) async fn refresh_ratings(
         return Ok(RefreshOutcome::NoField);
     }
 
-    let aoe4_ids: Vec<i64> = field.iter().map(|e| e.aoe4_id).collect();
-    let atr_by_id = aoe4world::fetch_esports_ratings(&aoe4_ids).await;
+    let atr_by_id = aoe4world::fetch_esports_ratings(&rated_ids(&field)).await;
 
     let mut atr_count = 0;
     for entry in &field {
-        let elo = aoe4world::fetch_profile(entry.aoe4_id)
+        // Skipped outright rather than written as nulls: an entrant with no profile
+        // has nothing to look up, and blanking the row would discard an `atr` an
+        // organizer had set by hand.
+        let Some(aoe4_id) = entry.aoe4_id else {
+            continue;
+        };
+        let elo = aoe4world::fetch_profile(aoe4_id)
             .await
             .and_then(|p| p.modes.rm_1v1_elo.map(|e| i64::from(e.rating)));
-        let atr = atr_by_id.get(&entry.aoe4_id).copied();
+        let atr = atr_by_id.get(&aoe4_id).copied();
         if atr.is_some() {
             atr_count += 1;
         }
@@ -266,7 +279,7 @@ mod tests {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: user_id * 100,
+            aoe4_id: Some(user_id * 100),
             seed: None,
             suggested_seed: None,
             display_name: display_name.to_string(),
@@ -277,6 +290,31 @@ mod tests {
             registered_at: Utc::now(),
             checked_in_at: Some(Utc::now()),
         }
+    }
+
+    #[test]
+    fn only_entrants_with_a_profile_cost_a_lookup() {
+        // An entrant with none has nothing to fetch, so they must not reach the
+        // batched request at all — order preserved for everyone else.
+        let mut unbound = entry(2, "Invitee", None, None);
+        unbound.aoe4_id = None;
+        let entries = vec![
+            entry(1, "Bound", None, Some(1000)),
+            unbound,
+            entry(3, "Also", None, Some(900)),
+        ];
+        let field = seedable(&entries);
+        assert_eq!(rated_ids(&field), vec![100, 300]);
+    }
+
+    #[test]
+    fn a_field_of_entrants_without_profiles_asks_for_nothing() {
+        let mut one = entry(1, "A", None, None);
+        one.aoe4_id = None;
+        let mut two = entry(2, "B", None, None);
+        two.aoe4_id = None;
+        let entries = vec![one, two];
+        assert!(rated_ids(&seedable(&entries)).is_empty());
     }
 
     #[test]

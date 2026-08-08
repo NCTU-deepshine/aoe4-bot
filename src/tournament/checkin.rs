@@ -361,7 +361,7 @@ mod tests {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: user_id,
+            aoe4_id: Some(user_id),
             seed: None,
             suggested_seed: None,
             display_name: format!("player-{user_id}"),

@@ -52,6 +52,166 @@ mod tests {
         assert_eq!(tournament.seed_source, "suggested");
     }
 
+    /// The version that relaxes `aoe4_id`. Named once so the two tests below and
+    /// the reader agree on which migration is under test.
+    const OPTIONAL_AOE4_ID: i64 = 7;
+
+    /// A pool migrated to just *before* `version`, so a migration can be applied to
+    /// a database that already holds rows.
+    ///
+    /// `sqlx::migrate!().run()` is all-or-nothing, so it cannot express this on its
+    /// own: by the time it returns, the migration under test has already run against
+    /// an empty database. Driving a trimmed `Migrator` instead keeps the real runner
+    /// — including its bookkeeping, so the full migrator afterwards applies exactly
+    /// the one migration left, through the same path production takes.
+    async fn pool_migrated_to_before(version: i64) -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        pool.execute(include_str!("../schema.sql")).await.unwrap();
+
+        let full = sqlx::migrate!();
+        let earlier = sqlx::migrate::Migrator {
+            migrations: full.iter().filter(|m| m.version < version).cloned().collect(),
+            ..full
+        };
+        earlier.run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn recreating_the_player_tables_clears_the_feature_and_leaves_the_rest_alone() {
+        // The migration discards every tournament rather than copying rows into the
+        // rebuilt tables. What has to survive is the ranked board, which belongs to
+        // another feature and shares no keys with this one.
+        let pool = pool_migrated_to_before(OPTIONAL_AOE4_ID).await;
+        crate::db::bind_account(&pool, 7, 700).await.unwrap();
+        sqlx::query("insert into tournaments (slug, name, created_by) values ('cup', 'Cup', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into tournament_players (user_id, aoe4_id, display_name) values (1, 100, 'A'), (2, 200, 'B')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name, seed) \
+             values (1, 1, 100, 'A', 1), (1, 2, 200, 'B', 2)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into tournament_stages (tournament_id, ordinal, name, format) values (1,1,'M','single_elim')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into tournament_rounds (stage_id, ordinal, name, best_of) values (1,1,'Final',3)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into tournament_sets (tournament_id, round_id, position, slot1_user_id, slot2_user_id, \
+             winner_user_id, status) values (1,1,1,1,2,1,'completed')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into tournament_games (set_id, game_number, winner_user_id, status, source) \
+             values (1,1,1,'completed','manual')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::migrate!().run(&pool).await.unwrap();
+
+        for table in [
+            "tournaments",
+            "tournament_players",
+            "tournament_entries",
+            "tournament_sets",
+            "tournament_games",
+        ] {
+            let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} should have been cleared");
+        }
+        assert_eq!(
+            crate::db::list_all(&pool).await.unwrap().len(),
+            1,
+            "the ranked board is a separate feature and must survive"
+        );
+
+        // Recreating a table three others reference has to leave those references
+        // resolving to it, not dangling.
+        let dangling: i64 = sqlx::query_scalar("select count(*) from pragma_foreign_key_check")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(dangling, 0, "no table should reference one that is no longer there");
+        for table in ["tournament_entries", "tournament_sets", "tournament_games"] {
+            let targets: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "select \"table\" from pragma_foreign_key_list('{table}')"
+            )))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert!(
+                targets.iter().any(|(name,)| name == "tournament_players"),
+                "{table} should still reference tournament_players, got {targets:?}"
+            );
+        }
+
+        // Still enforced, and now relaxed: the point of the whole exercise.
+        let orphan = sqlx::query(
+            "insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name) values (1, 999, null, 'X')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(orphan.is_err(), "an entry for an unknown player is still refused");
+        sqlx::query("insert into tournament_players (user_id, aoe4_id, display_name) values (3, null, 'Unbound')")
+            .execute(&pool)
+            .await
+            .expect("a player with no profile should now be storable");
+    }
+
+    #[tokio::test]
+    async fn an_optional_aoe4_id_admits_many_nulls_and_still_one_owner_per_profile() {
+        let pool = test_pool().await;
+        sqlx::query("insert into tournament_players (user_id, aoe4_id, display_name) values (1, 100, 'Bound')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // SQLite treats nulls as distinct, which is exactly the constraint wanted:
+        // any number of entrants with no profile, one owner per real profile.
+        sqlx::query(
+            "insert into tournament_players (user_id, aoe4_id, display_name) \
+             values (2, null, 'X'), (3, null, 'Y'), (4, null, 'Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("several players with no profile should coexist");
+
+        let err =
+            sqlx::query("insert into tournament_players (user_id, aoe4_id, display_name) values (5, 100, 'Thief')")
+                .execute(&pool)
+                .await
+                .expect_err("a second owner for one profile is still refused");
+        // `registration::is_aoe4_id_conflict` matches this substring to word a
+        // profile-claim race, so the rebuild must not have renamed the table or
+        // moved the constraint off the column.
+        assert!(
+            err.to_string().contains("tournament_players.aoe4_id"),
+            "the conflict must still name the column: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn seed_source_rejects_a_value_outside_its_vocabulary() {
         let pool = test_pool().await;
@@ -273,7 +433,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = crate::tournament::db::insert_entry(&pool, tournament_id, 999, 111, "Nobody", None).await;
+        let result = crate::tournament::db::insert_entry(&pool, tournament_id, 999, Some(111), "Nobody", None).await;
         assert!(result.is_err(), "entry inserted without a tournament_players row");
         let err = result.err().unwrap().to_string();
         assert!(err.contains("FOREIGN KEY constraint failed"), "unexpected error: {err}");
@@ -534,13 +694,13 @@ mod tests {
             .await
             .unwrap();
 
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Old Name")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "Old Name")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, active_id, 1, 100, "Old Name", None)
+        crate::tournament::db::insert_entry(&pool, active_id, 1, Some(100), "Old Name", None)
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, completed_id, 1, 100, "Old Name", None)
+        crate::tournament::db::insert_entry(&pool, completed_id, 1, Some(100), "Old Name", None)
             .await
             .unwrap();
 
@@ -573,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn update_player_binding_leaves_display_name_untouched() {
         let pool = test_pool().await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Name")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "Name")
             .await
             .unwrap();
         crate::tournament::db::update_player_binding(&pool, 1, 200)
@@ -581,7 +741,7 @@ mod tests {
             .unwrap();
 
         let player = crate::tournament::db::get_player(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(player.aoe4_id, 200);
+        assert_eq!(player.aoe4_id, Some(200));
         assert_eq!(player.display_name, "Name");
     }
 
@@ -727,10 +887,10 @@ mod tests {
         let tournament_id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
             .await
             .unwrap();
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament_id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, tournament_id, 1, Some(100), "A", None)
             .await
             .unwrap();
 
@@ -768,10 +928,10 @@ mod tests {
     async fn register_reactivates_a_withdrawn_entry() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "A", None)
             .await
             .unwrap();
         crate::tournament::db::update_entry_status(&pool, tournament.id, 1, "withdrawn")
@@ -797,10 +957,10 @@ mod tests {
     async fn register_is_idempotent_for_an_active_entry() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "A", None)
             .await
             .unwrap();
 
@@ -831,7 +991,7 @@ mod tests {
     async fn register_refuses_a_different_profile_when_already_bound() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
 
@@ -848,7 +1008,7 @@ mod tests {
     async fn register_with_your_own_current_profile_falls_through_to_normal_signup() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
 
@@ -865,7 +1025,7 @@ mod tests {
     async fn register_rejects_a_profile_already_claimed_by_someone_else() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 2, 100, "B")
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(100), "B")
             .await
             .unwrap();
 
@@ -895,7 +1055,7 @@ mod tests {
     #[tokio::test]
     async fn register_for_a_later_tournament_needs_no_profile_argument() {
         let pool = test_pool().await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
         let tournament = setup_tournament(&pool, "registration").await;
@@ -912,7 +1072,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(entry.aoe4_id, 100);
+        assert_eq!(entry.aoe4_id, Some(100));
     }
 
     #[tokio::test]
@@ -925,10 +1085,10 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, crate::tournament::registration::WithdrawOutcome::NotRegistered);
 
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "A", None)
             .await
             .unwrap();
 
@@ -950,7 +1110,7 @@ mod tests {
     async fn withdraw_is_refused_once_the_tournament_has_started() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "running").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
 
@@ -976,10 +1136,10 @@ mod tests {
     #[tokio::test]
     async fn rebind_rejects_a_profile_claimed_by_someone_else() {
         let pool = test_pool().await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_player_if_absent(&pool, 2, 200, "B")
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(200), "B")
             .await
             .unwrap();
 
@@ -993,13 +1153,13 @@ mod tests {
     #[tokio::test]
     async fn rebind_is_refused_while_an_entry_is_running() {
         let pool = test_pool().await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
         let tournament_id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament_id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, tournament_id, 1, Some(100), "A", None)
             .await
             .unwrap();
         crate::tournament::db::update_tournament_status(&pool, tournament_id, "running")
@@ -1030,10 +1190,10 @@ mod tests {
     async fn checkin_rejects_a_withdrawn_entry() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "checkin").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "A", None)
             .await
             .unwrap();
         crate::tournament::db::update_entry_status(&pool, tournament.id, 1, "withdrawn")
@@ -1050,10 +1210,10 @@ mod tests {
     async fn checkin_is_rejected_before_it_opens() {
         let pool = test_pool().await;
         let registration = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, registration.id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, registration.id, 1, Some(100), "A", None)
             .await
             .unwrap();
 
@@ -1067,10 +1227,10 @@ mod tests {
     async fn checkin_is_rejected_after_it_closes() {
         let pool = test_pool().await;
         let seeding = setup_tournament(&pool, "seeding").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, seeding.id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, seeding.id, 1, Some(100), "A", None)
             .await
             .unwrap();
 
@@ -1082,10 +1242,10 @@ mod tests {
     async fn checkin_second_press_is_idempotent() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "checkin").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "A")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "A")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "A", None)
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "A", None)
             .await
             .unwrap();
 
@@ -1243,10 +1403,10 @@ mod tests {
 
         // 1 checks in, 2 does not, 3 already withdrew before check-in even opened.
         for (user_id, aoe4_id) in [(1, 100), (2, 200), (3, 300)] {
-            crate::tournament::db::insert_player_if_absent(&pool, user_id, aoe4_id, "P")
+            crate::tournament::db::insert_player_if_absent(&pool, user_id, Some(aoe4_id), "P")
                 .await
                 .unwrap();
-            crate::tournament::db::insert_entry(&pool, tournament.id, user_id, aoe4_id, "P", None)
+            crate::tournament::db::insert_entry(&pool, tournament.id, user_id, Some(aoe4_id), "P", None)
                 .await
                 .unwrap();
         }
@@ -1289,10 +1449,10 @@ mod tests {
     async fn setup_reopenable_tournament(pool: &SqlitePool, status: &str) -> crate::tournament::db::Tournament {
         let tournament = setup_tournament(pool, "checkin").await;
         for (user_id, aoe4_id) in [(1, 100), (2, 200), (3, 300)] {
-            crate::tournament::db::insert_player_if_absent(pool, user_id, aoe4_id, "P")
+            crate::tournament::db::insert_player_if_absent(pool, user_id, Some(aoe4_id), "P")
                 .await
                 .unwrap();
-            crate::tournament::db::insert_entry(pool, tournament.id, user_id, aoe4_id, "P", None)
+            crate::tournament::db::insert_entry(pool, tournament.id, user_id, Some(aoe4_id), "P", None)
                 .await
                 .unwrap();
         }
@@ -1524,10 +1684,10 @@ mod tests {
         // seeding had already fetched.
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "P")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "P")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "P", None)
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "P", None)
             .await
             .unwrap();
         crate::tournament::db::set_entry_ratings(&pool, tournament.id, 1, Some(1200), Some(1800.5), Some("esports"))
@@ -1550,10 +1710,10 @@ mod tests {
     async fn a_sign_up_records_the_elo_it_was_given() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "P")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "P")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "P", Some(1234))
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "P", Some(1234))
             .await
             .unwrap();
 
@@ -1567,7 +1727,7 @@ mod tests {
     async fn the_first_entrant_in_a_fresh_tournament_is_number_one() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 42, 4200, "Me")
+        crate::tournament::db::insert_player_if_absent(&pool, 42, Some(4200), "Me")
             .await
             .unwrap();
 
@@ -1600,7 +1760,7 @@ mod tests {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
         for (user_id, aoe4_id) in [(1, 100), (2, 200)] {
-            crate::tournament::db::insert_player_if_absent(&pool, user_id, aoe4_id, "P")
+            crate::tournament::db::insert_player_if_absent(&pool, user_id, Some(aoe4_id), "P")
                 .await
                 .unwrap();
         }
@@ -1639,7 +1799,7 @@ mod tests {
         );
 
         // A profile someone else already holds.
-        crate::tournament::db::insert_player_if_absent(&pool, 2, 200, "Other")
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(200), "Other")
             .await
             .unwrap();
         let outcome = crate::tournament::registration::register(&pool, &tournament, 3, Some(200))
@@ -1670,10 +1830,10 @@ mod tests {
     async fn setup_startable(pool: &SqlitePool, n: i64) -> crate::tournament::db::Tournament {
         let tournament = setup_tournament(pool, "seeding").await;
         for user_id in 1..=n {
-            crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+            crate::tournament::db::insert_player_if_absent(pool, user_id, Some(user_id * 100), "P")
                 .await
                 .unwrap();
-            crate::tournament::db::insert_entry(pool, tournament.id, user_id, user_id * 100, "P", None)
+            crate::tournament::db::insert_entry(pool, tournament.id, user_id, Some(user_id * 100), "P", None)
                 .await
                 .unwrap();
         }
@@ -2586,7 +2746,7 @@ mod tests {
         tournament: &crate::tournament::db::Tournament,
         user_id: i64,
     ) -> crate::tournament::registration::RegisterOutcome {
-        crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+        crate::tournament::db::insert_player_if_absent(pool, user_id, Some(user_id * 100), "P")
             .await
             .unwrap();
         crate::tournament::registration::register(pool, tournament, user_id, None)
@@ -2716,7 +2876,7 @@ mod tests {
     #[tokio::test]
     async fn unbind_clears_the_binding_and_frees_the_profile() {
         let pool = test_pool().await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Player")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "Player")
             .await
             .unwrap();
 
@@ -2731,7 +2891,7 @@ mod tests {
 
         // The point of unbinding: aoe4_id is unique, so the profile must be
         // claimable again — by this user or another.
-        crate::tournament::db::insert_player_if_absent(&pool, 2, 100, "Someone Else")
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(100), "Someone Else")
             .await
             .unwrap();
         let claimed = crate::tournament::db::get_player_by_aoe4_id(&pool, 100).await.unwrap();
@@ -2742,10 +2902,10 @@ mod tests {
     async fn unbind_is_refused_while_any_entry_exists_even_a_withdrawn_one() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Player")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "Player")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(&pool, tournament.id, 1, 100, "Player", None)
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, Some(100), "Player", None)
             .await
             .unwrap();
         // Withdrawing does not delete the row, so it must not unblock the unbind.
@@ -2765,6 +2925,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unbinding_with_nothing_bound_says_so_rather_than_blaming_an_entry() {
+        // Someone an organizer put in a field has a player row and, by definition,
+        // an entry — so the entry check would fire first and send them to an admin
+        // about a binding they never had.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, None, "Invitee")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, None, "Invitee", None)
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::unbind(&pool, 1).await.unwrap();
+        assert_eq!(outcome, crate::tournament::registration::UnbindOutcome::NotBound);
+        assert!(
+            crate::tournament::db::get_player(&pool, 1).await.unwrap().is_some(),
+            "answering `not bound` must not delete the row their entry depends on"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_entrant_with_no_profile_is_stored_and_read_back_as_such() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 1, None, "Invitee")
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(&pool, tournament.id, 1, None, "Invitee", None)
+            .await
+            .unwrap();
+
+        let player = crate::tournament::db::get_player(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(player.aoe4_id, None);
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.aoe4_id, None);
+        // And they still take a seat: seeding must never drop an unrated player.
+        let entries = crate::tournament::db::list_entries_for_tournament(&pool, tournament.id)
+            .await
+            .unwrap();
+        assert_eq!(crate::tournament::seeding::display_order(&entries).len(), 1);
+    }
+
+    #[tokio::test]
     async fn unbind_is_a_no_op_when_nothing_is_bound() {
         let pool = test_pool().await;
         let outcome = crate::tournament::registration::unbind(&pool, 999).await.unwrap();
@@ -2776,7 +2983,7 @@ mod tests {
         // `accounts` and `tournament_players` are deliberately unlinked.
         let pool = test_pool().await;
         bind_account(&pool, 1, 100).await.unwrap();
-        crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Player")
+        crate::tournament::db::insert_player_if_absent(&pool, 1, Some(100), "Player")
             .await
             .unwrap();
 
@@ -2791,10 +2998,10 @@ mod tests {
     async fn setup_seedable_field(pool: &SqlitePool, n: i64) -> crate::tournament::db::Tournament {
         let tournament = setup_tournament(pool, "seeding").await;
         for user_id in 1..=n {
-            crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+            crate::tournament::db::insert_player_if_absent(pool, user_id, Some(user_id * 100), "P")
                 .await
                 .unwrap();
-            crate::tournament::db::insert_entry(pool, tournament.id, user_id, user_id * 100, "P", None)
+            crate::tournament::db::insert_entry(pool, tournament.id, user_id, Some(user_id * 100), "P", None)
                 .await
                 .unwrap();
         }
@@ -2908,10 +3115,10 @@ mod tests {
         crate::tournament::db::add_admin(pool, tournament_id, user_id, user_id)
             .await
             .unwrap();
-        crate::tournament::db::insert_player_if_absent(pool, user_id, user_id * 100, "P")
+        crate::tournament::db::insert_player_if_absent(pool, user_id, Some(user_id * 100), "P")
             .await
             .unwrap();
-        crate::tournament::db::insert_entry(pool, tournament_id, user_id, user_id * 100, "P", None)
+        crate::tournament::db::insert_entry(pool, tournament_id, user_id, Some(user_id * 100), "P", None)
             .await
             .unwrap();
         crate::tournament::db::upsert_bracket_message(pool, tournament_id, 1, 555)

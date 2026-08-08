@@ -194,7 +194,12 @@ impl RegisterOutcome {
 ///
 /// Best-effort: a missing or unreachable rating leaves the column null, which
 /// seeding already tolerates. The entrant is registered either way.
-pub(crate) async fn snapshot_entry_elo(pool: &SqlitePool, tournament_id: i64, user_id: i64, aoe4_id: i64) {
+pub(crate) async fn snapshot_entry_elo(pool: &SqlitePool, tournament_id: i64, user_id: i64, aoe4_id: Option<i64>) {
+    // Takes the option rather than an id so an entrant with no profile is a
+    // no-op here instead of a guard at each of the two call sites.
+    let Some(aoe4_id) = aoe4_id else {
+        return;
+    };
     let Some(profile) = aoe4world::fetch_profile(aoe4_id).await else {
         return;
     };
@@ -204,6 +209,65 @@ pub(crate) async fn snapshot_entry_elo(pool: &SqlitePool, tournament_id: i64, us
     if let Err(err) = db::set_entry_elo(pool, tournament_id, user_id, elo).await {
         error!("failed to snapshot elo for user {user_id} in tournament {tournament_id}: {err:?}");
     }
+}
+
+/// What registering does about the profile argument, given what the player row
+/// already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingAction {
+    /// Sign them up against the profile already on their row — including the case
+    /// of no profile and none offered.
+    Reenter,
+    /// They have no profile and named one: claim it for them.
+    ClaimProfile(i64),
+    /// They are bound to a different profile, and changing that is `rebind`'s job.
+    RefuseDifferent,
+}
+
+/// Pure, because the interesting case is easy to get backwards: an entrant with
+/// no profile who supplies one is *claiming* it, not contradicting a binding they
+/// do not have.
+pub(crate) fn binding_action(bound: Option<i64>, supplied: Option<i64>) -> BindingAction {
+    match (bound, supplied) {
+        (None, Some(given)) => BindingAction::ClaimProfile(given),
+        (Some(bound), Some(given)) if bound != given => BindingAction::RefuseDifferent,
+        _ => BindingAction::Reenter,
+    }
+}
+
+/// Binds a profile to a player row that had none, then signs them up.
+///
+/// The same steps `rebind` takes, for the same reason: the profile has to be free,
+/// it has to exist, and the name on it replaces whatever was standing in for it.
+async fn claim_profile(
+    pool: &SqlitePool,
+    tournament: &Tournament,
+    user_id: i64,
+    aoe4_id: i64,
+) -> Result<RegisterOutcome, sqlx::Error> {
+    if let Some(other) = db::get_player_by_aoe4_id(pool, aoe4_id).await?
+        && other.user_id != user_id
+    {
+        return Ok(RegisterOutcome::ProfileClaimedByAnother {
+            other_user_id: other.user_id,
+            other_display_name: other.display_name,
+        });
+    }
+    let Some(profile) = aoe4world::fetch_profile(aoe4_id).await else {
+        return Ok(RegisterOutcome::LookupFailed);
+    };
+    let elo = profile.modes.rm_1v1_elo.map(|data| i64::from(data.rating));
+
+    db::update_player_binding(pool, user_id, aoe4_id).await?;
+    db::set_player_display_name(pool, user_id, &profile.name).await?;
+    db::insert_entry(pool, tournament.id, user_id, Some(aoe4_id), &profile.name, elo).await?;
+
+    let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
+    Ok(RegisterOutcome::Registered {
+        entrant_number: entrant_number(&entries, user_id),
+        display_name: profile.name,
+        elo,
+    })
 }
 
 /// `Some(FieldFull)` when the field is at its cap. Counts `active` entries only,
@@ -254,23 +318,22 @@ pub(crate) async fn register(
     }
 
     match db::get_player(pool, user_id).await? {
-        Some(player) => {
-            if let Some(given) = aoe4_id
-                && given != player.aoe4_id
-            {
-                return Ok(RegisterOutcome::AlreadyBoundToDifferentProfile {
-                    display_name: player.display_name,
-                });
-            }
-            // No rating here: `snapshot_entry_elo` fetches it after the fact, so
-            // this path stays database-only and testable without network.
-            db::insert_entry(pool, tournament.id, user_id, player.aoe4_id, &player.display_name, None).await?;
-            let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-            Ok(RegisterOutcome::Registered {
-                entrant_number: entrant_number(&entries, user_id),
+        Some(player) => match binding_action(player.aoe4_id, aoe4_id) {
+            BindingAction::RefuseDifferent => Ok(RegisterOutcome::AlreadyBoundToDifferentProfile {
                 display_name: player.display_name,
-                elo: None,
-            })
+            }),
+            BindingAction::Reenter => {
+                // No rating here: `snapshot_entry_elo` fetches it after the fact, so
+                // this path stays database-only and testable without network.
+                db::insert_entry(pool, tournament.id, user_id, player.aoe4_id, &player.display_name, None).await?;
+                let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
+                Ok(RegisterOutcome::Registered {
+                    entrant_number: entrant_number(&entries, user_id),
+                    display_name: player.display_name,
+                    elo: None,
+                })
+            },
+            BindingAction::ClaimProfile(given) => claim_profile(pool, tournament, user_id, given).await,
         },
         None => {
             let Some(aoe4_id) = aoe4_id else {
@@ -462,6 +525,12 @@ pub(crate) async fn unbind(pool: &SqlitePool, user_id: i64) -> Result<UnbindOutc
     let Some(player) = db::get_player(pool, user_id).await? else {
         return Ok(UnbindOutcome::NotBound);
     };
+    // Before the entry count, not after: someone an organizer put in a field has a
+    // player row and, by definition, an entry — so asking about entries first
+    // would send them to an admin about a binding they never had.
+    if player.aoe4_id.is_none() {
+        return Ok(UnbindOutcome::NotBound);
+    }
 
     let count = db::count_entries_for_player(pool, user_id).await?;
     if count > 0 {
@@ -493,6 +562,9 @@ pub(crate) async fn rebind(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Res
     };
     let elo = profile.modes.rm_1v1_elo.map(|data| i64::from(data.rating));
     db::update_player_binding(pool, user_id, aoe4_id).await?;
+    // The name goes with the profile. Without this the reply names the new one
+    // while the roster, the bracket and every thread keep showing the old.
+    db::set_player_display_name(pool, user_id, &profile.name).await?;
     Ok(RebindOutcome::Success {
         display_name: profile.name,
         elo,
@@ -502,13 +574,38 @@ pub(crate) async fn rebind(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bound_player_re_enters_against_the_profile_they_already_have() {
+        assert_eq!(binding_action(Some(100), None), BindingAction::Reenter);
+        assert_eq!(binding_action(Some(100), Some(100)), BindingAction::Reenter);
+    }
+
+    #[test]
+    fn naming_a_different_profile_is_a_rebind_rather_than_a_registration() {
+        assert_eq!(binding_action(Some(100), Some(200)), BindingAction::RefuseDifferent);
+    }
+
+    #[test]
+    fn a_player_with_no_profile_who_names_one_is_claiming_it() {
+        // The case worth pinning: someone an organizer put in a field has a player
+        // row with nothing on it, so naming a profile contradicts no binding — it
+        // supplies the one they never had.
+        assert_eq!(binding_action(None, Some(100)), BindingAction::ClaimProfile(100));
+    }
+
+    #[test]
+    fn a_player_with_no_profile_who_names_none_just_signs_up_again() {
+        assert_eq!(binding_action(None, None), BindingAction::Reenter);
+    }
+
     use chrono::{TimeZone, Utc};
 
     fn entry(user_id: i64, registered_at: chrono::DateTime<Utc>) -> TournamentEntry {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: user_id,
+            aoe4_id: Some(user_id),
             seed: None,
             suggested_seed: None,
             display_name: format!("player-{user_id}"),

@@ -580,7 +580,9 @@ pub(crate) async fn get_round(pool: &SqlitePool, id: i64) -> Result<Option<Tourn
 #[derive(FromRow)]
 pub(crate) struct TournamentPlayer {
     pub user_id: i64,
-    pub aoe4_id: i64,
+    /// `None` for someone an organizer put in a field directly: they have no
+    /// aoe4world profile at all, and so no ratings and an unverified name.
+    pub aoe4_id: Option<i64>,
     pub display_name: String,
     pub bound_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -623,7 +625,7 @@ pub(crate) async fn get_player_by_aoe4_id(
 pub(crate) async fn insert_player_if_absent(
     pool: &SqlitePool,
     user_id: i64,
-    aoe4_id: i64,
+    aoe4_id: Option<i64>,
     display_name: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -642,8 +644,10 @@ pub(crate) async fn insert_player_if_absent(
     Ok(())
 }
 
-/// Rebinding changes which aoe4 profile is bound, nothing else — `display_name` is a
-/// separate, player-editable concern (see `set_player_display_name`).
+/// Changes which aoe4 profile is bound, and nothing else. The caller pairs this
+/// with `set_player_display_name` when the new profile carries a new name; the two
+/// are separate because changing a name is its own action, unblocked by a running
+/// tournament in a way rebinding is not.
 /// Every entry a player has ever had, in any tournament and whatever its status.
 ///
 /// Counts `withdrawn` rows too, deliberately: entries are never deleted, and
@@ -821,7 +825,9 @@ pub(crate) async fn has_running_tournament_entry(pool: &SqlitePool, user_id: i64
 pub(crate) struct TournamentEntry {
     pub tournament_id: i64,
     pub user_id: i64,
-    pub aoe4_id: i64,
+    /// Snapshotted from the player row at sign-up, and `None` when they had no
+    /// profile to snapshot.
+    pub aoe4_id: Option<i64>,
     pub seed: Option<i64>,
     pub suggested_seed: Option<i64>,
     pub display_name: String,
@@ -840,7 +846,7 @@ pub(crate) async fn insert_entry(
     pool: &SqlitePool,
     tournament_id: i64,
     user_id: i64,
-    aoe4_id: i64,
+    aoe4_id: Option<i64>,
     display_name: &str,
     elo: Option<i64>,
 ) -> Result<(), sqlx::Error> {
