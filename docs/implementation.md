@@ -19,8 +19,8 @@ writing the code, and if a chunk seems to contradict them, the design doc wins o
 - **One migration file per schema chunk**, never edited after it lands. A rewritten migration diverges from the
   deployed database.
 - **Two guilds, hardcoded** (§8.0). No per-guild configuration table and no setup command in this plan.
-- Chunks 1–20 and 24 have no external dependencies, and 19 is already a shippable tournament. Chunk 21 is in
-  **another repository**; only 22 waits on it, and most of 22 can be built before it lands.
+- Chunks 1–20 and 24 have no external dependencies. Chunk 21 is in **another repository**; only 22 waits on it,
+  and most of 22 can be built before it lands — which is why it is the whole of M3 and nothing earlier.
 - **Chunk numbers are append-only.** New chunks take the next free number rather than slotting in where they
   belong in the order, because the numbers already cited in shipped code (chunks 6–10's comments in `db.rs`,
   `panel.rs`, `registration.rs`, `mod.rs`, `dispatch.rs`, `commands.rs` — e.g. "consumed by chunk 12") would
@@ -29,6 +29,72 @@ writing the code, and if a chunk seems to contradict them, the design doc wins o
 - **Chunks 25, 26 and 24 landed out of numerical order**, in that sequence, right after chunk 10 and before the
   rest of Phase D. 24 (localization) retrofitted chunks 7–10, 25 and 26; **every chunk from here on writes its
   user-facing text through `Locale` from the start**, and its shared surfaces bilingual (§8.10).
+
+## Release milestones
+
+The phases below say what each chunk *is*; this says what order the **remaining** ones ship in. The target that
+decides the order is one concrete event: **an invite-only 8-player single elimination tournament, run end to
+end.** Everything that event needs is M1. Everything that only makes running it nicer is M2. Everything that
+replaces work a human can already do is M3.
+
+Landed so far: chunks 1–12, 14, 16, 17, 24–30. Dropped: 13, 15.
+
+**Where that event stops today.** `set_thread::open` has exactly one caller — `/tournament start` — and
+`record_set_result` is only ever reached for byes. So the first round's threads and draft rooms open, and then
+nothing: no result can be recorded, no winner advances, no later round is opened, and nothing ever writes
+`completed`. The bracket is a picture that never moves.
+
+### M1 — the event runs end to end
+
+**18 → 19 → 31 → 32 → 33.** All five are blocking; none may be skipped.
+
+*The core loop before the entry path.* 18 and 19 are what stand between a first round and a tournament, invite or
+not, and they are the deepest work left with nothing exercising it. Four entrants are enough to prove the whole
+loop — round 1, advancement, final, `completed` — and four Discord accounts are needed for that whether they were
+invited or signed themselves up. Ordering them first also lands **31's table rebuild, the riskiest commit in the
+group, against a tournament that already demonstrably works** rather than before one exists. The invite chunks
+are additive on top of a proven core; the reverse is not true.
+
+- **18** — set completion and advancement. The one chunk without which there is no tournament, only a first round.
+- **19** — `/set report`, the manual result path. Until chunk 22 exists this is the *only* way a result gets in.
+- **31** — `aoe4_id` optional. Nothing user-visible; the table rebuild that lets an unbound entrant exist.
+- **32** — `/tournament invite` and `/tournament uninvite`, and the no-show sweep skipping invited entries. That
+  exemption is what lets an all-invited field pass through `close-checkin` without anyone pressing a button,
+  which is why **34 is not in M1**. It also marks an unverified name on the set panel — so 18, landing first,
+  should expect that seat line to change under it.
+- **33** — invite-only registration mode, so the public door is actually shut rather than merely unadvertised.
+  `entrant_cap` alone does not do it: a stranger can still take one of the eight seats.
+
+**The event is run once, at the end, not after each chunk.** Nothing between here and 33 can be exercised
+end to end anyway — an invited field needs 31 through 33 before it exists — so a dry run per chunk would
+test the same partial path repeatedly. The cost is that the Discord half of 18 and 19 accumulates unrun
+until then: opening a thread, archiving and locking it, opening the next round's, and every panel edit along
+the way. **None of it has automated coverage and none of it can get any**, so when the run finally happens,
+treat a failure as being anywhere in 18–33 rather than in whatever landed last.
+
+**An invited entrant is still a Discord member.** `/tournament invite` names one, and the entry is keyed on their
+Discord id — which is how they are notified, added to their set thread, mentioned in its panel and handed their
+draft link. Every one of the eight has a Discord account in every version of this event; what an invite removes
+is the aoe4world profile and the sign-up step, not the person.
+
+An all-invited field is also entirely unrated, so §6's tiering falls back to alphabetical order. The seeding that
+matters is therefore the organizers' own — which chunk 30 has already made survive the rating pass and the one
+backward lifecycle edge.
+
+### M2 — running one comfortably
+
+Ordered by how sharply each failure bites during a live event.
+
+- **20** — `/set redraft`. A draft room that went wrong currently has no recovery at all, with two players waiting.
+- **34** — `/tournament lock`, so an invited field skips a check-in nobody needed. Convenience over M1's path, not
+  a replacement for it; still optional, and still droppable on the wart §8.3 records.
+- **23** — boot-time panel reconciliation, for a restart mid-event.
+
+### M3 — replace hand entry with import
+
+- **21** — the read endpoint, in **another repository**.
+- **22** — result import, `/set done`, and the poll. Most of it can be built against saved fixtures before 21
+  lands; only the live fetch is blocked.
 
 ## Phase A — foundations
 
@@ -339,10 +405,10 @@ completion derived from score against `target`, never from a status field.
 Organizer override writing `source = 'manual'` rows, plus `/set schedule`.
 Design: §3.7, §7 ("Fallback — manual"), §8.4.
 
-> **Chunk 19 is the first shippable milestone.** With it the bot runs a whole tournament in its own guild —
-> registration, check-in, seeding, bracket, threads, drafts created on the tool, results entered by hand — and
-> needs nothing from the draft tool's API beyond what already exists. Everything after this replaces hand-entry
-> with import.
+> **Chunk 19 closes M1.** With it the bot runs a whole tournament in its own guild — entrants in, check-in,
+> seeding, bracket, threads, drafts created on the tool, results entered by hand — and needs nothing from the
+> draft tool's API beyond what already exists. Everything after this either makes running one more comfortable
+> (M2) or replaces the hand-entry with import (M3).
 
 **20. `/set redraft`**
 Overwrite the pointer, increment `redraft_count`, clear the sync and announcement state, re-post the panel, and
