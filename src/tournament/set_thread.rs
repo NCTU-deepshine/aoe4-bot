@@ -16,11 +16,12 @@ use crate::drafttool::{self, DraftError};
 use crate::ranked::escape;
 use crate::tournament::action::Action;
 use crate::tournament::bracket;
+use crate::tournament::completion::Tally;
 use crate::tournament::db::{self, Tournament, TournamentRound, TournamentSet};
 use crate::tournament::render;
 use serenity::all::{
     ButtonStyle, CacheHttp, ChannelType, CreateActionRow, CreateAllowedMentions, CreateButton, CreateMessage,
-    CreateThread,
+    CreateThread, EditThread,
 };
 use sqlx::SqlitePool;
 use tracing::{error, info};
@@ -280,6 +281,106 @@ pub(crate) async fn open(
     Ok(())
 }
 
+/// Opens every set that is playable and has no thread yet.
+///
+/// One opener for both callers — `/tournament start` at the beginning, and each
+/// result as it lands — because "which sets are new" is a question neither needs
+/// to answer: `open` is a no-op on a set that already has a thread, so handing it
+/// everything is correct by construction.
+///
+/// Best-effort per set, and returns nothing: one set that cannot open must not
+/// stop the rest, and neither caller has anything to do about a failure beyond
+/// the log.
+pub(crate) async fn open_ready(http: &impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) {
+    let sets = match db::list_sets_for_tournament(pool, tournament.id).await {
+        Ok(sets) => sets,
+        Err(err) => {
+            error!("failed to list sets for tournament {}: {err:?}", tournament.id);
+            return;
+        },
+    };
+
+    for set in sets.iter().filter(|set| set.status == "ready") {
+        if let Err(err) = open(http, pool, tournament, set).await {
+            error!(
+                "failed to open set {} for tournament {}: {err:?}",
+                set.id, tournament.id
+            );
+        }
+    }
+}
+
+/// The result line posted into the thread when a set is decided.
+///
+/// Pure, and bilingual for the same reason the panel is: the thread's readers are
+/// two players and every admin, none of whom asked for this message. Names are
+/// escaped — they are player-editable and land in markdown here.
+pub(crate) fn render_result(set: &SetHeading, winner: &Player, loser: &Player, tally: &Tally) -> String {
+    let (winner_name, loser_name) = (escape(&winner.name), escape(&loser.name));
+    let score = format!("{}-{}", tally.slot1_wins, tally.slot2_wins);
+    let round = bracket::round_name_bilingual(&set.round_name);
+    format!(
+        "🏁 **{round} · Match {} — {score}**\n\
+         **{winner_name}** (#{}) 獲勝，晉級下一輪。 / **{winner_name}** (#{}) wins and advances.\n\
+         感謝 **{loser_name}** (#{}) 的參賽。 / Thanks for playing, **{loser_name}** (#{}).\n\
+         本討論串已封存。 / This thread is now closed.",
+        set.position, winner.seed, winner.seed, loser.seed, loser.seed
+    )
+}
+
+/// Posts the result and shuts the thread down: archived and locked, so it stops
+/// counting against the guild's cap on active threads while staying readable.
+///
+/// Every step is best-effort. The completion transaction has already committed by
+/// the time this runs, so a thread that refuses to archive is a cosmetic problem,
+/// and failing the caller over it would report a set as unfinished when it is not.
+pub(crate) async fn close(
+    http: &impl CacheHttp,
+    pool: &SqlitePool,
+    set: &TournamentSet,
+    winner: &Player,
+    loser: &Player,
+    tally: &Tally,
+) {
+    let Some(thread_id) = set.thread_id else {
+        return; // a set decided before its thread ever opened
+    };
+    let thread_id = to_channel_id(thread_id);
+
+    let Some(round) = db::get_round(pool, set.round_id).await.ok().flatten() else {
+        error!("set {} has no round, so its thread cannot be closed", set.id);
+        return;
+    };
+    let heading = SetHeading {
+        id: set.id,
+        round_name: round.name.clone(),
+        position: set.position,
+        best_of: round.best_of,
+    };
+
+    // Posted before the lock, not after: a locked thread is a bad place to try to
+    // write, and the result is the more important half of the two.
+    if let Err(err) = thread_id
+        .send_message(
+            http,
+            CreateMessage::new()
+                .content(render_result(&heading, winner, loser, tally))
+                // Names reach this message; nothing in it should ping.
+                .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles()),
+        )
+        .await
+    {
+        error!("failed to post the result in set {}'s thread: {err:?}", set.id);
+    }
+
+    if let Err(err) = thread_id
+        .edit_thread(http, EditThread::new().archived(true).locked(true))
+        .await
+    {
+        error!("failed to archive set {}'s thread: {err:?}", set.id);
+    }
+}
+
 /// Posts the set's spectator announcement in `#…-draft` and records its id.
 ///
 /// Returns nothing rather than a `Result`, so a caller cannot propagate a failed
@@ -340,7 +441,7 @@ async fn announce(
 
 /// A slot's occupant. An entry that has vanished falls back to the raw id
 /// rather than failing the thread — the set still needs to open.
-async fn player(pool: &SqlitePool, tournament_id: i64, user_id: i64) -> Result<Player, Error> {
+pub(crate) async fn player(pool: &SqlitePool, tournament_id: i64, user_id: i64) -> Result<Player, Error> {
     let entry = db::get_entry(pool, tournament_id, user_id).await?;
     Ok(Player {
         user_id,
@@ -706,6 +807,47 @@ mod tests {
             &player(9, 8, "B"),
             Some(&room()),
             &[],
+        );
+        assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
+    }
+
+    fn tally(slot1_wins: i64, slot2_wins: i64) -> Tally {
+        Tally { slot1_wins, slot2_wins }
+    }
+
+    #[test]
+    fn the_result_names_the_winner_the_score_and_both_seeds_in_both_languages() {
+        let content = render_result(
+            &heading(1, "Quarterfinal", 3, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &tally(2, 1),
+        );
+        assert!(content.contains("2-1"), "{content}");
+        assert!(
+            content.contains("MarineLorD") && content.contains("Beasty"),
+            "{content}"
+        );
+        assert!(content.contains("#1") && content.contains("#8"), "{content}");
+        // Bilingual, and the round name doubled where a translation exists.
+        assert!(
+            content.contains("八強") && content.contains("Quarterfinal"),
+            "{content}"
+        );
+        assert!(content.contains("wins and advances"), "{content}");
+        assert!(content.contains("Match 3"), "{content}");
+    }
+
+    #[test]
+    fn a_name_carrying_markdown_is_escaped_in_the_result() {
+        // Mention syntax is a separate defence: `escape` deliberately leaves `<`
+        // and `@` alone, and `close` sends with empty `allowed_mentions`, so a
+        // name like `<@1234>` renders as text and pings nobody.
+        let content = render_result(
+            &heading(1, "Final", 1, 5),
+            &player(7, 1, "*Bea*sty_"),
+            &player(9, 2, "B"),
+            &tally(3, 0),
         );
         assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
     }

@@ -25,6 +25,11 @@ pub(crate) mod checkin;
 // The check-in panel: rendering plus the Discord/DB glue
 // `commands.rs` and `dispatch::Dispatcher` call into.
 pub(crate) mod checkin_panel;
+// Deciding a set from its games: eliminating the loser, advancing the winner and
+// opening whatever that makes playable. Shared by every way of reporting a
+// result, so it exists before any of them can call it.
+#[allow(dead_code)]
+pub(crate) mod completion;
 // The interaction dispatcher's own `EventHandler` — kept
 // separate from `Emperor`, which is home-guild meme/reaction logic with no
 // tournament knowledge; registered as a second handler in `main.rs`.

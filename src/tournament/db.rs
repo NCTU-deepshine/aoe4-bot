@@ -1589,6 +1589,166 @@ pub(crate) async fn record_set_result(
     Ok(())
 }
 
+/// What `complete_set_and_advance` writes. A carrier rather than six positional
+/// args, matching `TournamentChannels` and `NewGame`.
+pub(crate) struct SetResult {
+    pub set_id: i64,
+    pub tournament_id: i64,
+    pub slot1_wins: i64,
+    pub slot2_wins: i64,
+    pub winner_user_id: i64,
+    pub loser_user_id: i64,
+}
+
+/// What the completion changed beyond the set itself.
+pub(crate) struct Advanced {
+    /// False when the set was already `completed` — nothing was written at all.
+    pub completed: bool,
+    pub target_became_ready: bool,
+    pub tournament_completed: bool,
+}
+
+/// Completing a set, **in one transaction**: the set is decided, the loser is
+/// eliminated, the winner is written into the next set, and that set opens if it
+/// now has both players.
+///
+/// Assembled inline for the same reason `insert_bracket` is — `record_set_result`,
+/// `update_entry_status`, `set_slot` and `update_set_status` each take a
+/// `&SqlitePool` and would each commit on their own, so a failure halfway would
+/// leave a set decided and its winner nowhere, which nothing downstream can detect.
+///
+/// **The first statement is the lock.** `and status <> 'completed'` means a second
+/// caller writes nothing and reports `completed: false`, rather than advancing the
+/// same winner twice — the set row is the only thing serialising two reports of
+/// one result, which is what a button pressed twice produces.
+pub(crate) async fn complete_set_and_advance(pool: &SqlitePool, result: SetResult) -> Result<Advanced, sqlx::Error> {
+    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
+
+    let decided = sqlx::query(
+        r"
+        update tournament_sets
+        set
+            slot1_wins = ?1,
+            slot2_wins = ?2,
+            winner_user_id = ?3,
+            status = 'completed',
+            completed_at = ?4
+        where id = ?5
+          and status <> 'completed'
+        ",
+    )
+    .bind(result.slot1_wins)
+    .bind(result.slot2_wins)
+    .bind(result.winner_user_id)
+    .bind(Utc::now())
+    .bind(result.set_id)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?
+    .rows_affected();
+
+    if decided == 0 {
+        tx.rollback().await.inspect_err(log_db_error)?;
+        return Ok(Advanced {
+            completed: false,
+            target_became_ready: false,
+            tournament_completed: false,
+        });
+    }
+
+    sqlx::query(
+        r"
+        update tournament_entries
+        set status = 'eliminated'
+        where tournament_id = ?1
+          and user_id = ?2
+        ",
+    )
+    .bind(result.tournament_id)
+    .bind(result.loser_user_id)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    let advancement: Option<(i64, i64)> = sqlx::query_as(
+        r"
+        select winner_advances_to_set_id, winner_advances_to_slot
+        from tournament_sets
+        where id = ?1
+          and winner_advances_to_set_id is not null
+          and winner_advances_to_slot is not null
+        ",
+    )
+    .bind(result.set_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    let (mut target_became_ready, mut tournament_completed) = (false, false);
+    match advancement {
+        Some((target, slot)) => {
+            // The column name is chosen here, never bound — two static queries
+            // rather than one interpolated one, as `set_slot` does.
+            let sql = if slot == 1 {
+                r"update tournament_sets set slot1_user_id = ?1 where id = ?2"
+            } else {
+                r"update tournament_sets set slot2_user_id = ?1 where id = ?2"
+            };
+            sqlx::query(sql)
+                .bind(result.winner_user_id)
+                .bind(target)
+                .execute(&mut *tx)
+                .await
+                .inspect_err(log_db_error)?;
+
+            // Readiness is both slots being filled, not the round being over: the
+            // other half of the bracket may still be playing.
+            target_became_ready = sqlx::query(
+                r"
+                update tournament_sets
+                set status = 'ready'
+                where id = ?1
+                  and status = 'pending'
+                  and slot1_user_id is not null
+                  and slot2_user_id is not null
+                ",
+            )
+            .bind(target)
+            .execute(&mut *tx)
+            .await
+            .inspect_err(log_db_error)?
+            .rows_affected()
+                > 0;
+        },
+        // The advancement links form a single-rooted tree, so exactly one set has
+        // nowhere to send a winner: the final. The event ends with it.
+        None => {
+            sqlx::query(
+                r"
+                update tournaments
+                set
+                    status = 'completed',
+                    completed_at = ?1
+                where id = ?2
+                ",
+            )
+            .bind(Utc::now())
+            .bind(result.tournament_id)
+            .execute(&mut *tx)
+            .await
+            .inspect_err(log_db_error)?;
+            tournament_completed = true;
+        },
+    }
+
+    tx.commit().await.inspect_err(log_db_error)?;
+    Ok(Advanced {
+        completed: true,
+        target_became_ready,
+        tournament_completed,
+    })
+}
+
 pub(crate) async fn set_scheduled_at(
     pool: &SqlitePool,
     id: i64,

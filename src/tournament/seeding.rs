@@ -10,11 +10,19 @@ use crate::locale::Locale;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use sqlx::SqlitePool;
 
-/// The field a seeding applies to: checked-in entrants only. `close-checkin`
-/// has already marked everyone else `no_show`, so a no-show or a
-/// withdrawal never occupies a seed.
+/// The field a seeding applies to: checked-in entrants only. Closing check-in
+/// has already marked everyone else `no_show`, so a no-show or a withdrawal
+/// never occupies a seed.
+///
+/// `eliminated` counts, because losing a set does not unmake a seed. The seeding
+/// is a record of the field that started, and dropping people from it as the
+/// bracket runs would leave a refreshed panel listing only the survivors — and
+/// eventually only the champion.
 pub(crate) fn seedable(entries: &[TournamentEntry]) -> Vec<&TournamentEntry> {
-    entries.iter().filter(|e| e.status == "active").collect()
+    entries
+        .iter()
+        .filter(|e| matches!(e.status.as_str(), "active" | "eliminated"))
+        .collect()
 }
 
 /// The default order, as user ids in seed order.

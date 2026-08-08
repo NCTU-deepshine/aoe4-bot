@@ -1770,31 +1770,12 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
         let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
         bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
         panel::refresh_now(ctx.http(), pool, &tournament).await?;
-        open_ready_sets(ctx, &tournament).await?;
+        // The same opener a completed set runs, so round one and every round
+        // after it are opened by one piece of code.
+        set_thread::open_ready(ctx.http(), pool, &tournament).await;
     }
 
     ctx.say(outcome.message(&tournament.name, locale)).await?;
-    Ok(())
-}
-
-/// Opens a thread and a draft room for every set now playable.
-///
-/// Best-effort per set, and a no-op for one that already has a thread: a set
-/// whose thread could not be created must not stop the rest of the round from
-/// opening, and an admin can retry afterwards.
-async fn open_ready_sets(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> Result<(), Error> {
-    let pool = &ctx.data().database;
-    for set in tournament_db::list_sets_for_tournament(pool, tournament.id).await? {
-        if set.status != "ready" {
-            continue;
-        }
-        if let Err(err) = set_thread::open(ctx.http(), pool, tournament, &set).await {
-            error!(
-                "failed to open set {} for tournament {}: {err:?}",
-                set.id, tournament.id
-            );
-        }
-    }
     Ok(())
 }
 
