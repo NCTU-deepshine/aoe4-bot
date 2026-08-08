@@ -34,10 +34,10 @@ impl DeleteCheck {
                 ),
             ),
             DeleteCheck::ConfirmMismatch => locale.pick(
-                format!("不符合。要刪除 **{name}** 和它的頻道，請執行 `/tournament delete confirm:{slug}`。此操作無法復原。"),
+                format!("不符合。要刪除 **{name}** 和它的頻道，請執行 `/tournament delete confirm:{slug}`。⚠️ 此操作無法復原。"),
                 format!(
                     "That doesn't match. To delete **{name}** and its channels, run \
-                     `/tournament delete confirm:{slug}`. This cannot be undone."
+                     `/tournament delete confirm:{slug}`. ⚠️ This cannot be undone."
                 ),
             ),
         }
@@ -98,6 +98,9 @@ mod tests {
         let t = tournament();
         let zh = DeleteCheck::ConfirmMismatch.message(&t, Locale::ZhTw);
         let en = DeleteCheck::ConfirmMismatch.message(&t, Locale::En);
+        // A command that cannot be undone marks the clause that says so.
+        assert!(zh.contains("⚠️ 此操作無法復原。"), "{zh}");
+        assert!(en.contains("⚠️ This cannot be undone."), "{en}");
         assert_ne!(zh, en);
         // Both must still tell the admin exactly what to type.
         assert!(zh.contains("confirm:relic-cup"), "{zh}");

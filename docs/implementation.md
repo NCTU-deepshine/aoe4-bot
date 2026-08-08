@@ -401,8 +401,13 @@ Design: §7 ("Set completion"), §8.7.
 Gate: §10 — a set reaching a majority of its games completes and places the winner in the correct slot;
 completion derived from score against `target`, never from a status field.
 
-**19. `/set report` — the manual path**
-Organizer override writing `source = 'manual'` rows, plus `/set schedule`.
+**19. `/set report` and `/set award` — the manual path**
+Organizer override writing `source = 'manual'` rows, per game, plus `/set award` for a set that was never
+played out. `/set report` is also how a single game is awarded; `/set award` settles the whole set as a
+`walkover`, which the schema has always permitted and nothing wrote — the winner advances exactly as a
+played result does, and whatever games were reported stay in the score.
+**`/set schedule` was not built.** Nothing reads `scheduled_at`, so it is a write with no consumer; it can
+come back with whatever ends up consuming it.
 Design: §3.7, §7 ("Fallback — manual"), §8.4.
 
 > **Chunk 19 closes M1.** With it the bot runs a whole tournament in its own guild — entrants in, check-in,

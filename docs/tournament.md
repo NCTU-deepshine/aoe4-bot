@@ -1123,6 +1123,11 @@ and its channels stop existing — and so appears nowhere in this graph.
 
 ### 8.4 Commands
 
+**A command that cannot be undone says so with a ⚠️**, on the clause that states the irreversibility and
+nowhere else — in the command's own description, where Discord shows it before the command is run, and again in
+the reply. `/tournament delete` and `/set award` are the two today. The marker is deliberately not spent on
+merely destructive-sounding commands, or it stops meaning anything.
+
 Discord allows only two levels of nesting, and **a command cannot be both a group and a leaf** — a player's
 `/tournament checkin` cannot coexist with `/tournament checkin open`. Hence the flat admin verbs.
 
@@ -1150,8 +1155,8 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/set draft` | admin | Creates the draft if a set somehow has none, and reposts the links |
 | `/set redraft` | either player, or admin | Abandons the current draft and creates a fresh one · also a button |
 | `/set done` | either player, or admin | Syncs the draft, imports, advances · also a button |
-| `/set report` | admin | Manual override (`source='manual'`) |
-| `/set schedule` | admin | Sets `scheduled_at` |
+| `/set report` | admin | Manual override of one game (`source='manual'`) |
+| `/set award` | admin | Hands the whole set to one player as a `walkover`, for a no-show |
 
 `/set *` resolves the set from the **current thread id**, so nobody types a set id. Outside a set thread they
 take an explicit argument.
@@ -1778,5 +1783,6 @@ Tracked separately; not part of this design.
 - **Check-in reminders** — should the bot ping registered players when check-in opens, or shortly before it
   closes, and in the register channel or by DM? Cheap to add on the existing cron; not requested. A DM would be
   the one player-facing message with no channel to live in (§8.9).
-- **Scheduling** — `/set schedule` stores `scheduled_at`, but nothing acts on it: no reminders, no timezone
-  handling.
+- **Scheduling** — `tournament_sets.scheduled_at` exists and nothing writes or reads it. `/set schedule` was
+  designed and then not built, because a stored time nobody acts on is not a schedule: it needs reminders and
+  timezone handling to be worth the column.

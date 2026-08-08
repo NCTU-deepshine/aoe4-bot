@@ -6,13 +6,13 @@ use crate::ranked::try_create_ranked_without_account;
 use crate::refresh::do_refresh;
 use crate::reply::ephemeral;
 use crate::tournament::access::{
-    create_tournament_only, tournament_admin_only, tournament_manage_only, wrong_channel_message,
+    create_tournament_only, may_manage, tournament_admin_only, tournament_manage_only, wrong_channel_message,
 };
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
-    audit, bracket, bracket_view, checkin, checkin_panel, panel, registration, seed_panel, seeding, set_thread,
-    setup as tournament_setup, start as tournament_start, teardown,
+    audit, bracket, bracket_view, checkin, checkin_panel, completion, panel, registration, report, seed_panel, seeding,
+    set_thread, setup as tournament_setup, start as tournament_start, teardown,
 };
 use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
@@ -35,7 +35,7 @@ pub(crate) fn home() -> Vec<Command> {
 
 /// The tournament guild's commands.
 pub(crate) fn tournament() -> Vec<Command> {
-    vec![tournament_root()]
+    vec![tournament_root(), set_root()]
 }
 
 #[poise::command(
@@ -1783,7 +1783,7 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
 // made and the `tournaments` row, which cascades to every tournament-scoped
 // table. The announce channel and the category are left alone — the bot created
 // neither — and so is `tournament_players`, which is global.
-/// Deletes the tournament and the channels it created. Cannot be undone.
+/// ⚠️ Deletes the tournament and the channels it created. Cannot be undone.
 #[poise::command(
     slash_command,
     guild_only,
@@ -1793,7 +1793,7 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
 )]
 pub async fn delete(
     ctx: Context<'_>,
-    #[description = "Type the tournament's slug to confirm — this cannot be undone"] confirm: String,
+    #[description = "Type the tournament's slug to confirm — ⚠️ this cannot be undone"] confirm: String,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let locale = Locale::from_context(ctx);
@@ -1865,6 +1865,193 @@ async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db
         }
     }
     failed
+}
+
+// Everything a single match needs, addressed by the thread it is played in.
+// Separate from `/tournament` because Discord allows only two levels of nesting
+// and these are per-set verbs, not per-event ones.
+/// Commands for one match, run in its own thread.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    rename = "set",
+    subcommands("set_report", "set_award"),
+    subcommand_required
+)]
+pub async fn set_root(_: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
+/// The set this command was typed in, with the caller's authority checked.
+///
+/// Mirrors `resolve_tournament_by_channel`'s contract — it answers on every
+/// failure itself, so `None` means "already handled, just return" — but keys off
+/// the thread rather than the channel, since that is what identifies a set and is
+/// why the ordinary manage check cannot be used as a poise `check` here.
+async fn resolve_set_by_thread(
+    ctx: Context<'_>,
+) -> Result<Option<(tournament_db::Tournament, tournament_db::TournamentSet)>, Error> {
+    let locale = Locale::from_context(ctx);
+    let pool = &ctx.data().database;
+
+    let Some(set) = tournament_db::get_set_by_thread(pool, to_db_id(ctx.channel_id())).await? else {
+        ephemeral(
+            ctx,
+            locale.pick(
+                "這個指令必須在該場對戰自己的討論串中執行。",
+                "Run this in the match's own thread.",
+            ),
+        )
+        .await?;
+        return Ok(None);
+    };
+    let Some(tournament) = tournament_db::get_tournament(pool, set.tournament_id).await? else {
+        ephemeral(ctx, wrong_channel_message(locale)).await?;
+        return Ok(None);
+    };
+    if !may_manage(ctx, &tournament).await? {
+        return Ok(None);
+    }
+    Ok(Some((tournament, set)))
+}
+
+/// The two players in the set this command was typed in, as autocomplete choices.
+///
+/// Never sends a message, for the same reason `autocomplete_entrant` doesn't:
+/// Discord treats an autocomplete interaction as its own thing and a reply here
+/// would break the command that follows.
+async fn autocomplete_set_player(ctx: Context<'_>, partial: &str) -> impl Iterator<Item = AutocompleteChoice> {
+    let pool = &ctx.data().database;
+    let mut choices: Vec<AutocompleteChoice> = Vec::new();
+
+    if let Ok(Some(set)) = tournament_db::get_set_by_thread(pool, to_db_id(ctx.channel_id())).await {
+        let needle = partial.to_lowercase();
+        for user_id in [set.slot1_user_id, set.slot2_user_id].into_iter().flatten() {
+            if let Ok(player) = set_thread::player(pool, set.tournament_id, user_id).await
+                && player.name.to_lowercase().contains(&needle)
+            {
+                choices.push(AutocompleteChoice::new(
+                    format!("{}·{}", player.seed, player.name),
+                    user_id.to_string(),
+                ));
+            }
+        }
+    }
+    choices.into_iter()
+}
+
+/// Records who won one game. Repeat per game; the set finishes on its own.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    rename = "report",
+    description_localized("zh-TW", "記錄單一局的勝方。逐局回報，賽果達標後自動結束。")
+)]
+pub async fn set_report(
+    ctx: Context<'_>,
+    #[description = "Which game of the series, starting at 1"]
+    #[description_localized("zh-TW", "第幾局，從 1 開始")]
+    game: i64,
+    #[description = "Who won it — pick from the two players"]
+    #[description_localized("zh-TW", "由誰獲勝——從兩位選手中選擇")]
+    #[autocomplete = "autocomplete_set_player"]
+    winner: String,
+    #[description = "The map played, if you want it on record"]
+    #[description_localized("zh-TW", "使用的地圖（選填）")]
+    map: Option<String>,
+    #[description = "Player 1's civilization"]
+    #[description_localized("zh-TW", "Player 1 的文明")]
+    slot1_civ: Option<String>,
+    #[description = "Player 2's civilization"]
+    #[description_localized("zh-TW", "Player 2 的文明")]
+    slot2_civ: Option<String>,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
+    let Some((tournament, set)) = resolve_set_by_thread(ctx).await? else {
+        return Ok(());
+    };
+
+    // Typed rather than picked, or picked from a set that has since changed:
+    // either way `report` reports it as not in the set.
+    let winner_user_id = winner.parse::<i64>().unwrap_or(0);
+    let pool = &ctx.data().database;
+    let winner_name = set_thread::player(pool, tournament.id, winner_user_id)
+        .await
+        .map_or_else(|_| winner.clone(), |player| player.name);
+
+    let outcome = report::report_game(
+        pool,
+        &set,
+        report::Report {
+            game_number: game,
+            winner_user_id,
+            winner_name,
+            reported_by: to_db_id(ctx.author().id),
+            map,
+            slot1_civ,
+            slot2_civ,
+        },
+    )
+    .await?;
+    audit::log_action("set report", tournament.id, &tournament.slug, ctx.author(), &outcome);
+
+    if !outcome.recorded() {
+        ephemeral(ctx, outcome.message(locale)).await?;
+        return Ok(());
+    }
+
+    // Re-read: the row just written is what decides whether the set is over.
+    let set = tournament_db::get_set(pool, set.id).await?.unwrap_or(set);
+    let finished = completion::finish(ctx.http(), pool, &tournament, &set).await?;
+    audit::log_action("set complete", tournament.id, &tournament.slug, ctx.author(), &finished);
+
+    let reply = format!("{}\n{}", outcome.message(locale), finished.message(locale));
+    // Ephemeral throughout: a completed set has already had its result posted in
+    // the thread, which is then archived and locked — so a public follow-up would
+    // be writing into a channel nobody can reply in. The running score reaches
+    // both players through the panel and the bracket instead.
+    ephemeral(ctx, reply).await?;
+    Ok(())
+}
+
+/// ⚠️ Awards the match to one player. Final — the loser is eliminated, with no undo.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    rename = "award",
+    description_localized("zh-TW", "⚠️ 將這場對戰判給其中一位選手。無法復原，敗方會立即淘汰。")
+)]
+pub async fn set_award(
+    ctx: Context<'_>,
+    #[description = "Who takes the match — the other player is eliminated immediately"]
+    #[description_localized("zh-TW", "由誰晉級——另一位選手會立即被淘汰")]
+    #[autocomplete = "autocomplete_set_player"]
+    winner: String,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
+    let Some((tournament, set)) = resolve_set_by_thread(ctx).await? else {
+        return Ok(());
+    };
+
+    // No confirmation step: the warning is carried by the command description, the
+    // argument description and the reply. A typed confirmation is the right answer
+    // if this ever bites, but it would cost an organizer friction on every no-show.
+    //
+    // Typed rather than picked, or picked from a set that has since changed:
+    // either way `award` reports it as not in the set.
+    let winner_user_id = winner.parse::<i64>().unwrap_or(0);
+    let outcome = completion::award(ctx.http(), &ctx.data().database, &tournament, &set, winner_user_id).await?;
+    audit::log_action("set award", tournament.id, &tournament.slug, ctx.author(), &outcome);
+
+    // Ephemeral for the same reason `/set report` is: an awarded set has already
+    // had its result posted in the thread, which is then archived and locked.
+    ephemeral(ctx, outcome.message(locale)).await?;
+    Ok(())
 }
 
 #[cfg(test)]

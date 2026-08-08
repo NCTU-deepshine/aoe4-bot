@@ -65,6 +65,31 @@ pub(crate) fn decide(tally: &Tally, best_of: i64) -> Option<Slot> {
     }
 }
 
+/// Statuses a set never leaves. Asked before anything is written, so a set cannot
+/// be settled twice by two different routes — a report landing at the same moment
+/// as an award, say.
+pub(crate) fn is_decided(status: &str) -> bool {
+    matches!(status, "completed" | "walkover" | "bye")
+}
+
+/// What ended a set: playing it out, or an organizer handing it over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Settlement {
+    Played,
+    /// A no-show, or an opponent who left. The games that were played still count
+    /// toward the score; only the ending was decided off the field.
+    Walkover,
+}
+
+impl Settlement {
+    pub(crate) fn status(self) -> &'static str {
+        match self {
+            Settlement::Played => "completed",
+            Settlement::Walkover => "walkover",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CompleteOutcome {
     Completed {
@@ -73,6 +98,7 @@ pub(crate) enum CompleteOutcome {
         tally: Tally,
         opened_next: bool,
         tournament_complete: bool,
+        settlement: Settlement,
     },
     /// Nobody has a majority yet, so nothing was written.
     StillPlaying {
@@ -83,6 +109,8 @@ pub(crate) enum CompleteOutcome {
     /// Not a set results can be reported for: a slot is still empty, or it was
     /// settled as a bye.
     NotPlayable,
+    /// An award naming someone who is not one of the two players.
+    NotInSet,
 }
 
 impl CompleteOutcome {
@@ -94,6 +122,7 @@ impl CompleteOutcome {
                 tally,
                 opened_next,
                 tournament_complete,
+                settlement,
             } => {
                 let (score, next) = (
                     format!("{}-{}", tally.slot1_wins, tally.slot2_wins),
@@ -106,10 +135,24 @@ impl CompleteOutcome {
                         ),
                     },
                 );
-                locale.pick(
-                    format!("**{winner_name}** 以 {score} 擊敗 **{loser_name}**。{next}"),
-                    format!("**{winner_name}** beat **{loser_name}** {score}. {next}"),
-                )
+                match settlement {
+                    Settlement::Played => locale.pick(
+                        format!("**{winner_name}** 以 {score} 擊敗 **{loser_name}**。{next}"),
+                        format!("**{winner_name}** beat **{loser_name}** {score}. {next}"),
+                    ),
+                    // Says what it cost, not just what it did: an award eliminates
+                    // someone, and no command puts them back.
+                    Settlement::Walkover => locale.pick(
+                        format!(
+                            "已將這場對戰判給 **{winner_name}**：**{loser_name}** 未完賽，已遭淘汰，\
+                             比分記為 {score}。⚠️ **此結果無法復原。**{next}"
+                        ),
+                        format!(
+                            "Awarded to **{winner_name}** — **{loser_name}** didn't play it out and is now \
+                             eliminated. Recorded {score}. ⚠️ **This can't be undone.** {next}"
+                        ),
+                    ),
+                }
             },
             CompleteOutcome::StillPlaying { tally, needed } => {
                 let score = format!("{}-{}", tally.slot1_wins, tally.slot2_wins);
@@ -126,24 +169,25 @@ impl CompleteOutcome {
                 "這場對戰還沒有兩位選手，無法回報結果。".to_string(),
                 "That set doesn't have both players yet, so there is nothing to report.".to_string(),
             ),
+            CompleteOutcome::NotInSet => locale.pick(
+                "那位玩家不在這場對戰裡。".to_string(),
+                "That player isn't in this set.".to_string(),
+            ),
         }
     }
 }
 
 /// Completes `set` if its games have decided it, then brings Discord in line.
 ///
-/// The one path every way of reporting a result runs. The database half is a
-/// single transaction and is authoritative; everything after it is best-effort,
-/// because a bracket that advanced in the database and not in the channel is a
-/// display problem an organizer can repair with `/tournament refresh`, whereas
-/// refusing to advance because Discord was unreachable stalls the event.
+/// The path a played result takes. A set nobody finished playing goes through
+/// `award` instead, and the two meet at `settle`.
 pub(crate) async fn finish(
     http: impl CacheHttp,
     pool: &SqlitePool,
     tournament: &Tournament,
     set: &TournamentSet,
 ) -> Result<CompleteOutcome, Error> {
-    if set.status == "completed" {
+    if is_decided(&set.status) {
         return Ok(CompleteOutcome::AlreadyComplete);
     }
     let (Some(slot1), Some(slot2)) = (set.slot1_user_id, set.slot2_user_id) else {
@@ -166,6 +210,78 @@ pub(crate) async fn finish(
         Slot::Two => (slot2, slot1),
     };
 
+    settle(
+        &http,
+        pool,
+        tournament,
+        set,
+        winner_user_id,
+        loser_user_id,
+        tally,
+        Settlement::Played,
+    )
+    .await
+}
+
+/// Hands `set` to `winner_user_id` without it being played out — a no-show, or an
+/// opponent who left mid-series.
+///
+/// Whatever games were already reported stay on the record and in the score, so a
+/// set abandoned at 1-0 reads as 1-0 to whoever was ahead even if the set is
+/// awarded the other way. That is the point of recording it as a walkover rather
+/// than as a win: the score says what was played, the status says what settled it.
+pub(crate) async fn award(
+    http: impl CacheHttp,
+    pool: &SqlitePool,
+    tournament: &Tournament,
+    set: &TournamentSet,
+    winner_user_id: i64,
+) -> Result<CompleteOutcome, Error> {
+    if is_decided(&set.status) {
+        return Ok(CompleteOutcome::AlreadyComplete);
+    }
+    let (Some(slot1), Some(slot2)) = (set.slot1_user_id, set.slot2_user_id) else {
+        return Ok(CompleteOutcome::NotPlayable);
+    };
+    let loser_user_id = match winner_user_id {
+        w if w == slot1 => slot2,
+        w if w == slot2 => slot1,
+        _ => return Ok(CompleteOutcome::NotInSet),
+    };
+
+    let games = db::list_games_for_set(pool, set.id).await?;
+    let tally = tally(&games, slot1, slot2);
+
+    settle(
+        &http,
+        pool,
+        tournament,
+        set,
+        winner_user_id,
+        loser_user_id,
+        tally,
+        Settlement::Walkover,
+    )
+    .await
+}
+
+/// The half both paths share: one transaction, then Discord.
+///
+/// The database half is authoritative; everything after it is best-effort,
+/// because a bracket that advanced in the database and not in the channel is a
+/// display problem an organizer can repair with `/tournament refresh`, whereas
+/// refusing to advance because Discord was unreachable stalls the event.
+#[allow(clippy::too_many_arguments)]
+async fn settle(
+    http: &impl CacheHttp,
+    pool: &SqlitePool,
+    tournament: &Tournament,
+    set: &TournamentSet,
+    winner_user_id: i64,
+    loser_user_id: i64,
+    tally: Tally,
+    settlement: Settlement,
+) -> Result<CompleteOutcome, Error> {
     let advanced = db::complete_set_and_advance(
         pool,
         db::SetResult {
@@ -175,6 +291,7 @@ pub(crate) async fn finish(
             slot2_wins: tally.slot2_wins,
             winner_user_id,
             loser_user_id,
+            status: settlement.status(),
         },
     )
     .await?;
@@ -185,15 +302,15 @@ pub(crate) async fn finish(
 
     let winner = set_thread::player(pool, tournament.id, winner_user_id).await?;
     let loser = set_thread::player(pool, tournament.id, loser_user_id).await?;
-    set_thread::close(&http, pool, set, &winner, &loser, &tally).await;
+    set_thread::close(http, pool, set, &winner, &loser, &tally, settlement).await;
 
     // The bracket is redrawn from the rows just written: `played_match` derives a
     // winner from `winner_user_id` and never reads `status`, so this needs no
-    // completion-specific rendering of its own.
-    if let Err(err) = bracket_view::reconcile(&http, pool, tournament).await {
-        tracing::error!("failed to redraw the bracket after set {} completed: {err:?}", set.id);
+    // rendering of its own for either kind of settlement.
+    if let Err(err) = bracket_view::reconcile(http, pool, tournament).await {
+        tracing::error!("failed to redraw the bracket after set {} settled: {err:?}", set.id);
     }
-    set_thread::open_ready(&http, pool, tournament).await;
+    set_thread::open_ready(http, pool, tournament).await;
 
     Ok(CompleteOutcome::Completed {
         winner_name: winner.name,
@@ -201,6 +318,7 @@ pub(crate) async fn finish(
         tally,
         opened_next: advanced.target_became_ready,
         tournament_complete: advanced.tournament_completed,
+        settlement,
     })
 }
 
@@ -328,6 +446,7 @@ mod tests {
             },
             opened_next: true,
             tournament_complete: false,
+            settlement: Settlement::Played,
         };
         let zh = outcome.message(Locale::ZhTw);
         let en = outcome.message(Locale::En);
@@ -353,9 +472,70 @@ mod tests {
             },
             opened_next: false,
             tournament_complete: true,
+            settlement: Settlement::Played,
         };
         assert!(outcome.message(Locale::En).contains("tournament is over"));
         assert!(outcome.message(Locale::ZhTw).contains("賽事到此結束"));
+    }
+
+    #[test]
+    fn a_decided_set_is_one_nothing_can_settle_again() {
+        for status in ["completed", "walkover", "bye"] {
+            assert!(is_decided(status), "{status} should be terminal");
+        }
+        for status in ["pending", "ready", "drafting", "in_progress"] {
+            assert!(!is_decided(status), "{status} is still live");
+        }
+    }
+
+    #[test]
+    fn a_settlement_names_the_status_it_writes() {
+        assert_eq!(Settlement::Played.status(), "completed");
+        assert_eq!(Settlement::Walkover.status(), "walkover");
+        // Both have to be terminal, or a second settlement could advance again.
+        for settlement in [Settlement::Played, Settlement::Walkover] {
+            assert!(is_decided(settlement.status()));
+        }
+    }
+
+    #[test]
+    fn an_awarded_set_reads_as_awarded_rather_than_as_a_win() {
+        let settled = |settlement| CompleteOutcome::Completed {
+            winner_name: "MarineLorD".to_string(),
+            loser_name: "Beasty".to_string(),
+            tally: Tally {
+                slot1_wins: 1,
+                slot2_wins: 0,
+            },
+            opened_next: true,
+            tournament_complete: false,
+            settlement,
+        };
+        let awarded = settled(Settlement::Walkover);
+        let played = settled(Settlement::Played);
+
+        for locale in [Locale::ZhTw, Locale::En] {
+            assert_ne!(
+                awarded.message(locale),
+                played.message(locale),
+                "a walkover must not read like a played result"
+            );
+            // The score still stands: games played before the walkover count.
+            assert!(awarded.message(locale).contains("1-0"));
+        }
+        assert!(awarded.message(Locale::En).contains("Awarded"));
+        assert!(awarded.message(Locale::ZhTw).contains("判給"));
+
+        // There is no un-award, so the reply has to say so and name who it cost.
+        // Until this carries real friction, the wording is the friction.
+        assert!(awarded.message(Locale::En).contains("⚠️ **This can't be undone.**"));
+        assert!(awarded.message(Locale::ZhTw).contains("⚠️ **此結果無法復原。**"));
+        for locale in [Locale::ZhTw, Locale::En] {
+            assert!(
+                awarded.message(locale).contains("Beasty"),
+                "the eliminated player has to be named"
+            );
+        }
     }
 
     #[test]

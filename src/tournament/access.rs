@@ -88,18 +88,29 @@ pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Erro
     Ok(false)
 }
 
-/// Command check for `/tournament open-checkin|close-checkin` (and, in later
-/// chunks, seed/start/cancel/draft/report/schedule) — the broader "any admin"
+/// Command check for the running of an event — open/close check-in, reopen
+/// registration, seed, start, draft, report, schedule — the broader "any admin"
 /// tier, unlike `tournament_admin_only`'s creator-only gate.
 pub(crate) async fn tournament_manage_only(ctx: Context<'_>) -> Result<bool, Error> {
-    let pool = &ctx.data().database;
     let channel_id = to_db_id(ctx.channel_id());
 
-    let Some(tournament) = db::get_tournament_by_any_channel_id(pool, channel_id).await? else {
+    let Some(tournament) = db::get_tournament_by_any_channel_id(&ctx.data().database, channel_id).await? else {
         ephemeral(ctx, wrong_channel_message(Locale::from_context(ctx))).await?;
         return Ok(false);
     };
+    may_manage(ctx, &tournament).await
+}
 
+/// The same tier as `tournament_manage_only`, asked of a tournament the caller
+/// has already resolved.
+///
+/// Split out because the two ways of finding a tournament need the same answer:
+/// the checks above start from the invoking channel, while a `/set` command
+/// starts from the thread it was typed in — whose id is the thread's, not one of
+/// the five stored channel ids, so resolving by channel there refuses everything.
+/// Replies with the refusal itself, so a caller only has to honour the `bool`.
+pub(crate) async fn may_manage(ctx: Context<'_>, tournament: &db::Tournament) -> Result<bool, Error> {
+    let pool = &ctx.data().database;
     let user_id = to_db_id(ctx.author().id);
     let is_admin = db::is_admin(pool, tournament.id, user_id).await?;
     let has_manage_guild = author_has_manage_guild(ctx).await?;

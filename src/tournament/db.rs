@@ -1385,6 +1385,23 @@ pub(crate) async fn list_sets_for_tournament(
     .inspect_err(log_db_error)
 }
 
+/// The set whose private thread this is, which is how every `/set` command finds
+/// its subject: an organizer types the result in the thread they are already
+/// reading, and never a set id.
+pub(crate) async fn get_set_by_thread(pool: &SqlitePool, thread_id: i64) -> Result<Option<TournamentSet>, sqlx::Error> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        r"
+        select {TOURNAMENT_SET_COLUMNS}
+        from tournament_sets
+        where thread_id = ?1
+        "
+    )))
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
 pub(crate) async fn get_set(pool: &SqlitePool, id: i64) -> Result<Option<TournamentSet>, sqlx::Error> {
     sqlx::query_as(AssertSqlSafe(format!(
         r"
@@ -1598,11 +1615,14 @@ pub(crate) struct SetResult {
     pub slot2_wins: i64,
     pub winner_user_id: i64,
     pub loser_user_id: i64,
+    /// `completed` for a set that was played out, `walkover` for one an organizer
+    /// handed over. Terminal either way; the distinction is for the record.
+    pub status: &'static str,
 }
 
-/// What the completion changed beyond the set itself.
+/// What the settlement changed beyond the set itself.
 pub(crate) struct Advanced {
-    /// False when the set was already `completed` — nothing was written at all.
+    /// False when the set was already decided — nothing was written at all.
     pub completed: bool,
     pub target_became_ready: bool,
     pub tournament_completed: bool,
@@ -1617,10 +1637,11 @@ pub(crate) struct Advanced {
 /// `&SqlitePool` and would each commit on their own, so a failure halfway would
 /// leave a set decided and its winner nowhere, which nothing downstream can detect.
 ///
-/// **The first statement is the lock.** `and status <> 'completed'` means a second
-/// caller writes nothing and reports `completed: false`, rather than advancing the
-/// same winner twice — the set row is the only thing serialising two reports of
-/// one result, which is what a button pressed twice produces.
+/// **The first statement is the lock.** Excluding every status a set never leaves
+/// means a second caller writes nothing and reports `completed: false`, rather
+/// than advancing the same winner twice — the set row is the only thing
+/// serialising two settlements of one set, whether that is a button pressed twice
+/// or a result landing at the same moment as an organizer's award.
 pub(crate) async fn complete_set_and_advance(pool: &SqlitePool, result: SetResult) -> Result<Advanced, sqlx::Error> {
     let mut tx = pool.begin().await.inspect_err(log_db_error)?;
 
@@ -1631,15 +1652,16 @@ pub(crate) async fn complete_set_and_advance(pool: &SqlitePool, result: SetResul
             slot1_wins = ?1,
             slot2_wins = ?2,
             winner_user_id = ?3,
-            status = 'completed',
-            completed_at = ?4
-        where id = ?5
-          and status <> 'completed'
+            status = ?4,
+            completed_at = ?5
+        where id = ?6
+          and status not in ('completed', 'walkover', 'bye')
         ",
     )
     .bind(result.slot1_wins)
     .bind(result.slot2_wins)
     .bind(result.winner_user_id)
+    .bind(result.status)
     .bind(Utc::now())
     .bind(result.set_id)
     .execute(&mut *tx)
@@ -1819,6 +1841,59 @@ pub(crate) async fn insert_game(pool: &SqlitePool, new: NewGame) -> Result<i64, 
     .await
     .inspect_err(log_db_error)?;
     Ok(result.last_insert_rowid())
+}
+
+/// Writes an organizer's own record of one game, replacing whatever was there.
+///
+/// An upsert rather than an insert-or-update pair, because correcting a game is
+/// the ordinary case and `unique (set_id, game_number)` would otherwise reject
+/// it. Not `update_game_result`, which cannot set `source`, `reported_by` or
+/// `reported_at` — a correction routed through that would leave a row still
+/// claiming to have come from the draft tool.
+///
+/// A carrier rather than positional arguments, like `NewGame` next to it.
+pub(crate) struct ManualGame {
+    pub set_id: i64,
+    pub game_number: i64,
+    pub winner_user_id: i64,
+    pub reported_by: i64,
+    pub map: Option<String>,
+    pub slot1_civ: Option<String>,
+    pub slot2_civ: Option<String>,
+}
+
+pub(crate) async fn record_manual_game(pool: &SqlitePool, game: ManualGame) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        insert into tournament_games (
+            set_id, game_number, map, slot1_civ, slot2_civ, winner_user_id, status, source,
+            reported_by, reported_at
+        )
+        values (?1, ?2, ?3, ?4, ?5, ?6, 'completed', 'manual', ?7, ?8)
+        on conflict (set_id, game_number) do update
+        set
+            map = excluded.map,
+            slot1_civ = excluded.slot1_civ,
+            slot2_civ = excluded.slot2_civ,
+            winner_user_id = excluded.winner_user_id,
+            status = excluded.status,
+            source = excluded.source,
+            reported_by = excluded.reported_by,
+            reported_at = excluded.reported_at
+        ",
+    )
+    .bind(game.set_id)
+    .bind(game.game_number)
+    .bind(game.map)
+    .bind(game.slot1_civ)
+    .bind(game.slot2_civ)
+    .bind(game.winner_user_id)
+    .bind(game.reported_by)
+    .bind(Utc::now())
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
 }
 
 pub(crate) async fn get_game(

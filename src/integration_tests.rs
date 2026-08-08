@@ -1853,6 +1853,7 @@ mod tests {
                     slot2_wins: tally.slot2_wins,
                     winner_user_id,
                     loser_user_id,
+                    status: "completed",
                 },
             )
             .await
@@ -2023,6 +2024,320 @@ mod tests {
         let field = crate::tournament::seeding::display_order(&entries);
         assert_eq!(field.len(), 4, "all four still stand in the seeding");
         assert!(field.iter().any(|e| e.user_id == 4 && e.status == "eliminated"));
+    }
+
+    // Manual result reporting.
+    //
+    // The command bodies need a Discord context, so these drive `report`'s own
+    // engine — everything the database is responsible for, which is all of it
+    // except the reply.
+
+    /// Reports `winner` as having taken game `game` of `set_id`, from user 99.
+    async fn report_one(
+        pool: &SqlitePool,
+        set_id: i64,
+        game: i64,
+        winner: i64,
+    ) -> crate::tournament::report::ReportOutcome {
+        let set = crate::tournament::db::get_set(pool, set_id).await.unwrap().unwrap();
+        crate::tournament::report::report_game(
+            pool,
+            &set,
+            crate::tournament::report::Report {
+                game_number: game,
+                winner_user_id: winner,
+                winner_name: "P".to_string(),
+                reported_by: 99,
+                map: None,
+                slot1_civ: None,
+                slot2_civ: None,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reported_game_is_stored_as_the_organizers_own_record() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        let outcome = report_one(&pool, ids[0], 1, 1).await;
+        assert!(outcome.recorded(), "{outcome:?}");
+
+        let games = crate::tournament::db::list_games_for_set(&pool, ids[0]).await.unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].game_number, 1);
+        assert_eq!(games[0].winner_user_id, Some(1));
+        assert_eq!(games[0].status, "completed");
+        assert_eq!(games[0].source, "manual", "a later sync must not overwrite this");
+        assert_eq!(games[0].reported_by, Some(99));
+        assert!(games[0].reported_at.is_some());
+
+        // One game of a Bo3 decides nothing, so the set is still playable.
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(set.status, "ready");
+        assert_eq!(set.winner_user_id, None);
+    }
+
+    #[tokio::test]
+    async fn re_reporting_a_game_corrects_it_rather_than_adding_a_second_row() {
+        // The whole reason the write is an upsert: `unique (set_id, game_number)`
+        // would otherwise reject the correction outright.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        report_one(&pool, ids[0], 1, 1).await;
+        report_one(&pool, ids[0], 1, 4).await;
+
+        let games = crate::tournament::db::list_games_for_set(&pool, ids[0]).await.unwrap();
+        assert_eq!(games.len(), 1, "still one game 1");
+        assert_eq!(games[0].winner_user_id, Some(4), "the correction stands");
+    }
+
+    #[tokio::test]
+    async fn reporting_up_to_the_majority_hands_a_decided_set_to_the_completion_path() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        report_one(&pool, ids[0], 1, 1).await;
+        let outcome = report_one(&pool, ids[0], 2, 1).await;
+        let crate::tournament::report::ReportOutcome::Recorded { tally, .. } = outcome else {
+            panic!("expected a recorded game");
+        };
+        // `report` records and reports the score; deciding is `completion`'s job,
+        // so the set is untouched until the command calls it.
+        assert_eq!((tally.slot1_wins, tally.slot2_wins), (2, 0));
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(set.status, "ready");
+
+        let advanced = decide_and_complete(&pool, tournament.id, ids[0]).await.unwrap();
+        assert!(advanced.completed);
+        assert_eq!(status_of(&pool, tournament.id, 4).await, "eliminated");
+    }
+
+    #[tokio::test]
+    async fn a_finished_set_refuses_a_report_and_keeps_its_games() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        report_one(&pool, ids[0], 1, 1).await;
+        report_one(&pool, ids[0], 2, 1).await;
+        decide_and_complete(&pool, tournament.id, ids[0]).await.unwrap();
+
+        let outcome = report_one(&pool, ids[0], 3, 4).await;
+        assert_eq!(outcome, crate::tournament::report::ReportOutcome::AlreadyComplete);
+
+        let games = crate::tournament::db::list_games_for_set(&pool, ids[0]).await.unwrap();
+        assert_eq!(games.len(), 2, "the refused report wrote nothing");
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(set.winner_user_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_report_is_refused_before_it_writes_when_the_arguments_are_wrong() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        // Bo3, so games 0 and 4 do not exist; user 2 plays in the other set.
+        let bad_number = crate::tournament::report::ReportOutcome::BadGameNumber { best_of: 3 };
+        assert_eq!(report_one(&pool, ids[0], 0, 1).await, bad_number);
+        assert_eq!(report_one(&pool, ids[0], 4, 1).await, bad_number);
+        assert_eq!(
+            report_one(&pool, ids[0], 1, 2).await,
+            crate::tournament::report::ReportOutcome::NotInSet
+        );
+        // And the final, whose slots are still empty, has nothing to report.
+        assert_eq!(
+            report_one(&pool, ids[2], 1, 1).await,
+            crate::tournament::report::ReportOutcome::NotPlayable
+        );
+
+        for set_id in [ids[0], ids[2]] {
+            let games = crate::tournament::db::list_games_for_set(&pool, set_id).await.unwrap();
+            assert!(games.is_empty(), "a refused report must write nothing");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_organizers_own_record_survives_a_redraft() {
+        // Regenerating a draft discards the imported record of a game and keeps a
+        // correction someone made by hand. Untestable until manual rows existed.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        report_one(&pool, ids[0], 1, 1).await;
+        report_games(&pool, ids[0], &[4]).await; // an import-shaped row
+        crate::tournament::db::update_game_result(
+            &pool,
+            crate::tournament::db::list_games_for_set(&pool, ids[0]).await.unwrap()[1].id,
+            Some(4),
+            "completed",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query("update tournament_games set source = 'draft_import' where game_number = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        crate::tournament::db::void_games_for_set(&pool, ids[0]).await.unwrap();
+
+        let games = crate::tournament::db::list_games_for_set(&pool, ids[0]).await.unwrap();
+        let manual = games.iter().find(|g| g.game_number == 1).unwrap();
+        let imported = games.iter().find(|g| g.game_number == 2).unwrap();
+        assert_eq!(manual.status, "completed", "a hand-made record survives");
+        assert_eq!(imported.status, "void", "the imported one does not");
+    }
+
+    #[tokio::test]
+    async fn a_set_is_found_by_the_thread_it_is_played_in() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        crate::tournament::db::set_thread(&pool, ids[1], 4242).await.unwrap();
+
+        let found = crate::tournament::db::get_set_by_thread(&pool, 4242).await.unwrap();
+        assert_eq!(found.map(|s| s.id), Some(ids[1]));
+        assert!(
+            crate::tournament::db::get_set_by_thread(&pool, 9999)
+                .await
+                .unwrap()
+                .is_none(),
+            "an unknown thread is not a set"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_awarded_set_advances_its_winner_like_any_other() {
+        // The no-show case: nothing was played, and the bracket still has to move.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        let advanced = crate::tournament::db::complete_set_and_advance(
+            &pool,
+            crate::tournament::db::SetResult {
+                set_id: set.id,
+                tournament_id: tournament.id,
+                slot1_wins: 0,
+                slot2_wins: 0,
+                winner_user_id: 1,
+                loser_user_id: 4,
+                status: "walkover",
+            },
+        )
+        .await
+        .unwrap();
+        assert!(advanced.completed);
+
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(set.status, "walkover", "the record says it was not played out");
+        assert_eq!(set.winner_user_id, Some(1));
+        assert!(set.completed_at.is_some());
+        assert_eq!(status_of(&pool, tournament.id, 4).await, "eliminated");
+
+        let final_set = crate::tournament::db::get_set(&pool, ids[2]).await.unwrap().unwrap();
+        assert_eq!(final_set.slot1_user_id, Some(1), "the awarded winner advances");
+    }
+
+    #[tokio::test]
+    async fn an_awarded_set_is_terminal_for_every_other_route() {
+        // A walkover has to shut the same doors a played result does, or a late
+        // report would advance a second winner out of the same set.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        crate::tournament::db::complete_set_and_advance(
+            &pool,
+            crate::tournament::db::SetResult {
+                set_id: set.id,
+                tournament_id: tournament.id,
+                slot1_wins: 0,
+                slot2_wins: 0,
+                winner_user_id: 1,
+                loser_user_id: 4,
+                status: "walkover",
+            },
+        )
+        .await
+        .unwrap();
+
+        // A report is refused...
+        assert_eq!(
+            report_one(&pool, ids[0], 1, 4).await,
+            crate::tournament::report::ReportOutcome::AlreadyComplete
+        );
+        // ...and a second settlement writes nothing.
+        let again = crate::tournament::db::complete_set_and_advance(
+            &pool,
+            crate::tournament::db::SetResult {
+                set_id: set.id,
+                tournament_id: tournament.id,
+                slot1_wins: 0,
+                slot2_wins: 0,
+                winner_user_id: 4,
+                loser_user_id: 1,
+                status: "completed",
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!again.completed, "a decided set stays decided");
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(set.winner_user_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn awarding_a_half_played_set_keeps_the_games_that_were_played() {
+        // Abandoned at 1-0 the other way: the score says what happened on the
+        // field, the status says who was given the set.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        report_one(&pool, ids[0], 1, 4).await;
+        let games = crate::tournament::db::list_games_for_set(&pool, ids[0]).await.unwrap();
+        let tally = crate::tournament::completion::tally(&games, 1, 4);
+        assert_eq!((tally.slot1_wins, tally.slot2_wins), (0, 1));
+
+        crate::tournament::db::complete_set_and_advance(
+            &pool,
+            crate::tournament::db::SetResult {
+                set_id: ids[0],
+                tournament_id: tournament.id,
+                slot1_wins: tally.slot1_wins,
+                slot2_wins: tally.slot2_wins,
+                winner_user_id: 1,
+                loser_user_id: 4,
+                status: "walkover",
+            },
+        )
+        .await
+        .unwrap();
+
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!((set.slot1_wins, set.slot2_wins), (0, 1), "the played game stands");
+        assert_eq!(set.winner_user_id, Some(1), "and the set still goes the other way");
+        assert_eq!(
+            crate::tournament::db::list_games_for_set(&pool, ids[0])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

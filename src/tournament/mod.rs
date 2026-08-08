@@ -1,7 +1,8 @@
 //! Tournament management.
 
-// Consumed by `/tournament start`, which generates and stores a bracket. Until that
-// lands, only this module's own tests exercise it — remove the allow then.
+// Pure bracket generation: sizes, seed order by reflection, byes and the
+// advancement links `/tournament start` persists. The allow is for `Set::is_bye`
+// alone — `start` reads the two slots directly instead.
 #[allow(dead_code)]
 pub(crate) mod bracket;
 // The bracket as Discord sees it: a preview from the first two
@@ -27,8 +28,7 @@ pub(crate) mod checkin;
 pub(crate) mod checkin_panel;
 // Deciding a set from its games: eliminating the loser, advancing the winner and
 // opening whatever that makes playable. Shared by every way of reporting a
-// result, so it exists before any of them can call it.
-#[allow(dead_code)]
+// result, so a set decided by hand and one decided by import behave alike.
 pub(crate) mod completion;
 // The interaction dispatcher's own `EventHandler` — kept
 // separate from `Emperor`, which is home-guild meme/reaction logic with no
@@ -39,6 +39,9 @@ pub(crate) mod dispatch;
 pub(crate) mod panel;
 #[allow(dead_code)]
 pub(crate) mod render;
+// An organizer's own record of a game, for a set played outside the draft tool
+// or a draft that was abandoned. The fallback, not the primary path.
+pub(crate) mod report;
 // `/tournament register|rebind|withdraw`'s business logic.
 pub(crate) mod registration;
 // `/tournament create`'s slug argument.

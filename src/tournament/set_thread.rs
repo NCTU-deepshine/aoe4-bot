@@ -16,7 +16,7 @@ use crate::drafttool::{self, DraftError};
 use crate::ranked::escape;
 use crate::tournament::action::Action;
 use crate::tournament::bracket;
-use crate::tournament::completion::Tally;
+use crate::tournament::completion::{Settlement, Tally};
 use crate::tournament::db::{self, Tournament, TournamentRound, TournamentSet};
 use crate::tournament::render;
 use serenity::all::{
@@ -315,16 +315,34 @@ pub(crate) async fn open_ready(http: &impl CacheHttp, pool: &SqlitePool, tournam
 /// Pure, and bilingual for the same reason the panel is: the thread's readers are
 /// two players and every admin, none of whom asked for this message. Names are
 /// escaped — they are player-editable and land in markdown here.
-pub(crate) fn render_result(set: &SetHeading, winner: &Player, loser: &Player, tally: &Tally) -> String {
+pub(crate) fn render_result(
+    set: &SetHeading,
+    winner: &Player,
+    loser: &Player,
+    tally: &Tally,
+    settlement: Settlement,
+) -> String {
     let (winner_name, loser_name) = (escape(&winner.name), escape(&loser.name));
     let score = format!("{}-{}", tally.slot1_wins, tally.slot2_wins);
     let round = bracket::round_name_bilingual(&set.round_name);
+    // A walkover says so rather than reading as a win nobody watched: the two
+    // players know it was not played out, and the record should agree with them.
+    let verdict = match settlement {
+        Settlement::Played => format!(
+            "**{winner_name}** (#{}) 獲勝，晉級下一輪。 / **{winner_name}** (#{}) wins and advances.\n\
+             感謝 **{loser_name}** (#{}) 的參賽。 / Thanks for playing, **{loser_name}** (#{}).",
+            winner.seed, winner.seed, loser.seed, loser.seed
+        ),
+        Settlement::Walkover => format!(
+            "由管理員判給 **{winner_name}** (#{}) 晉級，**{loser_name}** 未完賽。 / \
+             Awarded to **{winner_name}** (#{}) — **{loser_name}** didn't play it out.",
+            winner.seed, winner.seed
+        ),
+    };
     format!(
-        "🏁 **{round} · Match {} — {score}**\n\
-         **{winner_name}** (#{}) 獲勝，晉級下一輪。 / **{winner_name}** (#{}) wins and advances.\n\
-         感謝 **{loser_name}** (#{}) 的參賽。 / Thanks for playing, **{loser_name}** (#{}).\n\
+        "🏁 **{round} · Match {} — {score}**\n{verdict}\n\
          本討論串已封存。 / This thread is now closed.",
-        set.position, winner.seed, winner.seed, loser.seed, loser.seed
+        set.position
     )
 }
 
@@ -341,6 +359,7 @@ pub(crate) async fn close(
     winner: &Player,
     loser: &Player,
     tally: &Tally,
+    settlement: Settlement,
 ) {
     let Some(thread_id) = set.thread_id else {
         return; // a set decided before its thread ever opened
@@ -364,7 +383,7 @@ pub(crate) async fn close(
         .send_message(
             http,
             CreateMessage::new()
-                .content(render_result(&heading, winner, loser, tally))
+                .content(render_result(&heading, winner, loser, tally, settlement))
                 // Names reach this message; nothing in it should ping.
                 .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles()),
         )
@@ -822,6 +841,7 @@ mod tests {
             &player(7, 1, "MarineLorD"),
             &player(9, 8, "Beasty"),
             &tally(2, 1),
+            Settlement::Played,
         );
         assert!(content.contains("2-1"), "{content}");
         assert!(
@@ -839,6 +859,25 @@ mod tests {
     }
 
     #[test]
+    fn an_awarded_set_says_so_in_the_thread_it_closes() {
+        let awarded = render_result(
+            &heading(1, "Semifinal", 2, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 4, "Beasty"),
+            &tally(1, 0),
+            Settlement::Walkover,
+        );
+        // Neither player watched this one finish; the thread should not claim
+        // otherwise.
+        assert!(!awarded.contains("wins and advances"), "{awarded}");
+        assert!(awarded.contains("Awarded to"), "{awarded}");
+        assert!(awarded.contains("判給"), "{awarded}");
+        // The score and both names survive either way.
+        assert!(awarded.contains("1-0") && awarded.contains("MarineLorD") && awarded.contains("Beasty"));
+        assert!(awarded.contains("This thread is now closed"));
+    }
+
+    #[test]
     fn a_name_carrying_markdown_is_escaped_in_the_result() {
         // Mention syntax is a separate defence: `escape` deliberately leaves `<`
         // and `@` alone, and `close` sends with empty `allowed_mentions`, so a
@@ -848,6 +887,7 @@ mod tests {
             &player(7, 1, "*Bea*sty_"),
             &player(9, 2, "B"),
             &tally(3, 0),
+            Settlement::Played,
         );
         assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
     }
