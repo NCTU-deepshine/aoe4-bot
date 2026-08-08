@@ -1,4 +1,4 @@
-//! Who may manage a tournament's admin list (docs/tournament.md §8.2), and who
+//! Who may manage a tournament's admin list, and who
 //! may create one in the first place — the codebase's first access control.
 //! The decisions (`decide`, `may_create_tournament`) are pure and
 //! Discord/database-free so every case is unit-tested directly; the check
@@ -13,11 +13,11 @@ use crate::{Context, Error};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Access {
-    /// `tournaments.created_by` — the ultimate authority (§8.2).
+    /// `tournaments.created_by` — the ultimate authority.
     Creator,
     /// Listed in `tournament_admins`, but not the creator.
     Admin,
-    /// Holds the guild's `MANAGE_GUILD` bit. Per §8.2 this grants the SAME
+    /// Holds the guild's `MANAGE_GUILD` bit, which grants the SAME
     /// authority as the creator (not merely admin-tier) — deliberate, so a
     /// tournament is recoverable if its creator has left the server.
     ManageGuildBypass,
@@ -25,14 +25,14 @@ pub(crate) enum Access {
 }
 
 impl Access {
-    /// `/tournament admin add|remove|list` (§8.2: "creator only") — a plain
+    /// `/tournament admin add|remove|list` ("creator only") — a plain
     /// `Admin` may not manage the admin list; only `Creator` or the bypass may.
     pub(crate) fn may_manage_admins(self) -> bool {
         matches!(self, Access::Creator | Access::ManageGuildBypass)
     }
 
-    /// The broader "any admin" tier (§8.2: "open/close check-in, seed, start,
-    /// cancel, draft, manual report, schedule") — unlike `may_manage_admins`,
+    /// The broader "any admin" tier — open/close check-in, seed, start, draft,
+    /// manual report, schedule — unlike `may_manage_admins`,
     /// a plain `Admin` is included.
     pub(crate) fn may_manage_tournament(self) -> bool {
         matches!(self, Access::Creator | Access::Admin | Access::ManageGuildBypass)
@@ -58,9 +58,9 @@ pub(crate) fn decide(user_id: i64, created_by: i64, is_admin: bool, has_manage_g
 /// Command check for `/tournament admin add|remove|list` and `/tournament delete`
 /// — the creator-only tier, tighter than `tournament_manage_only`. Resolves the
 /// tournament from the invoking channel — matching ANY of its five stored
-/// channel ids, not a slug argument (docs/tournament.md §8.2's admin-resolution
-/// gap: every reply here is ephemeral, so there's no clutter cost to letting an
-/// admin manage the list from wherever they already are) — then applies `decide`.
+/// channel ids, not a slug argument (every reply here is ephemeral, so there is
+/// no clutter cost to letting an admin manage the list from wherever they already
+/// are) — then applies `decide`.
 pub(crate) async fn tournament_admin_only(ctx: Context<'_>) -> Result<bool, Error> {
     let pool = &ctx.data().database;
     let channel_id = to_db_id(ctx.channel_id());
@@ -140,7 +140,7 @@ async fn author_has_manage_guild(ctx: Context<'_>) -> Result<bool, Error> {
     Ok(partial_guild.member_permissions(&member).manage_guild())
 }
 
-/// `/tournament create` (§8.4). Deliberately an OR, not a replacement of the
+/// `/tournament create`. Deliberately an OR, not a replacement of the
 /// Manage Guild path: the organizer role is a hardcoded id (`guilds.rs`) with no
 /// setup command yet, so Manage Guild has to keep working on its own even if the
 /// role is never assigned, misconfigured, or later deleted.

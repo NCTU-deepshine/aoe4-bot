@@ -1,4 +1,4 @@
-//! The registration panel (docs/tournament.md §8.5): a persistent message in
+//! The registration panel: a persistent message in
 //! `#{slug}-register`, edited in place as entrants come and go. `render` is the
 //! pure part — content plus the two buttons — golden-string tested here with no
 //! Discord involved; `post_initial` and `refresh` are the thin Discord/DB glue
@@ -18,7 +18,7 @@ use serenity::all::{
 use sqlx::SqlitePool;
 use std::time::{Duration, Instant};
 
-/// "Edits must be throttled" (§8.5) — coalesce to at most one edit every few
+/// "Edits must be throttled" — coalesce to at most one edit every few
 /// seconds, shared between the slash-command and button paths via one
 /// `Arc<EditThrottle>` (see `main.rs`).
 pub(crate) const PANEL_EDIT_MIN_INTERVAL: Duration = Duration::from_secs(3);
@@ -28,7 +28,7 @@ pub(crate) const PANEL_EDIT_MIN_INTERVAL: Duration = Duration::from_secs(3);
 const ROSTER_DISPLAY_CAP: usize = 10;
 
 /// Pure. Filters `entries` down to `active` internally — a withdrawn entry's row
-/// persists (§4), but it must never show up in the roster, and callers should not
+/// persists, but it must never show up in the roster, and callers should not
 /// have to remember to filter it out themselves.
 /// The heading, which becomes the embed's title.
 ///
@@ -68,7 +68,7 @@ pub(crate) fn render(
     };
 
     // Shown so entrants can see the field filling up — registration refuses a
-    // sign-up past the cap (§8.3), which is confusing without a visible count.
+    // sign-up past the cap, which is confusing without a visible count.
     let first_time = if open {
         "第一次報名？請用 `/tournament register` 並輸入你的遊戲名稱。\n\
          First time? Use `/tournament register` and type your in-game name.\n\n"
@@ -81,11 +81,11 @@ pub(crate) fn render(
     });
 
     // No round/best_of line here (unlike the design doc's mock) — rounds don't
-    // exist until chunk 12 generates the bracket, so there's nothing true to say
-    // about format yet. "Single elimination" itself is a fixed design decision
-    // (§1), not per-round data, so it stays.
+    // exist until the bracket is generated, so there's nothing true to say about
+    // format yet. "Single elimination" itself is a fixed design decision, not
+    // per-round data, so it stays.
     //
-    // Bilingual rather than per-reader (§8.10): one message, many readers, and it
+    // Bilingual rather than per-reader: one message, many readers, and it
     // re-renders on every button press — picking any one of their languages would
     // make it flip. Only the chrome doubles; the roster appears once.
     format!(
@@ -104,7 +104,7 @@ pub(crate) fn render_components(tournament_id: i64, open: bool) -> Vec<CreateAct
             .label("報名 / Register")
             .style(ButtonStyle::Primary)
             .disabled(!open),
-        // Withdrawal stays possible until the event starts (§8.4), but once
+        // Withdrawal stays possible until the event starts, but once
         // registration has closed the panel is a historical record and both
         // buttons go together; `/tournament withdraw` is still there.
         CreateButton::new(Action::Withdraw.custom_id(tournament_id))
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn the_panel_is_bilingual_rather_than_picking_a_reader() {
-        // §8.10: a shared message re-rendered by whoever presses a button, so it
+        // A shared message, re-rendered by whoever presses a button, so it
         // carries both languages instead of flipping between them.
         let title = render_title("Relic Cup", true);
         assert!(title.contains("報名進行中"), "{title}");
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn shows_the_cap_and_the_start_time_when_one_is_set() {
         // The cap is only fair if entrants can watch the field fill up — a
-        // sign-up past it is refused (§8.3).
+        // sign-up past it is refused.
         let at = Utc::now();
         let content = render(&[entry(1, "A", "active")], 8, Some(at), true);
         assert!(content.contains("Registered (1/8)"), "{content}");

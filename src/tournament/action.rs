@@ -1,7 +1,7 @@
-//! Parsing and building `custom_id`s for the button panels (docs/tournament.md
-//! §8.5, §8.7): `"<action>:<entity_id>"`, e.g. `register:42`. Pure and
+//! Parsing and building `custom_id`s for the button panels:
+//! `"<action>:<entity_id>"`, e.g. `register:42`. Pure and
 //! Discord-free, so every case is unit-tested directly; `dispatch::Dispatcher`
-//! parses every custom_id, and `panel::render` (chunk 9) is the first to build
+//! parses every custom_id, and `panel::render` is the first to build
 //! one — later panel chunks (10, 20, 22) will build theirs through
 //! `Action::custom_id` too, so every button round-trips through the same code
 //! path `parse_custom_id` reads.
@@ -42,13 +42,13 @@ impl Action {
 
     /// `Register` (aoe4world lookup) and `SetDone` (draft-tool fetch) make an
     /// outbound HTTP call that can outlast Discord's 3s ack window; the rest are
-    /// a local DB write and can answer immediately (§8.5).
+    /// a local DB write and can answer immediately.
     pub(crate) fn requires_defer(self) -> bool {
         matches!(self, Action::Register | Action::SetDone)
     }
 
     /// The `custom_id` a button carries. Built by `panel::render`'s Register and
-    /// Withdraw buttons (chunk 9) — later panel chunks (10, 20, 22) will build
+    /// Withdraw buttons — later panel chunks (10, 20, 22) will build
     /// theirs through this too, so every button round-trips through the same
     /// `parse_custom_id` this module tests directly.
     pub(crate) fn custom_id(self, entity_id: i64) -> String {
@@ -57,9 +57,8 @@ impl Action {
 }
 
 /// Pure. `None` covers both a malformed id and one naming an action this
-/// deploy doesn't recognize — §8.5: "unknown or malformed custom_ids must be
-/// ignored, not panic," since a button from an older deploy may still be
-/// pressed.
+/// deploy doesn't recognize. Either is ignored rather than panicked on, since a
+/// button from an older deploy may still be pressed.
 pub(crate) fn parse_custom_id(custom_id: &str) -> Option<(Action, i64)> {
     let (tag, entity_id) = custom_id.split_once(':')?;
     let action = Action::from_tag(tag)?;

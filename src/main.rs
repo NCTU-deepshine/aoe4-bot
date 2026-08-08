@@ -33,8 +33,8 @@ mod tournament;
 struct Data {
     database: SqlitePool,
     guilds: Guilds,
-    // Shared with `tournament::dispatch::Dispatcher` (docs/tournament.md §8.5:
-    // "edits must be throttled") — a command-triggered panel edit and a
+    // Shared with `tournament::dispatch::Dispatcher` so edits throttle across
+    // both — a command-triggered panel edit and a
     // button-triggered one must coalesce against each other, not just within
     // their own path, which is only true if both hold the same instance.
     panel_throttle: Arc<EditThrottle>,
@@ -174,7 +174,7 @@ mod tests {
         assert!(intents.guild_message_typing());
     }
 
-    /// The two guilds' command lists must never overlap (docs/tournament.md §8.0):
+    /// The two guilds' command lists must never overlap:
     /// a command in both would be registered in both guilds, which is the leak the
     /// split exists to prevent. Empty on one side today, so this is here to fail the
     /// moment a later chunk adds a tournament command to the wrong list.

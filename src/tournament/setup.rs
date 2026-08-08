@@ -1,8 +1,8 @@
-//! What a tournament must have configured before it can start
-//! (docs/tournament.md §8.3), and which draft preset each round uses (§3.3).
+//! What a tournament must have configured before it can start, and which draft
+//! preset each round uses.
 //!
 //! Match lengths are not stored per round by an organizer: they come from the
-//! round's preset, because §3.3 already requires a preset's `options.bestOf` to
+//! round's preset, because the draft tool already requires a preset's `options.bestOf` to
 //! match the round's `best_of`. Deriving one from the other removes the mismatch
 //! rather than validating it.
 //!
@@ -14,7 +14,7 @@ use crate::locale::Locale;
 use crate::tournament::db::{RoundPreset, Tournament};
 use chrono::{DateTime, Duration, Utc};
 
-/// Check-in opens this long before the scheduled start (§8.3).
+/// Check-in opens this long before the scheduled start.
 pub(crate) const CHECKIN_LEAD: Duration = Duration::hours(1);
 
 /// How far out a new tournament's start time is placed. Deliberately far: it is
@@ -71,7 +71,7 @@ pub(crate) fn preset_for_depth(assignments: &[RoundPreset], depth: i64) -> Optio
 /// Translates between the two ways a round is numbered: its **ordinal**, 1-based
 /// from the outermost round, which is how rounds are stored and iterated; and its
 /// **depth**, 1 = final, which is how presets are configured, because rounds do not
-/// exist until `start` and how many there are depends on the field size (§3.3).
+/// exist until `start` and how many there are depends on the field size.
 ///
 /// `round_count - x + 1` is its own inverse, so this converts either way and there
 /// is no opposite helper to keep straight.
@@ -130,7 +130,7 @@ impl Missing {
 /// What still has to be configured before `/tournament start` will run.
 ///
 /// The entrant cap is never listed: it is `not null default 32`, so it is always
-/// answered. Consumed both by `/tournament setup`'s reply and by chunk 12's gate,
+/// answered. Consumed both by `/tournament setup`'s reply and by the start gate,
 /// so the two cannot disagree about what "configured" means.
 ///
 /// Only asks whether *any* preset exists. Whether one covers every round depends on
@@ -143,17 +143,17 @@ pub(crate) fn missing(assignments: &[RoundPreset]) -> Vec<Missing> {
     missing
 }
 
-/// Only what the bot itself depends on (§2: how people draft is the tool's
-/// business, not ours).
+/// Only what the bot itself depends on — how people draft is the tool's
+/// business, not ours.
 ///
 /// - `result_mode` must be `vote`: in host mode only the host — the bot — may
 ///   call a result, so every game would wait on us.
-/// - `best_of` must be odd: §7's "more than half" completion is computed bot-side
+/// - `best_of` must be odd: "more than half" completion is computed bot-side
 ///   and is ambiguous otherwise.
 /// - the preset must be readable: `POST /api/matches` needs one it can use.
 ///
-/// §3.3's "no `MAP_PICK` steps" rule is deliberately **not** here — see the
-/// section, which now records why.
+/// The tool's own "no `MAP_PICK` steps" rule is deliberately **not** checked
+/// here: reproducing its validation would mean modelling the whole step config.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PresetCheck {
     Ok { name: String, best_of: i64 },

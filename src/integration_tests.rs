@@ -585,7 +585,7 @@ mod tests {
         assert_eq!(player.display_name, "Name");
     }
 
-    // Chunk 7 (`/tournament create`, the admin list) gate tests.
+    // `/tournament create`, the admin list gate tests.
 
     #[tokio::test]
     async fn set_tournament_channels_round_trips() {
@@ -675,7 +675,7 @@ mod tests {
         assert!(!crate::tournament::db::is_admin(&pool, id, 2).await.unwrap());
     }
 
-    // Chunk 9 (registration, which is also binding) gate tests.
+    // Registration, which is also binding gate tests.
 
     async fn setup_tournament(pool: &SqlitePool, status: &str) -> crate::tournament::db::Tournament {
         let id = crate::tournament::db::insert_tournament(pool, "relic-cup", "Relic Cup", 1)
@@ -694,8 +694,8 @@ mod tests {
         let pool = test_pool().await;
         // A non-existent tournament_id makes the entry insert fail its FK,
         // forcing the whole transaction to roll back — proving the player
-        // insert does not survive on its own (docs/tournament.md §8.5: "neither
-        // survives if the other fails").
+        // insert does not survive on its own: neither write survives if the
+        // other fails.
         let result = crate::tournament::db::register_new_player_and_entry(&pool, 999, 1, 100, "A", Some(1200)).await;
         assert!(result.is_err());
         assert!(
@@ -1013,7 +1013,7 @@ mod tests {
         );
     }
 
-    // Chunk 10 (check-in) gate tests.
+    // Check-in gate tests.
 
     #[tokio::test]
     async fn checkin_rejects_an_unregistered_user() {
@@ -1281,7 +1281,7 @@ mod tests {
         assert_eq!(tournament.status, "seeding");
     }
 
-    // Chunk 25 (/tournament reopen-registration) gate tests.
+    // /tournament reopen-registration gate tests.
 
     /// A tournament in `status` with three entrants and a check-in round already
     /// run over them: 1 checked in, 2 was marked no-show, 3 withdrew beforehand.
@@ -1442,7 +1442,7 @@ mod tests {
 
     #[tokio::test]
     async fn reopen_registration_keeps_a_seed_order_the_organizers_made() {
-        // Chunk 30: a curated field exists to be arranged by hand, so the one
+        // A curated field exists to be arranged by hand, so the one
         // backward edge in the lifecycle must not silently undo the arranging.
         let pool = test_pool().await;
         let tournament = setup_reopenable_tournament(&pool, "seeding").await;
@@ -1595,7 +1595,7 @@ mod tests {
     #[tokio::test]
     async fn a_withdrawn_entrant_still_occupies_an_entrant_number() {
         // Why someone can be the only entrant in the field and still be told
-        // they are #2: entries are never deleted (§4), and the number is a rank
+        // they are #2: entries are never deleted, and the number is a rank
         // by registration time over every row, not a count of the live field.
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
@@ -1664,7 +1664,7 @@ mod tests {
         assert!(crate::tournament::db::get_player(&pool, 3).await.unwrap().is_none());
     }
 
-    // Bracket persistence and start (chunk 12).
+    // Bracket persistence and start.
 
     /// A seeded, checked-in field of `n`, configured enough to start.
     async fn setup_startable(pool: &SqlitePool, n: i64) -> crate::tournament::db::Tournament {
@@ -1809,7 +1809,7 @@ mod tests {
 
     #[tokio::test]
     async fn announcing_a_set_records_the_message_id_and_a_redraft_clears_it() {
-        // Chunk 17's half of chunk 20's contract: the announcement handle is stored
+        // The announcement handle is stored
         // so the post can be edited on completion, and dropped when a redraft makes
         // it point at a superseded room.
         let pool = test_pool().await;
@@ -1933,7 +1933,7 @@ mod tests {
     async fn starting_is_refused_when_a_withdrawal_left_a_seed_gap() {
         let pool = test_pool().await;
         let tournament = setup_startable(&pool, 4).await;
-        // Withdrawal stays open through seeding (§8.4), which is how a gap happens.
+        // Withdrawal stays open through seeding, which is how a gap happens.
         crate::tournament::db::update_entry_status(&pool, tournament.id, 2, "withdrawn")
             .await
             .unwrap();
@@ -1942,7 +1942,7 @@ mod tests {
         assert_eq!(outcome, crate::tournament::start::StartOutcome::SeedsNotContiguous);
     }
 
-    // Bracket message reconciliation (chunk 29).
+    // Bracket message reconciliation.
 
     #[tokio::test]
     async fn deleting_the_bracket_tail_removes_exactly_the_surplus() {
@@ -2015,7 +2015,7 @@ mod tests {
         );
     }
 
-    // Entrant cap gate tests (chunk 27).
+    // Entrant cap gate tests.
 
     async fn register_nth(
         pool: &SqlitePool,
@@ -2209,7 +2209,7 @@ mod tests {
 
     #[tokio::test]
     async fn unbind_leaves_the_home_guild_binding_alone() {
-        // §4 keeps `accounts` and `tournament_players` deliberately unlinked.
+        // `accounts` and `tournament_players` are deliberately unlinked.
         let pool = test_pool().await;
         bind_account(&pool, 1, 100).await.unwrap();
         crate::tournament::db::insert_player_if_absent(&pool, 1, 100, "Player")
@@ -2221,7 +2221,7 @@ mod tests {
         assert_eq!(list_all(&pool).await.unwrap().len(), 1, "accounts must be untouched");
     }
 
-    // Chunk 11 (seeding) gate tests.
+    // Seeding gate tests.
 
     /// A checked-in field of `n` entrants, unseeded.
     async fn setup_seedable_field(pool: &SqlitePool, n: i64) -> crate::tournament::db::Tournament {
@@ -2283,7 +2283,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_organizer_override_leaves_the_suggestion_intact() {
-        // §10's "an organizer's override survives" — and its converse: the panel
+        // An organizer's override survives — and its converse: the panel
         // must still be able to show what the tiering proposed.
         let pool = test_pool().await;
         let tournament = setup_seedable_field(&pool, 3).await;
@@ -2307,7 +2307,7 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_survives_a_reopen_which_clears_every_seed() {
-        // A reopen clears a suggested order; chunk 11 must be able to write a
+        // A reopen clears a suggested order; seeding must be able to write a
         // fresh one afterwards without colliding with the ones it just removed.
         let pool = test_pool().await;
         let tournament = setup_seedable_field(&pool, 3).await;
@@ -2333,7 +2333,7 @@ mod tests {
         );
     }
 
-    // Chunk 26 (/tournament delete) gate tests.
+    // /tournament delete gate tests.
 
     /// A tournament with a row in every table that references it, so a delete has
     /// something to cascade into at each level.
@@ -2436,7 +2436,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The Discord↔aoe4world binding is global (§4) — it must outlive any one
+        // The Discord↔aoe4world binding is global — it must outlive any one
         // tournament, or a returning player would have to rebind.
         assert_eq!(count(&pool, "tournament_players").await, 1);
         let player = crate::tournament::db::get_player(&pool, 1).await.unwrap();

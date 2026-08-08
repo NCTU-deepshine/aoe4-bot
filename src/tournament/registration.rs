@@ -1,7 +1,7 @@
-//! Registration and profile binding business logic (docs/tournament.md §8.5, §4).
+//! Registration and profile binding business logic.
 //! Discord- and HTTP-free except for the one first-sign-up path that resolves an
 //! aoe4world profile — every other branch is a plain DB read/write, which is what
-//! keeps this unit-testable without live network (no live network in tests, §10).
+//! keeps this unit-testable without live network (no live network in tests).
 //! `commands.rs` (the slash commands) and `dispatch.rs` (the register/withdraw
 //! buttons) both call into this module rather than duplicating any of it.
 
@@ -13,23 +13,23 @@ use tracing::error;
 
 /// Blocks registration and withdrawal alike once a tournament has moved past the
 /// point either could still matter — the only literal lifecycle statements in the
-/// design are "registering after start... rejected" (chunk 12's gate) and
-/// "withdrawal... before start only" (§8.4), and both read the same way.
+/// design are "registering after start... rejected" and
+/// "withdrawal... before start only", and both read the same way.
 /// Deliberately broader than `db::has_running_tournament_entry`, which is
 /// `/tournament rebind`'s guard and only cares about `running` specifically
-/// (§4 notes) — a rebind can't disturb a `completed`/`canceled` tournament's
+/// — a rebind can't disturb a `completed`/`canceled` tournament's
 /// frozen entry, but registering/withdrawing from one makes no sense either way.
 pub(crate) fn tournament_has_started(status: &str) -> bool {
     matches!(status, "running" | "completed" | "canceled")
 }
 
-/// Sign-ups are open only while the tournament is still gathering a field
-/// (§8.3). Positive rather than "has not started": registration closes at
+/// Sign-ups are open only while the tournament is still gathering a field.
+/// Positive rather than "has not started": registration closes at
 /// `/tournament open-checkin`, well before the event begins, and
 /// `/tournament reopen-registration` is what opens it again.
 ///
 /// Withdrawal deliberately uses the broader `tournament_has_started` instead —
-/// joining late and leaving late are not the same thing (§8.4).
+/// joining late and leaving late are not the same thing.
 pub(crate) fn registration_is_open(status: &str) -> bool {
     status == "registration"
 }
@@ -83,7 +83,7 @@ pub(crate) enum RegisterOutcome {
     ProfileClaimRace,
     LookupFailed,
     RegistrationClosed,
-    /// The field is at its cap (§8.3). Refused before any write.
+    /// The field is at its cap. Refused before any write.
     FieldFull {
         cap: i64,
     },
@@ -189,11 +189,11 @@ impl RegisterOutcome {
 /// Separate from `register` on purpose. A returning player's sign-up is
 /// otherwise pure database work, and folding an aoe4world call into it would put
 /// the network on the commonest path in the codebase — and into every test that
-/// exercises it (§10). This mirrors `seeding::refresh_ratings`, which is also a
+/// exercises it. This mirrors `seeding::refresh_ratings`, which is also a
 /// distinct step rather than something a state change does invisibly.
 ///
 /// Best-effort: a missing or unreachable rating leaves the column null, which
-/// seeding already tolerates (§6). The entrant is registered either way.
+/// seeding already tolerates. The entrant is registered either way.
 pub(crate) async fn snapshot_entry_elo(pool: &SqlitePool, tournament_id: i64, user_id: i64, aoe4_id: i64) {
     let Some(profile) = aoe4world::fetch_profile(aoe4_id).await else {
         return;
@@ -380,7 +380,7 @@ pub(crate) enum RebindOutcome {
 }
 
 impl RebindOutcome {
-    /// Tournament-independent — the player list is global (§4), so unlike
+    /// Tournament-independent — the player list is global, so unlike
     /// register/withdraw's messages this needs no tournament name.
     pub(crate) fn message(&self, locale: Locale) -> String {
         match self {
@@ -434,8 +434,8 @@ impl UnbindOutcome {
                 "你目前沒有連結任何遊戲帳號。".to_string(),
                 "You don't have a game account linked right now.".to_string(),
             ),
-            // Says delete, not withdraw: withdrawing leaves the entry row behind
-            // (§4), so it would not unblock this and the advice would waste a trip.
+            // Says delete, not withdraw: withdrawing leaves the entry row behind,
+            // so it would not unblock this and the advice would waste a trip.
             UnbindOutcome::BlockedByEntries { count } => locale.pick(
                 format!(
                     "你還有 {count} 筆賽事報名紀錄，無法解除連結。要換帳號請用 `/tournament rebind`；\
@@ -453,7 +453,7 @@ impl UnbindOutcome {
 }
 
 /// Drops the player's global binding so their next sign-up starts from scratch.
-/// Tournament-independent, like `rebind` — the player list is global (§4).
+/// Tournament-independent, like `rebind` — the player list is global.
 ///
 /// Refuses rather than cascading: entries, sets and games all reference the
 /// player row without `on delete cascade`, so deleting underneath them would
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn withdrawal_outlives_registration() {
-        // Joining late and leaving late are different (§8.4): you can still
+        // Joining late and leaving late are different: you can still
         // withdraw during check-in and seeding, when you could not join.
         for status in ["checkin", "seeding"] {
             assert!(!registration_is_open(status));

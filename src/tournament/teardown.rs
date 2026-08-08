@@ -1,9 +1,9 @@
-//! Tearing a tournament back down (docs/tournament.md §8.4). Discord-free and
+//! Tearing a tournament back down. Discord-free and
 //! pure, like `access::decide` — the four channel deletions and the one cascading
 //! row delete both belong to the command; what lives here is only the decision
 //! about whether it may run at all.
 //!
-//! `/tournament cancel` (chunk 13) is the other half of teardown and belongs here
+//! `/tournament cancel` is the other half of teardown and belongs here
 //! when it lands.
 
 use crate::locale::Locale;

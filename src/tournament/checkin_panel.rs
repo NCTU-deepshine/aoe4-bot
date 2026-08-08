@@ -1,4 +1,4 @@
-//! The check-in panel (docs/tournament.md §8.5): a persistent message in
+//! The check-in panel: a persistent message in
 //! `#{slug}-register`, alongside the registration panel, edited in place as
 //! entrants check in. `render` is the pure part — content plus the one button —
 //! golden-string tested here with no Discord involved; `post_initial`,
@@ -19,8 +19,8 @@ use sqlx::SqlitePool;
 use std::time::Instant;
 
 /// Pure. `open` disables the button once check-in has closed, so a stale panel
-/// stops inviting presses instead of silently failing them (§8.5, "disable
-/// components on phase change").
+/// stops inviting presses instead of silently failing them: components are
+/// disabled when the phase changes.
 pub(crate) fn render(
     tournament_id: i64,
     name: &str,
@@ -29,7 +29,7 @@ pub(crate) fn render(
     open: bool,
 ) -> (String, Vec<CreateActionRow>) {
     let (checked_in, total) = checkin_counts(entries);
-    // Bilingual for the same reason as the registration panel (§8.10): shared
+    // Bilingual for the same reason as the registration panel: shared
     // message, re-rendered by whoever presses the button.
     let heading = if open {
         "簽到開放中 / check-in is OPEN"
@@ -109,8 +109,8 @@ pub(crate) async fn refresh(
     edit(http, pool, register_channel_id, message_id, tournament, true).await
 }
 
-/// The unconditional final edit when check-in closes (§8.5: "plus a final edit
-/// when the phase closes") — bypasses the throttle, since this fires exactly
+/// The unconditional final edit when check-in closes — bypasses the throttle,
+/// since this fires exactly
 /// once, and renders with the button disabled.
 pub(crate) async fn close(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> Result<(), Error> {
     let (Some(checkin_message_id), Some(register_channel_id)) =
@@ -191,7 +191,7 @@ mod tests {
     fn renders_open_with_counts_and_the_slash_command_hint() {
         let entries = vec![entry(1, "active", Some(Utc::now())), entry(2, "active", None)];
         let (content, _) = render(1, "Relic Cup", &entries, None, true);
-        // Bilingual for the same reason as the registration panel (§8.10).
+        // Bilingual for the same reason as the registration panel.
         assert!(content.contains("簽到開放中"));
         assert!(content.contains("check-in is OPEN"));
         assert!(content.contains("1/2 已簽到 / checked in"));

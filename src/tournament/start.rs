@@ -1,4 +1,4 @@
-//! `/tournament start` (docs/tournament.md §8.3, §5): turn a seeded field into a
+//! `/tournament start`: turn a seeded field into a
 //! persisted bracket and open round one.
 //!
 //! The gates are pure functions over data the caller has already read, so every
@@ -12,9 +12,9 @@ use std::collections::HashMap;
 
 /// The seeded field, in seed order, if the seeds are usable.
 ///
-/// `start` needs seeds to be exactly 1..n with no gaps and no duplicates — §5's
+/// `start` needs seeds to be exactly 1..n with no gaps and no duplicates —
 /// generation indexes straight into them. A gap is not hypothetical: registration
-/// closes at check-in but **withdrawal stays open through seeding** (§8.4), so an
+/// closes at check-in but **withdrawal stays open through seeding**, so an
 /// entrant leaving after the seeding pass takes their number with them.
 pub(crate) fn seeded_field(entries: &[TournamentEntry]) -> Option<Vec<&TournamentEntry>> {
     let mut field: Vec<&TournamentEntry> = seeding::seedable(entries);
@@ -158,7 +158,8 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
 
 /// Resolves byes and marks every playable set ready.
 ///
-/// A bye is a set with one occupant, which §5 places against the top seeds. It is
+/// A bye is a set with one occupant, which generation places against the top
+/// seeds. It is
 /// decided the moment the bracket opens: recorded `bye` with its occupant as
 /// winner, and that occupant written into the next set.
 ///

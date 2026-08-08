@@ -1,9 +1,9 @@
-//! Ratings and suggested seeding (docs/tournament.md §6).
+//! Ratings and suggested seeding.
 //!
 //! The ordering functions are pure and are the whole point of this module's
 //! tests; `refresh_ratings` is the one path that touches aoe4world, following
 //! `registration.rs`'s precedent of being logic-first with a single HTTP call
-//! rather than a client of its own (§6 "Reuse").
+//! rather than a client of its own.
 
 use crate::aoe4world;
 use crate::locale::Locale;
@@ -11,13 +11,13 @@ use crate::tournament::db::{self, Tournament, TournamentEntry};
 use sqlx::SqlitePool;
 
 /// The field a seeding applies to: checked-in entrants only. `close-checkin`
-/// has already marked everyone else `no_show` (§8.3), so a no-show or a
+/// has already marked everyone else `no_show`, so a no-show or a
 /// withdrawal never occupies a seed.
 pub(crate) fn seedable(entries: &[TournamentEntry]) -> Vec<&TournamentEntry> {
     entries.iter().filter(|e| e.status == "active").collect()
 }
 
-/// §6's tiering, as user ids in seed order.
+/// The default order, as user ids in seed order.
 ///
 /// ATR (~1000–2292, tournament-derived) and ELO are different scales and are
 /// **never blended into one sort key**: everyone with an ATR outranks everyone
@@ -51,7 +51,7 @@ pub(crate) fn seed_panel_expected(status: &str) -> bool {
 }
 
 /// How the field is shown, wherever it is shown: seeded entrants first in seed
-/// order, everyone else after them by §6's tiering.
+/// order, everyone else after them by the default tiering.
 ///
 /// Defined once because the seeding panel and the bracket drawing must agree —
 /// they render the same entrants, and a reader comparing them should not find
@@ -71,12 +71,12 @@ pub(crate) fn display_order(entries: &[TournamentEntry]) -> Vec<&TournamentEntry
 /// Seeded entrants keep their relative order and anyone unseeded follows by the
 /// tiering, so writing this back **compacts** the field: a gap left by a no-show
 /// or a withdrawal closes, which is what keeps `start`'s contiguous 1..n
-/// requirement true with no separate renumber step (§6).
+/// requirement true with no separate renumber step.
 pub(crate) fn manual_order(entries: &[TournamentEntry]) -> Vec<i64> {
     display_order(entries).iter().map(|e| e.user_id).collect()
 }
 
-/// What a rating refresh does to the field's order (§6), from
+/// What a rating refresh does to the field's order, from
 /// `tournaments.seed_source`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SeedPolicy {
@@ -124,12 +124,12 @@ pub(crate) fn reorder(order: &[i64], user_id: i64, new_seed: i64) -> Vec<i64> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RefreshOutcome {
     /// `atr_count` is how many of `total` the esports leaderboard knew about —
-    /// usually a small minority, which is expected rather than a failure (§6).
+    /// usually a small minority, which is expected rather than a failure.
     Refreshed {
         total: usize,
         atr_count: usize,
     },
-    /// Ratings updated, the organizers' order left alone (§6).
+    /// Ratings updated, the organizers' order left alone.
     KeptManual {
         total: usize,
         atr_count: usize,
@@ -194,13 +194,13 @@ impl SeedOutcome {
     }
 }
 
-/// Re-fetches both ratings for the checked-in field and rewrites the seed order
-/// (§6: snapshot at seeding time, no ratings cache).
+/// Re-fetches both ratings for the checked-in field and rewrites the seed order.
+/// Ratings are snapshotted onto the entries at seeding time; there is no cache.
 ///
 /// ELO is one request per entrant — there is no bulk profile endpoint — while
 /// ATR for the whole field is one batched call. Both are tolerant: `ranked.rs`
-/// drops unrated players with `?`, and §6 notes seeding must not, which is why
-/// every rating column is nullable.
+/// drops unrated players with `?`, and seeding must not — an unrated entrant
+/// still has to take a seat, which is why every rating column is nullable.
 ///
 /// **Ratings are always refreshed; only the ordering branches on `policy`** — an
 /// organizer who arranged the field by hand still wants current numbers on the
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn atr_rated_entrants_outrank_everyone_else_regardless_of_the_numbers() {
-        // The trap §6 warns about: 1500 ELO is a bigger number than 1100 ATR, but
+        // The trap: 1500 ELO is a bigger number than 1100 ATR, but
         // the two scales must never be compared, so the ATR player still leads.
         let entries = vec![
             entry(1, "EloOnly", None, Some(1500)),
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn keeping_a_manual_order_preserves_it_while_closing_a_gap() {
         // Seed 3 no-showed, so the field is 1, 2, 4. Writing this order back is
-        // what renumbers it 1..3 — §8.3's contiguity, with no separate step.
+        // what renumbers it 1..3, so the field stays startable with no separate step.
         let mut no_show = seeded(3, "NoShow", 3, Some(2200.0), None);
         no_show.status = "no_show".to_string();
         let entries = vec![
@@ -391,8 +391,8 @@ mod tests {
 
     #[test]
     fn a_later_registrant_lands_at_the_end_of_a_manual_order_rather_than_inside_it() {
-        // §6 records this as the price of keeping an order: the newcomer is not
-        // merged in by rating, however strong they are, until someone refreshes.
+        // The price of keeping an order: the newcomer is not merged in by rating,
+        // however strong they are, until someone refreshes.
         let entries = vec![
             seeded(1, "First", 1, None, Some(900)),
             seeded(2, "Second", 2, None, Some(950)),
@@ -487,8 +487,8 @@ mod tests {
         let zh = outcome.message("Relic Cup", Locale::ZhTw);
         let en = outcome.message("Relic Cup", Locale::En);
         assert_ne!(zh, en);
-        // §6: the reply has to name the command that takes the suggestion back,
-        // or a kept order looks like a refresh that did nothing.
+        // The reply has to name the command that takes the suggestion back, or a
+        // kept order looks like a refresh that did nothing.
         assert!(zh.contains("/tournament seed refresh"), "{zh}");
         assert!(en.contains("/tournament seed refresh"), "{en}");
         assert!(zh.contains('8') && en.contains('8'));

@@ -1,10 +1,10 @@
-//! Coalesces panel edits under load (docs/tournament.md §8.5: "Edits must be
-//! throttled" — editing the roster or counter on every press is one API call
-//! per press against a per-channel edit rate limit). The decision is pure;
+//! Coalesces panel edits under load: editing the roster or counter on every
+//! press is one API call per press against a per-channel edit rate limit.
+//! The decision is pure;
 //! callers own the actual edit and the "final edit when the phase closes"
 //! that keeps the panel eventually consistent.
 //!
-//! Consumed by `panel::refresh` (chunk 9), which shares one `EditThrottle`
+//! Consumed by `panel::refresh`, which shares one `EditThrottle`
 //! instance (via `Arc`, `main.rs`) between the slash-command and button paths so
 //! edits from either coalesce against each other.
 
@@ -25,7 +25,7 @@ pub(crate) fn should_edit(last_edit: Option<Instant>, now: Instant, min_interval
 
 /// Per-message last-edit clock. A caller checks in before editing a panel; a
 /// press that lands inside the window is simply dropped rather than queued —
-/// it is the caller's unconditional edit on phase close (§8.5) that guarantees
+/// it is the caller's unconditional edit on phase close that guarantees
 /// the panel ends up consistent regardless.
 pub(crate) struct EditThrottle {
     min_interval: Duration,

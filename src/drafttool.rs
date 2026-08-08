@@ -1,6 +1,6 @@
-//! The external draft tool (docs/tournament.md §3), read and write.
+//! The external draft tool, read and write.
 //!
-//! Reading a preset needs no session — a public preset's config is public (§3.1)
+//! Reading a preset needs no session — a public preset's config is public
 //! — which is what lets tournament setup work without any of Phase E. Creating a
 //! match does, and the session is an Auth.js cookie, so the client is held rather
 //! than rebuilt.
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::error;
 
-/// §3's documented instance. Overridable so a self-hosted fork (§12) can be
+/// The documented public instance. Overridable so a self-hosted fork can be
 /// pointed at without a code change — the same reason `tournaments` carries a
 /// nullable `draft_base_url` column nothing writes yet.
 const DEFAULT_BASE_URL: &str = "https://aoe4banpick-production.up.railway.app";
@@ -38,7 +38,7 @@ fn client() -> &'static Client {
 
 /// A preset as the tool returns it. Only the fields setup actually reads are
 /// modelled; the config also carries full civ and map catalogues, which are the
-/// tool's business (§2) and none of ours.
+/// tool's business and none of ours.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Preset {
@@ -53,7 +53,7 @@ pub(crate) struct PresetConfig {
 }
 
 /// `resultMode` lives here, beside `bestOf` — **not** at the top level, which is
-/// what §3.3's phrasing suggests. Verified against the live endpoint.
+/// what the tool's own documentation suggests. Verified against the live endpoint.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PresetOptions {
@@ -100,7 +100,7 @@ pub(crate) enum DraftError {
     /// The preset is private and belongs to somebody else.
     Forbidden,
     /// The tool's own `validatePreset` refused the preset. We cannot run that
-    /// check ahead of time (§3.3), so keeping its issues is the only way anyone
+    /// check ahead of time, so keeping its issues is the only way anyone
     /// learns which rule was broken.
     PresetRejected {
         issues: Vec<PresetIssue>,
@@ -139,7 +139,7 @@ pub(crate) struct PresetIssue {
 /// and spectator links are derived from it.
 ///
 /// The response also carries a `shareCode`; nothing in the tool or here consumes
-/// it (§3.2), and serde drops unknown fields, so it is not modelled.
+/// it, and serde drops unknown fields, so it is not modelled.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreatedMatch {
@@ -299,8 +299,8 @@ mod tests {
     use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// A real response, trimmed (`src/tournament/testdata/`). §10: deserialization
-    /// is tested against a saved payload, never live.
+    /// A real response, trimmed (`src/tournament/testdata/`). Deserialization is
+    /// tested against a saved payload, never live.
     fn preset() -> Preset {
         serde_json::from_str(include_str!("tournament/testdata/draft_preset.json"))
             .expect("the saved preset payload should parse")
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn reads_best_of_and_result_mode_from_options() {
         // Both live under config.options, which is the correction the live check
-        // turned up against §3.3's wording.
+        // turned up against the tool's documented wording.
         let preset = preset();
         assert_eq!(preset.config.options.best_of, 3);
         assert_eq!(preset.config.options.result_mode, "vote");
@@ -333,7 +333,7 @@ mod tests {
         assert!(super::fetch_preset("000000000000000000000000").await.is_none());
     }
 
-    // The session and the retry, against a local stub — §10 forbids live calls,
+    // The session and the retry, against a local stub — tests never call out,
     // and a saved payload cannot show what a *sequence* of requests does.
 
     fn stub_client() -> Client {

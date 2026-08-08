@@ -1,4 +1,4 @@
-//! Validates `/tournament create`'s `slug` argument (docs/tournament.md §8.1).
+//! Validates `/tournament create`'s `slug` argument.
 //! Discord already lowercases and hyphenates channel names on its own, but
 //! validating here means the slug stored in `tournaments.slug` and the channel
 //! names actually created match what the organizer typed, rather than silently

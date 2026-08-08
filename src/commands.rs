@@ -33,7 +33,7 @@ pub(crate) fn home() -> Vec<Command> {
     vec![rebuild(), bind(), id(), name(), refresh(), check()]
 }
 
-/// The tournament guild's commands (§8.4).
+/// The tournament guild's commands.
 pub(crate) fn tournament() -> Vec<Command> {
     vec![tournament_root()]
 }
@@ -257,7 +257,7 @@ pub async fn tournament_root(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-// Creates a tournament (docs/tournament.md §8.1): the invoking channel becomes
+// Creates a tournament: the invoking channel becomes
 // its announce channel, and `#{slug}-register|bracket|draft|matches` are created
 // alongside it in the invoking channel's existing category (or uncategorized, if
 // the invoking channel has none). The creator is registered as the first admin.
@@ -380,7 +380,7 @@ pub async fn create(
     tournament_db::add_admin(pool, tournament_id, user_id, user_id).await?;
 
     // Tournaments start in `registration` status immediately, with no separate
-    // "open registration" command (docs/tournament.md §8.3) — so this is the only
+    // "open registration" command — so this is the only
     // place the panel can ever get posted.
     // The cap is `not null default 32`, so the panel can show it from the start
     // even though `/tournament setup` has not run yet.
@@ -437,7 +437,7 @@ async fn category_name(ctx: Context<'_>, category_id: Option<ChannelId>) -> Resu
         .map(|channel| channel.name))
 }
 
-/// The overwrites for an output channel (§8.1): `@everyone` may read but not
+/// The overwrites for an output channel: `@everyone` may read but not
 /// post — **and the bot may post**.
 ///
 /// The second half is not redundant. A deny on `@everyone` applies to the bot as
@@ -601,9 +601,8 @@ pub async fn list(ctx: Context<'_>) -> Result<(), Error> {
 
 // Registers for the tournament resolved from the invoking channel (any of its
 // five stored channels — see `resolve_tournament_by_channel`). A first sign-up
-// also binds an aoe4world profile; there is no separate bind step
-// (docs/tournament.md §8.5). Only ELO is snapshotted here — ATR is a bulk
-// seeding-time fetch (chunk 11, §6 "Reuse"), not a per-registrant one.
+// also binds an aoe4world profile; there is no separate bind step. Only ELO is
+// snapshotted here — ATR is a bulk seeding-time fetch, not a per-registrant one.
 /// Registers you for the tournament. First time? Type your in-game name below.
 #[poise::command(
     slash_command,
@@ -641,7 +640,7 @@ pub async fn register(
     Ok(())
 }
 
-// Tournament-independent — the player list is global (§4), so unlike
+// Tournament-independent — the player list is global, so unlike
 // register/withdraw this resolves no tournament by channel.
 /// Changes which game account your Discord account is linked to.
 #[poise::command(
@@ -674,7 +673,7 @@ pub async fn rebind(
     Ok(())
 }
 
-// Tournament-independent, like `rebind` — the player list is global (§4). Kept
+// Tournament-independent, like `rebind` — the player list is global. Kept
 // self-service: it only ever clears the caller's own binding.
 /// Unlinks your game account, so your next sign-up starts from scratch.
 #[poise::command(
@@ -721,10 +720,10 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 // Opens check-in for the tournament resolved from the invoking channel
-// (docs/tournament.md §8.3) and posts the check-in panel to the register
+// and posts the check-in panel to the register
 // channel `/tournament create` made. `minutes` is purely informational —
 // there is no cron closing check-in automatically; `/tournament close-checkin`
-// stays a separate, explicit action (§11 follow-ups).
+// stays a separate, explicit action.
 /// Opens check-in and posts its panel. `minutes`, if given, is shown as when it closes.
 #[poise::command(
     slash_command,
@@ -763,7 +762,7 @@ pub async fn open_checkin(
         .await?;
         tournament_db::set_checkin_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
 
-        // Registration closes here (§8.3), so the panel must stop inviting
+        // Registration closes here, so the panel must stop inviting
         // sign-ups the gate would now refuse. Re-read: the status has moved.
         let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
         panel::refresh_now(ctx.http(), pool, &tournament).await?;
@@ -827,7 +826,7 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
 
     checkin_panel::close(ctx.http(), pool, &tournament).await?;
     // The order is whatever the organizers left it as — closing check-in is the
-    // edge that used to overwrite a hand-made one (§6).
+    // edge that used to overwrite a hand-made one.
     let policy = seeding::SeedPolicy::from_source(&tournament.seed_source);
     let seeded = seed_and_post_panel(ctx, &tournament, policy, locale).await?;
     ctx.say(format!("{}\n{seeded}", outcome.message(&tournament.name, locale)))
@@ -842,7 +841,7 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
 /// **Best-effort by design.** By the time this runs the tournament has already
 /// advanced to `seeding`, so an aoe4world outage must not fail the command and
 /// strand the lifecycle — it seeds from whatever ratings are stored, says so, and
-/// points at `/tournament seed refresh` (§6). The panel is best-effort for the
+/// points at `/tournament seed refresh`. The panel is best-effort for the
 /// same reason, which is what `ensure_seed_panel` buys.
 async fn seed_and_post_panel(
     ctx: Context<'_>,
@@ -924,7 +923,7 @@ async fn ensure_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournam
     }
 }
 
-// The one backward lifecycle edge (docs/tournament.md §8.3), for a check-in
+// The one backward lifecycle edge, for a check-in
 // opened too early or closed too soon. A full reset rather than a partial undo:
 // the check-in panel is deleted outright, so the next `/tournament open-checkin`
 // posts a fresh one instead of orphaning the old message behind a new id.
@@ -984,9 +983,9 @@ async fn delete_checkin_panel(ctx: Context<'_>, tournament: &tournament_db::Tour
     }
 }
 
-/// Which rounds a preset assignment covers, as a distance back from the final
-/// (docs/tournament.md §3.3). An assignment covers its own round and every round
-/// after it, so `Ro8` means Ro8, the semi and the final.
+/// Which rounds a preset assignment covers, as a distance back from the final. An
+/// assignment covers its own round and every round after it, so `Ro8` means Ro8,
+/// the semi and the final.
 ///
 /// Offered as a choice rather than a number because rounds do not exist until
 /// start — there is nothing to autocomplete against — and nobody should have to
@@ -1039,9 +1038,8 @@ fn parse_start_time(input: &str) -> Option<DateTime<Utc>> {
     Some(naive.and_local_timezone(offset).single()?.to_utc())
 }
 
-// Configuration a tournament needs before `/tournament start` will run
-// (docs/tournament.md §8.3). Always reports the full state, so it doubles as
-// "what am I still missing?".
+// Configuration a tournament needs before `/tournament start` will run. Always
+// reports the full state, so it doubles as "what am I still missing?".
 /// Configures the tournament. Run with no options to see what's still needed.
 #[poise::command(
     slash_command,
@@ -1274,7 +1272,7 @@ pub async fn preset(
     Ok(())
 }
 
-// Seeding (docs/tournament.md §6, §8.4). Only `seed` is authoritative;
+// Seeding. Only `seed` is authoritative;
 // `suggested_seed` stays as the tiering proposed it, so the panel can show what
 // an organizer overrode.
 #[poise::command(
@@ -1414,7 +1412,7 @@ pub async fn seed_set(
     // `also_suggested: false` — an override must not overwrite what the tiering
     // proposed, or the panel loses the comparison.
     tournament_db::set_seed_order(pool, tournament.id, &seeding::reorder(&current, target, seed), false).await?;
-    // Takes the *whole* field manual, not just this entrant (§6): seeds are
+    // Takes the *whole* field manual, not just this entrant: seeds are
     // written as one 1..n order, so there is no per-row notion of who was moved.
     tournament_db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
 
@@ -1479,7 +1477,7 @@ async fn delete_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournam
     }
 }
 
-// Repairs a tournament's Discord side (§8.1, §8.5) without recreating it.
+// Repairs a tournament's Discord side without recreating it.
 //
 // Two reasons it exists. `create` shapes channel permissions once, so a
 // tournament made before a permissions fix stays broken forever otherwise — and
@@ -1740,7 +1738,7 @@ async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_d
     (applied, failed)
 }
 
-// Turns the seeded field into a bracket and opens round one (§8.3, §5, §8.7). No
+// Turns the seeded field into a bracket and opens round one. No
 // confirmation: setup, status, seeds and the clock are four gates already, and
 // `/tournament delete` is the only way back.
 /// Starts the tournament: generates the bracket, opens round one and its threads.
@@ -1779,7 +1777,7 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Opens a thread and a draft room for every set now playable (§8.7).
+/// Opens a thread and a draft room for every set now playable.
 ///
 /// Best-effort per set, and a no-op for one that already has a thread: a set
 /// whose thread could not be created must not stop the rest of the round from
@@ -1800,10 +1798,10 @@ async fn open_ready_sets(ctx: Context<'_>, tournament: &tournament_db::Tournamen
     Ok(())
 }
 
-// The inverse of `create` (docs/tournament.md §8.4): removes the four channels it
+// The inverse of `create`: removes the four channels it
 // made and the `tournaments` row, which cascades to every tournament-scoped
 // table. The announce channel and the category are left alone — the bot created
-// neither (§8.1) — and so is `tournament_players`, which is global (§4).
+// neither — and so is `tournament_players`, which is global.
 /// Deletes the tournament and the channels it created. Cannot be undone.
 #[poise::command(
     slash_command,

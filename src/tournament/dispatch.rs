@@ -1,8 +1,8 @@
-//! The interaction dispatcher (docs/tournament.md §8.5, §8.9): one
+//! The interaction dispatcher: one
 //! `EventHandler::interaction_create` branch over `"<action>:<entity_id>"`
 //! custom_ids.
 //!
-//! Register, Withdraw and Checkin are wired up (chunks 9, 10); Redraft/SetDone
+//! Register, Withdraw and Checkin are wired up; Redraft/SetDone
 //! stay stubs until their own chunks (20, 22). The button path resolves its
 //! tournament by the id encoded in the custom_id (`db::get_tournament`), unlike
 //! the slash commands in `commands.rs`, which resolve it from the invoking
@@ -59,7 +59,7 @@ impl EventHandler for Dispatcher {
             return;
         };
 
-        // Tournament guild only (docs/tournament.md §8.0) — the same rule
+        // Tournament guild only — the same rule
         // `Emperor::message` applies for the home guild, just a separate handler.
         if !self.guilds.allows(Feature::Tournament, component.guild_id) {
             return;
@@ -67,7 +67,7 @@ impl EventHandler for Dispatcher {
 
         let Some((action, entity_id)) = action::parse_custom_id(&component.data.custom_id) else {
             // Malformed, or a button left over from an older deploy. Ignore
-            // rather than panic (§8.5, §10).
+            // rather than panic.
             return;
         };
 
@@ -80,14 +80,14 @@ impl EventHandler for Dispatcher {
             Action::Withdraw => self.handle_withdraw(&ctx, &component, entity_id).await,
             Action::Checkin => self.handle_checkin(&ctx, &component, entity_id).await,
             Action::CallAdmin => self.handle_call_admin(&ctx, &component, entity_id).await,
-            Action::Redraft => {}, // chunk 20
-            Action::SetDone => {}, // chunk 22
+            // Neither has a handler yet.
+            Action::Redraft | Action::SetDone => {},
         }
     }
 }
 
 impl Dispatcher {
-    /// The button carries no `aoe4_id` argument (§8.5) — a first-timer pressing
+    /// The button carries no `aoe4_id` argument — a first-timer pressing
     /// it gets `registration::register`'s `NeedsProfileArgument` message, naming
     /// the command to use instead.
     async fn handle_register(&self, ctx: &Context, component: &ComponentInteraction, tournament_id: i64) {
@@ -131,7 +131,7 @@ impl Dispatcher {
         }
     }
 
-    /// A player asking for an organizer from inside a set thread (§8.7).
+    /// A player asking for an organizer from inside a set thread.
     ///
     /// The entity is the **set**, not the tournament, because the button lives
     /// on the set's panel and the ping should say which match needs attention.
@@ -267,9 +267,9 @@ impl Dispatcher {
             Ok(Some(tournament)) => Some(tournament),
             Ok(None) => {
                 // A stale button whose entity_id no longer resolves to a
-                // tournament — reachable since chunk 26, by pressing a panel
-                // button `/tournament delete` has not yet removed the channel
-                // for (§8.5/§10, and not a case to panic on). Whether this
+                // tournament — reachable by pressing a panel button
+                // `/tournament delete` has not yet removed the channel for, and
+                // not a case to panic on. Whether this
                 // interaction was already deferred depends on `action`, and
                 // replying the wrong way is worse than leaving it to time out,
                 // so this is a log-only best effort.
@@ -293,7 +293,7 @@ impl Dispatcher {
     }
 
     /// The draw follows the field, and the preview exists from the first two
-    /// entrants (§8.6), so a sign-up or withdrawal redraws it.
+    /// entrants, so a sign-up or withdrawal redraws it.
     async fn reconcile_bracket(&self, ctx: &Context, tournament: &db::Tournament) {
         if let Err(err) = bracket_view::reconcile(&ctx.http, &self.pool, tournament).await {
             error!("failed to redraw the bracket for tournament {}: {err:?}", tournament.id);
@@ -311,7 +311,7 @@ impl Dispatcher {
 }
 
 /// Acknowledge within Discord's 3s window, ephemerally, before doing any
-/// slower work (§8.5). Returns whether the defer succeeded — a failure here
+/// slower work. Returns whether the defer succeeded — a failure here
 /// means the interaction is already unrecoverable, so the caller should not
 /// continue on to whatever real work it was about to do.
 /// Answers the presser immediately and privately. For the handlers that do not

@@ -1,6 +1,6 @@
-//! Check-in business logic (docs/tournament.md §8.3, §8.5). Discord/HTTP-free —
+//! Check-in business logic. Discord/HTTP-free —
 //! every branch is a plain DB read/write, which is what keeps this
-//! unit-testable without live network (no live network in tests, §10).
+//! unit-testable without a live network.
 //! `commands.rs` (the slash commands) and `dispatch.rs` (the check-in button)
 //! both call into this module rather than duplicating any of it.
 
@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
 
 /// Check-in only accepts presses while the tournament is in this exact status
-/// (§8.3) — before it, check-in hasn't opened yet; after it, the field has
+/// — before it, check-in hasn't opened yet; after it, the field has
 /// already moved on to seeding or beyond.
 pub(crate) fn checkin_is_open(status: &str) -> bool {
     status == "checkin"
@@ -28,7 +28,7 @@ pub(crate) fn checkin_panel_expected(status: &str) -> bool {
     matches!(status, "checkin" | "seeding" | "running" | "completed")
 }
 
-/// The one backward edge in the lifecycle (§8.3) starts from exactly these:
+/// The one backward edge in the lifecycle starts from exactly these:
 /// before them there is no check-in round to undo, after them the field is
 /// locked in and the recovery is `/tournament cancel` instead.
 pub(crate) fn registration_is_reopenable(status: &str) -> bool {
@@ -142,7 +142,7 @@ pub(crate) enum OpenCheckinOutcome {
     NotInRegistration {
         current_status: String,
     },
-    /// Too far ahead of the scheduled start (§8.3). There is deliberately no
+    /// Too far ahead of the scheduled start. There is deliberately no
     /// force flag: the way past this is to set the real start time, which keeps
     /// the schedule honest instead of letting it drift.
     TooEarly {
@@ -313,12 +313,12 @@ impl ReopenRegistrationOutcome {
 }
 
 /// Walks `checkin`/`seeding` back to `registration` as a full reset of the
-/// check-in round (§8.3): no-shows return to `active`, every `checked_in_at`
+/// check-in round: no-shows return to `active`, every `checked_in_at`
 /// clears, and both panels' handles are dropped so the next post is a fresh one
 /// rather than an edit of a message the caller has since deleted. Deleting those
 /// messages is the caller's job — this module stays Discord-free.
 ///
-/// A seed order the organizers set by hand is the one thing that survives (§6).
+/// A seed order the organizers set by hand is the one thing that survives.
 ///
 /// Not transactional, for the same reason `close` isn't (see its doc comment):
 /// each statement is independently atomic and nothing else races these rows.
@@ -338,8 +338,7 @@ pub(crate) async fn reopen_registration(
     let restored_count = db::revert_no_shows(pool, tournament.id).await?;
     let cleared_count = db::clear_checkins(pool, tournament.id).await?;
     // A suggested order is stale the moment the field can change again; one the
-    // organizers made by hand is the whole point of a curated field, and survives
-    // (§6).
+    // organizers made by hand is the whole point of a curated field, and survives.
     if SeedPolicy::from_source(&tournament.seed_source) == SeedPolicy::Suggest {
         db::clear_seeds(pool, tournament.id).await?;
     }

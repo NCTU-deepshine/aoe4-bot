@@ -1,4 +1,4 @@
-//! Single-elimination bracket generation (docs/tournament.md §5).
+//! Single-elimination bracket generation.
 //!
 //! Pure: no database, no Discord. A bracket is a function of the number of entrants
 //! and the per-round match lengths, so the parts that are easy to get quietly wrong
@@ -62,7 +62,7 @@ pub(crate) struct Bracket {
 pub(crate) enum BracketError {
     /// A bracket needs two sides.
     TooFewEntrants(usize),
-    /// One `best_of` per round, no more and no fewer — §4 keeps match length per
+    /// One `best_of` per round, no more and no fewer — match length is stored per
     /// round rather than per tournament, so there is no sensible default to fill in.
     RoundCountMismatch { rounds: usize, best_of: usize },
 }
@@ -111,7 +111,7 @@ pub(crate) fn seed_order(size: usize) -> Vec<u32> {
 /// Build the whole bracket from a finalized field.
 ///
 /// `entrants` is a count, not a list, because seeds are required to be 1..=n and
-/// contiguous before generation runs (§8.3) — this returns seeds and the caller maps
+/// contiguous before generation runs — this returns seeds and the caller maps
 /// them back to entrants. `best_of` carries one value per round, outermost first.
 pub(crate) fn build(entrants: usize, best_of: &[u8]) -> Result<Bracket, BracketError> {
     if entrants < 2 {
@@ -203,7 +203,7 @@ pub(crate) fn localize_round_name(name: &str, locale: Locale) -> String {
 }
 
 /// `決賽 / Final`, for a surface with many readers and so no one reader's locale to
-/// follow (§8.10).
+/// follow.
 ///
 /// Collapsed to a single name when the two languages coincide: `Ro16 / Ro16` is
 /// noise rather than bilingualism.
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn best_of_is_per_round() {
-        // The case §4 exists for: a Bo3 bracket with a Bo5 final.
+        // The case per-round `best_of` exists for: a Bo3 bracket with a Bo5 final.
         let bracket = build(8, &[3, 3, 5]).expect("a valid field");
 
         let lengths: Vec<u8> = bracket.rounds.iter().map(|round| round.best_of).collect();

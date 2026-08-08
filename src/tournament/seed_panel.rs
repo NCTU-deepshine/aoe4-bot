@@ -1,4 +1,4 @@
-//! The seeding panel (docs/tournament.md §8.5): a persistent message in
+//! The seeding panel: a persistent message in
 //! `#{slug}-bracket` showing the seeded field, posted when `/tournament
 //! close-checkin` computes the first seeding and edited in place as an organizer
 //! overrides seeds. `render` is the pure part, golden-string tested here;
@@ -6,7 +6,7 @@
 //!
 //! No buttons: seeding is admin work done by command, so unlike the registration
 //! and check-in panels there is nothing here for a player to press. Bilingual for
-//! the same reason those two are (§8.10) — one shared message, many readers.
+//! the same reason those two are — one shared message, many readers.
 
 use crate::Error;
 use crate::db::{to_channel_id, to_message_id};
@@ -17,12 +17,12 @@ use sqlx::SqlitePool;
 
 /// Entrants listed before the table is truncated. A 32-player field would blow
 /// past Discord's 2000-character message limit otherwise; the bracket itself
-/// (chunk 12) is what shows a large field in full.
+/// is what shows a large field in full.
 const SEED_DISPLAY_CAP: usize = 24;
 
 /// Pure. Ordered by `seeding::display_order`, the same key the bracket drawing
 /// uses — `seed` is authoritative, and `suggested_seed` is shown alongside only
-/// so an organizer can see what they overrode (§6).
+/// so an organizer can see what they overrode.
 pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
     let field = display_order(entries);
 
@@ -36,7 +36,7 @@ pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
         .take(SEED_DISPLAY_CAP)
         .map(|e| {
             let seed = e.seed.map_or_else(|| "—".to_string(), |s| s.to_string());
-            // Two columns, never one blended number (§6).
+            // Two columns, never one blended number.
             let atr = e.atr.map_or_else(|| "—".to_string(), |a| format!("{a:.0}"));
             let elo = e.elo.map_or_else(|| "—".to_string(), |e| e.to_string());
             format!("`{seed:>3}` {} · ATR {atr} · ELO {elo}", e.display_name)
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn carries_both_languages_and_the_scale_disclaimer() {
-        // §6 requires the "not comparable" caveat in the output, not just the doc.
+        // The "not comparable" caveat belongs in the output, where players read it.
         let content = render("Relic Cup", &[entry(1, "A", Some(1), None, None)]);
         assert!(content.contains("種子名單"));
         assert!(content.contains("Seeding"));
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn credits_the_atr_source() {
-        // §6: "credit the source wherever ATR is displayed".
+        // The source is credited wherever ATR is displayed.
         let content = render("Relic Cup", &[entry(1, "A", Some(1), Some(1500.0), None)]);
         assert!(content.contains("ISanych"), "{content}");
     }

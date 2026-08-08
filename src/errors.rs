@@ -8,8 +8,7 @@ use tracing::{error, info, warn};
 ///
 /// Without a handler poise writes to stderr and the user is left looking at a
 /// slash command that silently did nothing. The messages live here rather than in
-/// each command so that a command only has to declare what it requires
-/// (docs/tournament.md §8.2, §8.9).
+/// each command so that a command only has to declare what it requires.
 pub(crate) async fn on_error(err: FrameworkError<'_, Data, Error>) {
     match err {
         // Our own bug, or a service we depend on being down. Log the detail; tell

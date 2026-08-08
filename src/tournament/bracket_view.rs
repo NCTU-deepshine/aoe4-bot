@@ -1,4 +1,4 @@
-//! The bracket as Discord sees it (docs/tournament.md §8.6): a persistent,
+//! The bracket as Discord sees it: a persistent,
 //! multi-message drawing in `#{slug}-bracket`.
 //!
 //! It exists from the first two entrants, long before `/tournament start`, so
@@ -31,7 +31,7 @@ const MIN_ENTRANTS: usize = 2;
 pub(crate) enum ReconcileOutcome {
     /// The tournament row has no bracket channel, so there is nowhere to draw.
     NoChannel,
-    /// Under two active entrants — §8.6 has nothing to draw yet.
+    /// Under two active entrants — there is nothing to draw yet.
     TooFewEntrants,
     Drawn {
         posted: usize,
@@ -57,7 +57,7 @@ const RENDER_ONLY_BEST_OF: u8 = 1;
 /// The draw order: one entrant per bracket position, each carrying the seed it
 /// should be drawn with.
 ///
-/// Seeds win once they exist (§6) — they are what `start` builds from, so an
+/// Seeds win once they exist — they are what `start` builds from, so an
 /// organizer's override has to be visible here — and the rating tiering orders
 /// whoever has no seed yet.
 ///
@@ -110,7 +110,7 @@ pub(crate) fn preview_rounds(entries: &[TournamentEntry]) -> Option<Vec<render::
                         slot1: entrant(set.slot1, &order),
                         slot2: entrant(set.slot2, &order),
                         // Nothing has been played, so no scores and no winners —
-                        // §8.6 wants a blank rather than a zero.
+                        // A blank rather than a zero.
                         score: None,
                         winner: None,
                     })
@@ -171,7 +171,7 @@ fn played_match(set: &TournamentSet, entries: &[TournamentEntry]) -> render::Mat
             _ => None,
         });
 
-    // §8.6 wants a blank rather than a zero, which also stops a bye — decided
+    // A blank rather than a zero, which also stops a bye — decided
     // without anyone playing — from reading `0-0`.
     let score = (set.slot1_wins + set.slot2_wins > 0).then(|| {
         (
@@ -190,7 +190,7 @@ fn played_match(set: &TournamentSet, entries: &[TournamentEntry]) -> render::Mat
 
 /// Wraps the drawing with a heading, and says plainly that it is not the draw
 /// yet while the tournament has not started. Bilingual: one shared message with
-/// many readers (§8.10).
+/// many readers.
 fn decorate(name: &str, chunks: Vec<String>, provisional: bool) -> Vec<String> {
     let heading = if provisional {
         format!(
@@ -597,7 +597,7 @@ mod tests {
             &[set(100, 10, 1, Some(1), Some(2))],
             &seeded_field(2),
         );
-        assert!(played[0].matches[0].score.is_none(), "§8.6 wants a blank, not a zero");
+        assert!(played[0].matches[0].score.is_none(), "a blank, not a zero");
         assert!(played[0].matches[0].winner.is_none());
     }
 
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn a_large_field_splits_into_several_messages() {
-        // §8.6: the split starts at 16, which is what makes the message count
+        // The split starts at 16, which is what makes the message count
         // vary with the field and `reconcile` necessary.
         let rounds = preview_rounds(&field(16)).unwrap();
         let chunks = render::render(&rounds, render::DEFAULT_WIDTH);

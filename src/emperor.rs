@@ -31,7 +31,7 @@ impl EventHandler for Emperor {
     async fn message(&self, ctx: Context, new_message: Message) {
         // Home guild only. This handler matches on user ids and keywords with no
         // notion of where it is, so without the guard it would start reacting in the
-        // tournament guild the moment the bot joins (docs/tournament.md §8.0).
+        // tournament guild the moment the bot joins.
         if !self.guilds.allows(Feature::Home, new_message.guild_id) {
             return;
         }

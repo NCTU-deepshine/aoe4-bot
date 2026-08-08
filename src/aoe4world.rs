@@ -43,7 +43,7 @@ pub(crate) async fn search_players(username: &str) -> Option<SearchResult> {
     fetch_json(url, "player search").await
 }
 
-/// ATR for a whole field (docs/tournament.md §6): the esports leaderboard filtered
+/// ATR for a whole field: the esports leaderboard filtered
 /// by `profile_ids`, keyed back by id. Missing entrants are normal and simply
 /// absent from the map — the leaderboard is ~345 professionals, so most guild
 /// entrants will have no ATR at all.
@@ -59,7 +59,7 @@ pub(crate) async fn fetch_esports_ratings(profile_ids: &[i64]) -> HashMap<i64, f
 
         let Some(page) = fetch_json::<EsportsLeaderboard>(url, "esports leaderboard").await else {
             // A failed batch is missing ATR, not a failed seeding — the caller
-            // seeds from whatever it has and reports the gap (§6).
+            // seeds from whatever it has and reports the gap.
             continue;
         };
         ratings.extend(page.ratings());
@@ -95,7 +95,7 @@ impl EsportsLeaderboard {
 }
 
 /// Both fields are genuinely nullable in the live response: the leaderboard is
-/// mirrored from a name-keyed community sheet (§6), so entries exist for players
+/// mirrored from a name-keyed community sheet, so entries exist for players
 /// aoe4world has not matched to a profile. Those rows are unusable here and are
 /// dropped rather than being allowed to fail the whole batch.
 #[derive(Deserialize, Debug)]
@@ -260,7 +260,7 @@ mod tests {
     use super::{EsportsLeaderboard, rank_level_zh};
 
     /// A real response, trimmed to four players (`src/tournament/testdata/`).
-    /// §10: deserialization is tested against a saved payload, never live.
+    /// Deserialization is tested against a saved payload, never live.
     fn leaderboard() -> EsportsLeaderboard {
         serde_json::from_str(include_str!("tournament/testdata/esports_leaderboard.json"))
             .expect("the saved esports payload should parse")

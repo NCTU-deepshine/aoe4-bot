@@ -1,5 +1,5 @@
-//! Two languages for the tournament feature's reply text (docs/tournament.md
-//! §8.10): Traditional Chinese and English, the fallback for everything else.
+//! Two languages for the tournament feature's reply text: Traditional Chinese,
+//! and English as the fallback for everything else.
 //!
 //! **Detection is per-interaction, not per-guild.** Every interaction carries the
 //! invoking user's own client language; `guild_locale` also exists and is

@@ -1,4 +1,4 @@
-//! Rendering a bracket for Discord (docs/tournament.md §8.6).
+//! Rendering a bracket for Discord.
 //!
 //! Pure: takes rounds, returns message bodies. No database, no Discord, no clock.
 //!
@@ -61,7 +61,7 @@ pub(crate) struct Round {
 
 /// Render a bracket into one or more message bodies, each within Discord's limit.
 ///
-/// Splitting follows §8.6: halve the bracket and peel the closing round off as its
+/// Splitting halves the bracket and peels the closing round off as its
 /// own message, recursing until each part fits. A half of a bracket is just a smaller
 /// bracket, which is why this needs no separate code path.
 pub(crate) fn render(rounds: &[Round], width: usize) -> Vec<String> {
@@ -102,7 +102,7 @@ pub(crate) fn render(rounds: &[Round], width: usize) -> Vec<String> {
 }
 
 /// A round as a plain list, for phones — a 16-player bracket is already wider than a
-/// phone's code block (§8.6).
+/// phone's code block.
 ///
 /// This is *outside* a fence, so names go through the markdown escaper rather than the
 /// fence-safety pass.
@@ -208,7 +208,7 @@ fn grid(rounds: &[Round], width: usize) -> Vec<String> {
             let wins = if last {
                 None
             } else {
-                // An even feeder index arrives in slot one of its parent (§5).
+                // An even feeder index arrives in slot one of its parent.
                 rounds[depth].matches.get(index / 2).and_then(|parent| {
                     let (one, two) = parent.wins();
                     if index % 2 == 0 { one } else { two }
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn sixteen_splits_into_the_two_halves_and_the_final() {
-        // The shape §8.6 asks for: upper half, lower half, then the closing round.
+        // The shape wanted: upper half, lower half, then the closing round.
         let messages = render(&fully_played(16), DEFAULT_WIDTH);
         assert_eq!(messages.len(), 3);
 

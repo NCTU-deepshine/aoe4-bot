@@ -3,7 +3,7 @@ use crate::reply::ephemeral;
 use crate::{Context, Error};
 use serenity::model::id::{GuildId, RoleId};
 
-/// Which feature set something belongs to (docs/tournament.md §8.0).
+/// Which feature set something belongs to.
 ///
 /// The two sets must not leak into each other: no tournament commands in the home
 /// guild, and none of the ranked board or the message reactions in the tournament
@@ -23,7 +23,7 @@ pub(crate) enum Feature {
 pub(crate) struct Guilds {
     pub(crate) home: GuildId,
     pub(crate) tournament: GuildId,
-    /// Who may run `/tournament create` (docs/tournament.md §8.4), besides
+    /// Who may run `/tournament create`, besides
     /// anyone with `MANAGE_GUILD` (that bypass always applies — see
     /// `tournament::access` — so the tournament stays creatable even if this
     /// role is never assigned, misconfigured, or later deleted). Hardcoded, with
@@ -38,7 +38,7 @@ pub(crate) struct Guilds {
 // Both guilds, in the source. A guild id is an identifier, not a credential — it is
 // in every message link and visible to every member — so it belongs here alongside
 // the channel ids this codebase already hardcodes, rather than in the deployment's
-// environment. There are exactly two, and both are known (docs/tournament.md §8.0).
+// environment. There are exactly two, and both are known.
 const HOME_GUILD: GuildId = GuildId::new(1262320259252097034);
 const TOURNAMENT_GUILD: GuildId = GuildId::new(1154585078811340850);
 const TOURNAMENT_ORGANIZER_ROLE: RoleId = RoleId::new(1477224039817678940);
@@ -77,9 +77,7 @@ impl Guilds {
 
 fn ensure_distinct(home: GuildId, tournament: GuildId) {
     if home == tournament {
-        panic!(
-            "the home and tournament guilds must be different (docs/tournament.md §8.0); check GUILD_ID and TOURNAMENT_GUILD_ID"
-        );
+        panic!("the home and tournament guilds must be different; check GUILD_ID and TOURNAMENT_GUILD_ID");
     }
 }
 
@@ -108,7 +106,7 @@ pub(crate) async fn home_only(ctx: Context<'_>) -> Result<bool, Error> {
 }
 
 /// Command check for the tournament guild's commands. Mirrors `home_only`
-/// exactly (docs/tournament.md §8.0) — defence in depth, not the mechanism,
+/// exactly — defence in depth, not the mechanism,
 /// since registration is already per guild.
 pub(crate) async fn tournament_only(ctx: Context<'_>) -> Result<bool, Error> {
     allowed_here(ctx, Feature::Tournament).await

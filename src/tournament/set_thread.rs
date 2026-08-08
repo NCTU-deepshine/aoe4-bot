@@ -1,4 +1,4 @@
-//! Set threads (docs/tournament.md §8.7): one private thread per set on
+//! Set threads: one private thread per set on
 //! `#{slug}-matches`, holding the draft room link and the seat instruction.
 //!
 //! Why a thread rather than DMs: its membership already *is* the right audience —
@@ -30,7 +30,7 @@ const NAME_LIMIT: usize = 100;
 
 /// Display cells allowed per name, leaving room for the `R1M1 · ` prefix and the
 /// ` vs ` between them. A CJK name spends two cells per character, so measuring
-/// in cells is what keeps the limit honest (§8.6's width helper, reused).
+/// in cells is what keeps the limit honest, using the bracket's width helper.
 const NAME_WIDTH: usize = 30;
 
 /// `R1M1 · MarineLorD vs Beasty`, inside Discord's 100-character limit.
@@ -46,7 +46,7 @@ pub(crate) fn thread_name(round_ordinal: i64, position: i64, one: &str, two: &st
     name.chars().take(NAME_LIMIT).collect()
 }
 
-/// The pinned control panel. Bilingual, like the other panels (§8.10): one
+/// The pinned control panel. Bilingual, like the other panels: one
 /// message with several readers, none of whom interacted to summon it.
 ///
 /// `room` is `None` when draft creation failed, which is a state the thread has
@@ -95,7 +95,7 @@ pub(crate) fn render_panel(
     };
 
     // The room link, not the watch link: a seat is claimed from `/match/`, and
-    // `/watch/` deliberately cannot claim one (§8.7).
+    // `/watch/` deliberately cannot claim one.
     //
     // Each player is told their opponent's *in-game* name, which is the aoe4world
     // display name — a Discord mention is no help when you are looking for
@@ -122,9 +122,9 @@ pub(crate) fn render_panel(
     // The call-admin button is what a player has instead of knowing who to ask:
     // nothing on this panel names an organizer.
     //
-    // §8.7's panel also carries "Regenerate draft" and "Set complete", whose
-    // handlers are chunks 20 and 22 — a button that silently does nothing is
-    // worse than one that is not there yet.
+    // "Regenerate draft" and "Set complete" belong on this panel too, but nothing
+    // handles them yet — a button that silently does nothing is worse than one
+    // that is not there yet.
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new_link(&room.watch_url).label("觀戰 / Watch draft"),
         CreateButton::new(Action::CallAdmin.custom_id(set.id))
@@ -135,16 +135,16 @@ pub(crate) fn render_panel(
     (body, components)
 }
 
-/// The public post in `#…-draft` (§8.7): one per set, carrying the spectator link
+/// The public post in `#…-draft`: one per set, carrying the spectator link
 /// and nothing that can claim a seat.
 ///
 /// **Posted when the room is created, not when both seats fill.** Detecting the
 /// latter meant polling an undocumented endpoint on a schedule this bot does not
-/// have (§3.1), so the room is announced empty and the accepted cost is that a
+/// have, so the room is announced empty and the accepted cost is that a
 /// reader who edits `/watch/` to `/match/` reaches it. `/set redraft` is the remedy.
 ///
 /// Bilingual round name, because a public channel has many readers and so no one
-/// reader's locale to follow (§8.10). No mentions: names only.
+/// reader's locale to follow. No mentions: names only.
 pub(crate) fn render_announcement(
     set: &SetHeading,
     one: &Player,
@@ -168,7 +168,7 @@ pub(crate) fn render_announcement(
     // (`read_only_overwrites` allows SEND_MESSAGES and nothing else).
     //
     // The watch link, never the room link: `/watch/` has no seat control, which is
-    // the whole reason a public channel gets a link at all (§8.7).
+    // the whole reason a public channel gets a link at all.
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new_link(&room.watch_url).label("觀戰 / Watch draft"),
     ])];
@@ -208,11 +208,11 @@ impl Room {
     }
 }
 
-/// Opens a set: thread, members, draft room, pinned panel (§8.7).
+/// Opens a set: thread, members, draft room, pinned panel.
 ///
 /// A no-op once the set has a thread, so the caller can hand it every ready set
-/// without tracking which are new — chunk 18 reopens the same path as later
-/// rounds fill.
+/// without tracking which are new — completing a set reopens the same path as
+/// later rounds fill.
 pub(crate) async fn open(
     http: impl CacheHttp,
     pool: &SqlitePool,
@@ -280,13 +280,13 @@ pub(crate) async fn open(
     Ok(())
 }
 
-/// Posts the set's spectator announcement in `#…-draft` and records its id (§8.7).
+/// Posts the set's spectator announcement in `#…-draft` and records its id.
 ///
 /// Returns nothing rather than a `Result`, so a caller cannot propagate a failed
 /// spectator post into a failed set. One post per set comes for free: `open` is a
 /// no-op once the set has a thread, so the room — and therefore this — happens
-/// once. `draft_announce_message_id` is the handle chunk 20 clears and chunk 22
-/// edits, not a guard against a second call.
+/// once. `draft_announce_message_id` is a handle for editing or replacing that
+/// post later, not a guard against a second call.
 async fn announce(
     http: &impl CacheHttp,
     pool: &SqlitePool,
@@ -298,8 +298,8 @@ async fn announce(
 ) {
     let Some(draft_channel_id) = tournament.draft_channel_id else {
         // A live tournament without one means `/tournament create` half-failed.
-        // Said out loud, because §8.1 records that a silently-403ing best-effort
-        // post is how a permission bug survived two deploys.
+        // Said out loud: a silently-403ing best-effort post is how a permission
+        // bug once survived two deploys.
         error!(
             "tournament {} has no draft channel, so set {} is unannounced",
             tournament.id, set.id
@@ -382,7 +382,7 @@ async fn create_room(pool: &SqlitePool, tournament: &Tournament, round: &Tournam
         },
         Err(err) => {
             // `PresetRejected`'s issues are the only account of which rule the
-            // preset broke, and we cannot check it beforehand (§3.3).
+            // preset broke, and we cannot check it beforehand.
             error!("failed to create a draft for set {set_id}: {err}");
             if let DraftError::PresetRejected { issues } = &err {
                 error!("the draft tool rejected preset {preset_id}: {issues:?}");
@@ -474,7 +474,7 @@ mod tests {
             Some(&room()),
             &[],
         );
-        // `/watch/` cannot claim a seat (§8.7), so the body must carry `/match/`.
+        // `/watch/` cannot claim a seat, so the body must carry `/match/`.
         assert!(content.contains("/match/65f1"), "{content}");
         assert!(
             !content.contains("/watch/65f1"),
@@ -573,7 +573,7 @@ mod tests {
         );
     }
 
-    // The public draft-channel post (chunk 17).
+    // The public draft-channel post.
 
     #[test]
     fn an_announcement_names_the_round_the_match_and_the_series() {
@@ -583,7 +583,7 @@ mod tests {
             &player(9, 4, "B"),
             &room(),
         );
-        // Bilingual, because a public channel has many readers (§8.10).
+        // Bilingual, because a public channel has many readers.
         assert!(content.contains("**八強 / Quarterfinal · Match 2 — Bo5**"), "{content}");
     }
 

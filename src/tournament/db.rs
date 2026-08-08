@@ -1,4 +1,4 @@
-//! Row types and queries for the tournament schema (docs/tournament.md §4, §8.8).
+//! Row types and queries for the tournament schema.
 //!
 //! One section per table, in the same order as `migrations/0002_tournament_schema.sql`.
 //! Scope is deliberately general-purpose reads/writes, not the business logic later
@@ -18,9 +18,9 @@ fn log_db_error(err: &sqlx::Error) {
 
 // 1. tournaments
 
-// Most fields below are read starting with chunk 9 (registration replies, panels)
-// and beyond — chunk 7 only writes them via `insert_tournament`/
-// `set_tournament_channels`, never reads them back off a fetched row.
+// Most fields below are written by `insert_tournament` / `set_tournament_channels`
+// and read back by the registration replies and the panels, which is why the row
+// is wider than anything that creates a tournament needs.
 #[derive(FromRow)]
 pub(crate) struct Tournament {
     pub id: i64,
@@ -74,7 +74,6 @@ pub(crate) async fn insert_tournament(
     Ok(result.last_insert_rowid())
 }
 
-// consumed by chunk 12 (`/tournament start`, generating and publishing the bracket)
 pub(crate) async fn get_tournament(pool: &SqlitePool, id: i64) -> Result<Option<Tournament>, sqlx::Error> {
     sqlx::query_as(
         r"
@@ -111,7 +110,6 @@ pub(crate) async fn get_tournament_by_slug(pool: &SqlitePool, slug: &str) -> Res
     .inspect_err(log_db_error)
 }
 
-// consumed starting with chunk 10 (checkin/seeding/running/... lifecycle transitions)
 pub(crate) async fn update_tournament_status(pool: &SqlitePool, id: i64, status: &str) -> Result<(), sqlx::Error> {
     sqlx::query(r"update tournaments set status = ?1 where id = ?2")
         .bind(status)
@@ -122,11 +120,11 @@ pub(crate) async fn update_tournament_status(pool: &SqlitePool, id: i64, status:
     Ok(())
 }
 
-/// `/tournament delete` (docs/tournament.md §8.4). One statement is enough: every
+/// `/tournament delete`. One statement is enough: every
 /// tournament-scoped table cascades off this row — entries, admins, stages,
 /// rounds, sets, games and bracket messages — which is invisible here, hence the
 /// note. `tournament_players` is deliberately not among them: the Discord↔aoe4world
-/// binding is global (§4) and outlives any one tournament.
+/// binding is global and outlives any one tournament.
 pub(crate) async fn delete_tournament(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     sqlx::query(r"delete from tournaments where id = ?1")
         .bind(id)
@@ -137,7 +135,7 @@ pub(crate) async fn delete_tournament(pool: &SqlitePool, id: i64) -> Result<(), 
 }
 
 /// The channel ids `/tournament create` allocates, written once Discord confirms
-/// they exist (§8.1). A carrier rather than six positional args, matching
+/// they exist. A carrier rather than six positional args, matching
 /// `NewGame`'s precedent (`insert_game`).
 pub(crate) struct TournamentChannels {
     pub category_id: Option<i64>,
@@ -179,7 +177,7 @@ pub(crate) async fn set_tournament_channels(
     Ok(())
 }
 
-/// The registration panel's message id (docs/tournament.md §8.5) — set once, right
+/// The registration panel's message id — set once, right
 /// after `/tournament create` posts the panel to the register channel it just made.
 pub(crate) async fn set_register_message_id(
     pool: &SqlitePool,
@@ -195,7 +193,7 @@ pub(crate) async fn set_register_message_id(
     Ok(())
 }
 
-/// The check-in panel's message id (docs/tournament.md §8.5) — set right after
+/// The check-in panel's message id — set right after
 /// `/tournament open-checkin` posts the panel to the register channel, and back
 /// to `None` by `/tournament reopen-registration`, which deletes that message.
 pub(crate) async fn set_checkin_message_id(
@@ -212,7 +210,7 @@ pub(crate) async fn set_checkin_message_id(
     Ok(())
 }
 
-/// The seeding panel's message id (docs/tournament.md §8.5) — set when
+/// The seeding panel's message id — set when
 /// `/tournament close-checkin` posts the panel, and back to `None` by
 /// `/tournament reopen-registration`, which deletes that message.
 ///
@@ -233,8 +231,8 @@ pub(crate) async fn set_seed_message_id(
     Ok(())
 }
 
-/// When check-in closes on its own (docs/tournament.md §8.3) — informational
-/// only today; nothing polls this to auto-close (§11 follow-ups).
+/// When check-in closes on its own — informational
+/// only today; nothing polls this to auto-close.
 pub(crate) async fn set_checkin_closes_at(
     pool: &SqlitePool,
     id: i64,
@@ -249,7 +247,7 @@ pub(crate) async fn set_checkin_closes_at(
     Ok(())
 }
 
-/// The maximum size of the field (§8.3). Enforced at registration rather than at
+/// The maximum size of the field. Enforced at registration rather than at
 /// start, so an over-full field never happens in the first place.
 pub(crate) async fn set_entrant_cap(pool: &SqlitePool, id: i64, entrant_cap: i64) -> Result<(), sqlx::Error> {
     sqlx::query(r"update tournaments set entrant_cap = ?1 where id = ?2")
@@ -277,9 +275,9 @@ pub(crate) async fn set_scheduled_start_at(
     Ok(())
 }
 
-/// Whether the field's order is the bot's suggestion or the organizers' own
-/// (§6). `seeding::SeedPolicy` is the reader; `seed set` and `seed refresh` are
-/// the only writers.
+/// Whether the field's order is the bot's suggestion or the organizers' own.
+/// `seeding::SeedPolicy` is the reader; `seed set` and `seed refresh` are the
+/// only writers.
 pub(crate) async fn set_seed_source(pool: &SqlitePool, id: i64, seed_source: &str) -> Result<(), sqlx::Error> {
     sqlx::query(r"update tournaments set seed_source = ?1 where id = ?2")
         .bind(seed_source)
@@ -290,7 +288,7 @@ pub(crate) async fn set_seed_source(pool: &SqlitePool, id: i64, seed_source: &st
     Ok(())
 }
 
-/// Entrants occupying a slot. `withdrawn` and `no_show` rows persist (§4) but are
+/// Entrants occupying a slot. `withdrawn` and `no_show` rows persist but are
 /// not in the field, so withdrawing genuinely frees a place against the cap.
 pub(crate) async fn count_active_entries(pool: &SqlitePool, tournament_id: i64) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
@@ -308,7 +306,7 @@ pub(crate) async fn count_active_entries(pool: &SqlitePool, tournament_id: i64) 
 }
 
 // 10. tournament_round_presets — which draft preset a round uses, and therefore
-//     how long its sets are (§3.3). Keyed by depth back from the final; see
+//     how long its sets are. Keyed by depth back from the final; see
 //     `tournament::setup::preset_for_depth` for how one is resolved.
 
 #[derive(FromRow)]
@@ -442,7 +440,7 @@ pub(crate) async fn get_live_tournament_by_announce_channel(
     .inspect_err(log_db_error)
 }
 
-// 2. tournament_stages — consumed by chunk 12 (`/tournament start`, generating the bracket)
+// 2. tournament_stages
 
 #[derive(FromRow)]
 pub(crate) struct TournamentStage {
@@ -506,7 +504,7 @@ pub(crate) async fn update_stage_status(pool: &SqlitePool, id: i64, status: &str
     Ok(())
 }
 
-// 3. tournament_rounds — consumed by chunk 12 (`/tournament start`) and chunk 27 (round presets)
+// 3. tournament_rounds
 
 #[derive(FromRow)]
 pub(crate) struct TournamentRound {
@@ -577,7 +575,7 @@ pub(crate) async fn get_round(pool: &SqlitePool, id: i64) -> Result<Option<Tourn
     .inspect_err(log_db_error)
 }
 
-// 4. tournament_players — consumed by chunk 9 (registration, which is also binding)
+// 4. tournament_players
 
 #[derive(FromRow)]
 pub(crate) struct TournamentPlayer {
@@ -619,8 +617,8 @@ pub(crate) async fn get_player_by_aoe4_id(
     .inspect_err(log_db_error)
 }
 
-/// A no-op if `user_id` already has a bound profile — the caller (chunk 9's
-/// registration) uses this to write the player row on a first sign-up only, and
+/// A no-op if `user_id` already has a bound profile — registration uses this to
+/// write the player row on a first sign-up only, and
 /// otherwise falls through to `insert_entry` against the row that's already there.
 pub(crate) async fn insert_player_if_absent(
     pool: &SqlitePool,
@@ -648,7 +646,7 @@ pub(crate) async fn insert_player_if_absent(
 /// separate, player-editable concern (see `set_player_display_name`).
 /// Every entry a player has ever had, in any tournament and whatever its status.
 ///
-/// Counts `withdrawn` rows too, deliberately: entries are never deleted (§4), and
+/// Counts `withdrawn` rows too, deliberately: entries are never deleted, and
 /// `tournament_entries.user_id` references this player row with no `on delete
 /// cascade`, so a withdrawn entry blocks a delete exactly as an active one does.
 /// Counting only the live ones would report success and then hit a raw FK error.
@@ -664,7 +662,7 @@ pub(crate) async fn count_entries_for_player(pool: &SqlitePool, user_id: i64) ->
 /// else to claim. Callers must check `count_entries_for_player` first — the
 /// foreign keys from entries, sets and games have no cascade, so this fails
 /// rather than orphaning them. `accounts` is a separate table and is untouched
-/// (§4: the two are deliberately not linked).
+/// — the two are deliberately not linked.
 pub(crate) async fn delete_player(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Error> {
     sqlx::query(r"delete from tournament_players where user_id = ?1")
         .bind(user_id)
@@ -693,7 +691,7 @@ pub(crate) async fn update_player_binding(pool: &SqlitePool, user_id: i64, aoe4_
 }
 
 /// Unlike `aoe4_id`/`elo`/`atr`, a name carries no game-result attribution, so it is
-/// not frozen on existing entries the way those are (§4 notes) — this writes through
+/// not frozen on existing entries the way those are — this writes through
 /// to every entry the player has in a tournament that has not yet completed or been
 /// canceled, so brackets and threads always show the current name. A transaction
 /// because the two tables must agree: an entry with a name `tournament_players`
@@ -740,7 +738,7 @@ pub(crate) async fn set_player_display_name(
     Ok(())
 }
 
-/// A first sign-up (docs/tournament.md §8.5): writes `tournament_players` and the
+/// A first sign-up: writes `tournament_players` and the
 /// entry together, atomically — neither survives if the other fails. Only called
 /// when the caller has already confirmed no `tournament_players` row exists for
 /// `user_id`; a concurrent sign-up racing for the same `aoe4_id` still surfaces as
@@ -748,7 +746,7 @@ pub(crate) async fn set_player_display_name(
 /// caller (`tournament::registration`) maps to a friendly message rather than
 /// treating as an unexpected error. `elo` is the profile's `rm_1v1_elo` rating,
 /// already in hand from the same aoe4world fetch that resolved `display_name` —
-/// snapshotted now and refreshed again at seeding (chunk 11).
+/// snapshotted now and refreshed again at seeding.
 pub(crate) async fn register_new_player_and_entry(
     pool: &SqlitePool,
     tournament_id: i64,
@@ -792,9 +790,9 @@ pub(crate) async fn register_new_player_and_entry(
 }
 
 /// Whether `user_id` holds an entry in any `running` tournament — the guard for
-/// `/tournament rebind` (docs/tournament.md §4 notes: "a rebind is refused while
-/// the user has an entry in a running tournament", since the profile is
-/// snapshotted onto entries and sets already reference the player). Deliberately
+/// `/tournament rebind`: a rebind is refused while the user has an entry in a
+/// running tournament, since the profile is snapshotted onto entries and sets
+/// already reference the player. Deliberately
 /// global, not scoped to one tournament, and deliberately narrower than
 /// registration/withdrawal's "has the tournament started" gate — a `completed` or
 /// `canceled` tournament's entry is frozen history, not something a rebind could
@@ -817,7 +815,7 @@ pub(crate) async fn has_running_tournament_entry(pool: &SqlitePool, user_id: i64
     .inspect_err(log_db_error)
 }
 
-// 5. tournament_entries — consumed starting with chunk 9 (registration) through chunk 11 (seeding)
+// 5. tournament_entries
 
 #[derive(FromRow)]
 pub(crate) struct TournamentEntry {
@@ -836,7 +834,7 @@ pub(crate) struct TournamentEntry {
 }
 
 /// `elo` is snapshotted at sign-up so the bracket preview has something real to
-/// order by before seeding runs (§6). ATR is not: it is one bulk request for the
+/// order by before seeding runs. ATR is not: it is one bulk request for the
 /// whole field, so it stays a seeding-time fetch rather than a per-entrant one.
 pub(crate) async fn insert_entry(
     pool: &SqlitePool,
@@ -948,7 +946,7 @@ pub(crate) async fn set_entry_checked_in(
     Ok(())
 }
 
-/// `/tournament close-checkin`'s no-show sweep (docs/tournament.md §8.3): every
+/// `/tournament close-checkin`'s no-show sweep: every
 /// `active` entry that never checked in becomes `no_show` in one statement.
 /// Already-`withdrawn`/`no_show` entries are untouched. Returns how many rows
 /// changed, for the closing reply.
@@ -969,9 +967,9 @@ pub(crate) async fn mark_no_shows(pool: &SqlitePool, tournament_id: i64) -> Resu
     Ok(result.rows_affected())
 }
 
-/// `mark_no_shows`'s exact inverse, for `/tournament reopen-registration`
-/// (docs/tournament.md §8.3). Only `no_show` is touched, and only `mark_no_shows`
-/// ever writes that status, so every row this restores was `active` before —
+/// `mark_no_shows`'s exact inverse, for `/tournament reopen-registration`. Only
+/// `no_show` is touched, and only `mark_no_shows` ever writes that status, so
+/// every row this restores was `active` before —
 /// `withdrawn` and `eliminated` entries are deliberately left alone.
 pub(crate) async fn revert_no_shows(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
@@ -989,11 +987,11 @@ pub(crate) async fn revert_no_shows(pool: &SqlitePool, tournament_id: i64) -> Re
     Ok(result.rows_affected())
 }
 
-/// Wipes the check-in round for `/tournament reopen-registration` (§8.3).
+/// Wipes the check-in round for `/tournament reopen-registration`.
 ///
 /// Seeds are `clear_seeds`'s job, not this one's: a reopen only discards them
 /// when the order was the bot's own suggestion, and a manual order survives the
-/// rewind (§6).
+/// rewind.
 pub(crate) async fn clear_checkins(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         r"
@@ -1010,7 +1008,7 @@ pub(crate) async fn clear_checkins(pool: &SqlitePool, tournament_id: i64) -> Res
     Ok(result.rows_affected())
 }
 
-/// Drops a suggested seed order that a reopen has invalidated (§8.3). The
+/// Drops a suggested seed order that a reopen has invalidated. The
 /// `unique (tournament_id, seed)` index tolerates repeated nulls, so this needs
 /// no ordering pass of its own.
 pub(crate) async fn clear_seeds(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
@@ -1085,13 +1083,13 @@ pub(crate) async fn set_entry_ratings(
     Ok(())
 }
 
-/// Writes `ordered_user_ids` as seeds 1..n in one transaction (§6).
+/// Writes `ordered_user_ids` as seeds 1..n in one transaction.
 ///
 /// **Every seed is nulled first, and that is load-bearing rather than tidy:**
 /// `unique (tournament_id, seed)` is enforced per row as the statement runs, so
 /// shifting a field down by one would collide on the very first row without a
 /// clear pass. Writing the whole order rather than the changed rows also
-/// guarantees the result is contiguous, which is what chunk 12's `start`
+/// guarantees the result is contiguous, which is what starting a tournament
 /// requires of a finalized field.
 ///
 /// `also_suggested` separates the two callers: `close-checkin` records what the
@@ -1170,7 +1168,7 @@ pub(crate) async fn set_entry_seed(
     Ok(())
 }
 
-// 6. tournament_sets — consumed starting with chunk 12 (bracket generation creates sets) through chunk 20
+// 6. tournament_sets
 
 #[derive(FromRow)]
 pub(crate) struct TournamentSet {
@@ -1248,7 +1246,7 @@ pub(crate) async fn insert_set(
 ///
 /// `per_round` holds the resolved preset for each round in `bracket.rounds` order, so
 /// each round records the preset its drafts are created from — without it
-/// `set_thread::create_room` has no preset and no set ever gets a room (§8.3).
+/// `set_thread::create_room` has no preset and no set ever gets a room.
 pub(crate) async fn insert_bracket(
     pool: &SqlitePool,
     tournament_id: i64,
@@ -1502,10 +1500,10 @@ pub(crate) async fn set_thread(pool: &SqlitePool, id: i64, thread_id: i64) -> Re
     Ok(())
 }
 
-/// Used for both the first draft (chunk 16) and a redraft (chunk 20): a redraft
+/// Used for both the first draft and a redraft: a redraft
 /// overwrites the pointer, so the sync/announcement state from the superseded room
 /// must not survive alongside it. The room link is not stored — it is
-/// `draft_base_url` (on `tournaments`) plus `/match/` plus this id (docs/tournament.md §4).
+/// `draft_base_url` (on `tournaments`) plus `/match/` plus this id.
 pub(crate) async fn set_draft_pointer(pool: &SqlitePool, id: i64, draft_external_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         r"
@@ -1605,7 +1603,7 @@ pub(crate) async fn set_scheduled_at(
     Ok(())
 }
 
-// 7. tournament_games — consumed starting with chunk 18 (set completion) through chunk 22 (result import)
+// 7. tournament_games
 
 #[derive(FromRow)]
 pub(crate) struct TournamentGame {
@@ -1733,7 +1731,8 @@ pub(crate) async fn update_game_result(
     Ok(())
 }
 
-/// `source = 'manual'` rows survive — chunk 20's redraft guard.
+/// `source = 'manual'` rows survive: regenerating a draft discards the imported
+/// record of a game, but never an organizer's own correction.
 pub(crate) async fn void_games_for_set(pool: &SqlitePool, set_id: i64) -> Result<(), sqlx::Error> {
     sqlx::query(
         r"
@@ -1830,7 +1829,7 @@ pub(crate) async fn is_admin(pool: &SqlitePool, tournament_id: i64, user_id: i64
     .inspect_err(log_db_error)
 }
 
-// 9. tournament_bracket_messages — consumed by chunk 12 (bracket publication, chunked across several messages)
+// 9. tournament_bracket_messages
 
 #[derive(FromRow)]
 pub(crate) struct TournamentBracketMessage {
