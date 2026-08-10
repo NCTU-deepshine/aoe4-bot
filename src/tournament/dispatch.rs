@@ -14,7 +14,7 @@ use crate::locale::Locale;
 use crate::tournament::action::{self, Action};
 use crate::tournament::checkin::CheckinOutcome;
 use crate::tournament::throttle::EditThrottle;
-use crate::tournament::{audit, bracket_view, checkin, checkin_panel, db, panel, registration};
+use crate::tournament::{audit, bracket_view, checkin, checkin_panel, db, panel, registration, seed_panel};
 use serenity::all::{
     ComponentInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
     Interaction,
@@ -126,6 +126,7 @@ impl Dispatcher {
                 registration::snapshot_entry_elo(&self.pool, tournament.id, user_id, entry.aoe4_id).await;
             }
             self.refresh_panel(ctx, &tournament).await;
+            self.refresh_seed_panel(ctx, &tournament).await;
             self.reconcile_bracket(ctx, &tournament).await;
         }
     }
@@ -219,6 +220,7 @@ impl Dispatcher {
 
         if outcome.changed_state() {
             self.refresh_panel(ctx, &tournament).await;
+            self.refresh_seed_panel(ctx, &tournament).await;
             self.reconcile_bracket(ctx, &tournament).await;
         }
     }
@@ -286,6 +288,17 @@ impl Dispatcher {
         if let Err(err) = panel::refresh(&ctx.http, &self.pool, &self.panel_throttle, tournament).await {
             error!(
                 "failed to refresh the registration panel for tournament {}: {err:?}",
+                tournament.id
+            );
+        }
+    }
+
+    /// The seeding panel lists the field, so a sign-up or withdrawal changes it —
+    /// the same trio the slash commands run.
+    async fn refresh_seed_panel(&self, ctx: &Context, tournament: &db::Tournament) {
+        if let Err(err) = seed_panel::refresh(&ctx.http, &self.pool, &self.panel_throttle, tournament).await {
+            error!(
+                "failed to refresh the seeding panel for tournament {}: {err:?}",
                 tournament.id
             );
         }

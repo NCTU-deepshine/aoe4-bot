@@ -56,16 +56,6 @@ pub(crate) fn suggested_order(entries: &[TournamentEntry]) -> Vec<i64> {
     field.iter().map(|e| e.user_id).collect()
 }
 
-/// Whether the seeding panel belongs in `#{slug}-bracket` right now: it appears
-/// when `close-checkin` computes the first seeding, and stays afterwards.
-///
-/// Asked of the phase rather than of `seed_message_id` for the same reason as
-/// `checkin::checkin_panel_expected` — a panel whose first post failed has no
-/// id, and that is exactly the one a repair must be able to put back.
-pub(crate) fn seed_panel_expected(status: &str) -> bool {
-    matches!(status, "seeding" | "running" | "completed")
-}
-
 /// How the field is shown, wherever it is shown: seeded entrants first in seed
 /// order, everyone else after them by the default tiering.
 ///
@@ -316,16 +306,6 @@ mod tests {
         two.aoe4_id = None;
         let entries = vec![one, two];
         assert!(rated_ids(&seedable(&entries)).is_empty());
-    }
-
-    #[test]
-    fn the_seeding_panel_is_expected_from_seeding_onward() {
-        for status in ["seeding", "running", "completed"] {
-            assert!(seed_panel_expected(status), "{status} should still show the panel");
-        }
-        for status in ["registration", "checkin", "canceled"] {
-            assert!(!seed_panel_expected(status), "{status} should not have one");
-        }
     }
 
     #[test]

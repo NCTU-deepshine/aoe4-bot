@@ -12,8 +12,10 @@ use crate::Error;
 use crate::db::{to_channel_id, to_message_id};
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use crate::tournament::seeding::display_order;
+use crate::tournament::throttle::EditThrottle;
 use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
 use sqlx::SqlitePool;
+use std::time::Instant;
 
 /// Entrants listed before the table is truncated. A 32-player field would blow
 /// past Discord's 2000-character message limit otherwise; the bracket itself
@@ -27,7 +29,10 @@ pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
     let field = display_order(entries);
 
     if field.is_empty() {
-        return format!("**{name} — 種子名單 / Seeding**\n\n*尚無已簽到的參賽者。 / No checked-in entrants yet.*");
+        // Phase-neutral: this panel exists from the moment a tournament does, so
+        // it is what an organizer sees before check-in is a thing that has
+        // happened, let alone one anyone has missed.
+        return format!("**{name} — 種子名單 / Seeding**\n\n*尚無參賽者。 / No entrants yet.*");
     }
 
     let truncated = field.len().saturating_sub(SEED_DISPLAY_CAP);
@@ -71,10 +76,32 @@ pub(crate) async fn post_initial(
     Ok(message.id)
 }
 
-/// Re-renders the panel in place. Unthrottled, unlike the two player-facing
-/// panels: this only ever fires on an admin command, never on a button press, so
-/// there is no burst to coalesce. A no-op if the panel was never posted.
-pub(crate) async fn refresh(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> Result<(), Error> {
+/// Re-renders the panel in place, coalescing a burst into one edit. A no-op if
+/// the panel was never posted.
+///
+/// Throttled because the panel now follows the field from the first entrant, so
+/// the Register and Withdraw buttons re-render it — the same reason
+/// `panel::refresh` is, and they share the one `EditThrottle`, which is keyed by
+/// message id.
+pub(crate) async fn refresh(
+    http: impl CacheHttp,
+    pool: &SqlitePool,
+    throttle: &EditThrottle,
+    tournament: &Tournament,
+) -> Result<(), Error> {
+    let Some(seed_message_id) = tournament.seed_message_id else {
+        return Ok(());
+    };
+    if !throttle.try_begin_edit(to_message_id(seed_message_id), Instant::now()) {
+        return Ok(());
+    }
+    refresh_now(http, pool, tournament).await
+}
+
+/// The unconditional edit, for an admin command rather than a button press: a
+/// phase change or a reordering fires once and deserves a guaranteed edit rather
+/// than one the throttle may coalesce away.
+pub(crate) async fn refresh_now(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> Result<(), Error> {
     let (Some(seed_message_id), Some(bracket_channel_id)) = (tournament.seed_message_id, tournament.bracket_channel_id)
     else {
         return Ok(());
@@ -196,8 +223,29 @@ mod tests {
 
     #[test]
     fn renders_a_placeholder_for_an_empty_field() {
+        // Phase-neutral wording: this is what a brand-new tournament's panel says,
+        // long before check-in is a step anyone could have missed.
         let content = render("Relic Cup", &[]);
-        assert!(content.contains("尚無已簽到的參賽者"));
-        assert!(content.contains("No checked-in entrants yet"));
+        assert!(content.contains("尚無參賽者"), "{content}");
+        assert!(content.contains("No entrants yet"), "{content}");
+        assert!(!content.contains("checked-in"), "{content}");
+    }
+
+    #[test]
+    fn a_field_nobody_has_seeded_still_lists_everyone() {
+        // The registration-phase case the panel could not previously be in: no
+        // seeds anywhere, so every row shows a dash and the order is the tiering.
+        let entries = vec![
+            entry(1, "Weaker", None, None, Some(1200)),
+            entry(2, "Stronger", None, None, Some(1800)),
+        ];
+        let content = render("Relic Cup", &entries);
+        assert!(content.contains("Stronger"), "{content}");
+        assert!(content.contains("Weaker"), "{content}");
+        assert!(
+            content.find("Stronger").unwrap() < content.find("Weaker").unwrap(),
+            "unseeded go by rating:\n{content}"
+        );
+        assert!(content.contains("`  —`"), "an unseeded row shows a dash:\n{content}");
     }
 }

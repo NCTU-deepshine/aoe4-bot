@@ -213,13 +213,12 @@ pub(crate) async fn set_checkin_message_id(
     Ok(())
 }
 
-/// The seeding panel's message id — set when
-/// `/tournament close-checkin` posts the panel, and back to `None` by
-/// `/tournament reopen-registration`, which deletes that message.
+/// The seeding panel's message id — written once by `/tournament create` and
+/// again by any repost, since the panel is a fixture of the bracket channel for
+/// the whole event and nothing deletes it.
 ///
-/// Nulling it there is what stops the next `close-checkin` from editing a message
-/// that no longer exists; `commands::ensure_seed_panel` recovers anyway, but only
-/// after a wasted round trip.
+/// Still `Option`, because a first post that failed leaves no id and
+/// `commands::ensure_seed_panel` is what puts one back.
 pub(crate) async fn set_seed_message_id(
     pool: &SqlitePool,
     id: i64,

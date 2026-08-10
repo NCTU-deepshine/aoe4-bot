@@ -1679,9 +1679,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reopen_registration_drops_both_panel_handles() {
-        // The panels are deleted by the caller, so leaving either id behind points
-        // the next post at a message that no longer exists.
+    async fn reopen_registration_drops_the_checkin_handle_and_keeps_the_seeding_one() {
+        // The check-in panel is deleted by the caller, so leaving its id behind
+        // points the next post at a message that no longer exists. The seeding
+        // panel is not deleted — it belongs to the event rather than to the
+        // check-in round — so dropping its id would strand a live message and post
+        // a second one over it.
         let pool = test_pool().await;
         let tournament = setup_reopenable_tournament(&pool, "seeding").await;
 
@@ -1694,7 +1697,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(after.checkin_message_id, None);
-        assert_eq!(after.seed_message_id, None);
+        assert_eq!(after.seed_message_id, Some(888));
     }
 
     #[tokio::test]

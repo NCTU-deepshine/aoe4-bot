@@ -350,7 +350,7 @@ pub(crate) async fn reopen_registration(
     db::update_tournament_status(pool, tournament.id, "registration").await?;
     db::set_checkin_closes_at(pool, tournament.id, None).await?;
     db::set_checkin_message_id(pool, tournament.id, None).await?;
-    db::set_seed_message_id(pool, tournament.id, None).await?;
+    // `seed_message_id` deliberately survives: nothing deletes that panel.
 
     Ok(ReopenRegistrationOutcome::Reopened {
         restored_count,
