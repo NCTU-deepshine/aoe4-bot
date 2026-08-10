@@ -16,6 +16,7 @@ use crate::tournament::throttle::EditThrottle;
 use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
 use sqlx::SqlitePool;
 use std::time::Instant;
+use tracing::error;
 
 /// Entrants listed before the table is truncated. A 32-player field would blow
 /// past Discord's 2000-character message limit otherwise; the bracket itself
@@ -62,6 +63,10 @@ pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
 }
 
 /// Posts the panel to `#{slug}-bracket`, returning its id for `seed_message_id`.
+///
+/// Pins it, best-effort: a fixture of the channel for the whole event is
+/// exactly what a pin is for, and a failed pin (an admin later revokes the
+/// bot's `MANAGE_MESSAGES`, say) must not cost the post itself.
 pub(crate) async fn post_initial(
     http: impl CacheHttp,
     pool: &SqlitePool,
@@ -71,8 +76,11 @@ pub(crate) async fn post_initial(
 ) -> Result<MessageId, Error> {
     let entries = db::list_entries_for_tournament(pool, tournament_id).await?;
     let message = channel_id
-        .send_message(http, CreateMessage::new().content(render(name, &entries)))
+        .send_message(&http, CreateMessage::new().content(render(name, &entries)))
         .await?;
+    if let Err(err) = message.pin(&http).await {
+        error!("failed to pin the seeding panel for tournament {tournament_id}: {err:?}");
+    }
     Ok(message.id)
 }
 
@@ -134,7 +142,7 @@ mod tests {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: Some(user_id * 100),
+            aoe4_id: user_id * 100,
             invited_by: None,
             seed,
             suggested_seed: seed,

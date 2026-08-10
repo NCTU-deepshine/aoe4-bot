@@ -117,15 +117,6 @@ pub(crate) enum RegisterOutcome {
         display_name: String,
         entrant_number: i64,
     },
-    /// Someone already in the field bound a profile: an invitee, whose entry an
-    /// organizer created with a guessed name and nothing behind it. Distinct from
-    /// `Registered`, which would tell them they just signed up for a tournament
-    /// they were already in.
-    ProfileLinked {
-        display_name: String,
-        elo: Option<i64>,
-        entrant_number: i64,
-    },
     NeedsProfileArgument,
     AlreadyBoundToDifferentProfile {
         display_name: String,
@@ -188,23 +179,6 @@ impl RegisterOutcome {
                      (entrant #{entrant_number})."
                 ),
             ),
-            RegisterOutcome::ProfileLinked {
-                display_name,
-                elo,
-                entrant_number,
-            } => {
-                let elo_suffix = elo.map(|e| format!(" (ELO {e})")).unwrap_or_default();
-                locale.pick(
-                    format!(
-                        "已將你的遊戲帳號 **{display_name}**{elo_suffix} 連結到 **{tournament_name}** 的參賽資格\
-                         （第 {entrant_number} 位參賽者）。你原本就已在名單中。"
-                    ),
-                    format!(
-                        "Linked **{display_name}**{elo_suffix} to your place in **{tournament_name}** \
-                         (entrant #{entrant_number}). You were already in the field."
-                    ),
-                )
-            },
             RegisterOutcome::NeedsProfileArgument => locale.pick(
                 "第一次報名需要先連結你的遊戲帳號：請用 `/tournament register`，在欄位輸入你的遊戲名稱，\
                  然後從清單中選擇自己。之後再報名就不用了。"
@@ -263,14 +237,10 @@ impl RegisterOutcome {
     /// Whether this outcome actually changed the entry set — the caller's signal
     /// for whether the registration panel needs a (throttled) refresh.
     ///
-    /// `ProfileLinked` counts: the roster shows an entrant's name, and binding
-    /// replaces the organizer's guess with a real one.
     pub(crate) fn changed_state(&self) -> bool {
         matches!(
             self,
-            RegisterOutcome::Registered { .. }
-                | RegisterOutcome::Reactivated { .. }
-                | RegisterOutcome::ProfileLinked { .. }
+            RegisterOutcome::Registered { .. } | RegisterOutcome::Reactivated { .. }
         )
     }
 }
@@ -285,12 +255,7 @@ impl RegisterOutcome {
 ///
 /// Best-effort: a missing or unreachable rating leaves the column null, which
 /// seeding already tolerates. The entrant is registered either way.
-pub(crate) async fn snapshot_entry_elo(pool: &SqlitePool, tournament_id: i64, user_id: i64, aoe4_id: Option<i64>) {
-    // Takes the option rather than an id so an entrant with no profile is a
-    // no-op here instead of a guard at each of the two call sites.
-    let Some(aoe4_id) = aoe4_id else {
-        return;
-    };
+pub(crate) async fn snapshot_entry_elo(pool: &SqlitePool, tournament_id: i64, user_id: i64, aoe4_id: i64) {
     let Some(profile) = aoe4world::fetch_profile(aoe4_id).await else {
         return;
     };
@@ -326,38 +291,63 @@ pub(crate) fn binding_action(bound: Option<i64>, supplied: Option<i64>) -> Bindi
     }
 }
 
-/// Either the resolved profile, or the reason it could not be claimed.
-enum Claim {
-    Resolved { display_name: String, elo: Option<i64> },
-    Refused(RegisterOutcome),
+/// Either the resolved profile, or the reason it could not be claimed. Neutral
+/// — carries no `RegisterOutcome` — so `invite.rs` can map it to its own
+/// outcome type without depending on this module's.
+pub(crate) enum Claim {
+    Resolved {
+        display_name: String,
+        elo: Option<i64>,
+    },
+    ClaimedByAnother {
+        other_user_id: i64,
+        other_display_name: String,
+    },
+    LookupFailed,
 }
 
-/// Binds a profile to a player row that had none.
+/// Binds a profile, whether or not a player row exists yet.
 ///
 /// The same steps `rebind` takes, for the same reason: the profile has to be free,
 /// it has to exist, and the name on it replaces whatever was standing in for it.
-/// Stops at the player row, because its two callers write the entry differently —
-/// one inserts a new one, the other updates an entry the player already holds.
-async fn claim_profile(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<Claim, sqlx::Error> {
+/// Stops at the player row, because its callers write the entry differently —
+/// `register`'s two insert one, one updates an entry the player already holds,
+/// and `invite`'s claims one for someone it is putting in the field directly —
+/// which is exactly why this cannot assume the row is there: an invitee's is not.
+pub(crate) async fn claim_profile(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<Claim, sqlx::Error> {
     if let Some(other) = db::get_player_by_aoe4_id(pool, aoe4_id).await?
         && other.user_id != user_id
     {
-        return Ok(Claim::Refused(RegisterOutcome::ProfileClaimedByAnother {
+        return Ok(Claim::ClaimedByAnother {
             other_user_id: other.user_id,
             other_display_name: other.display_name,
-        }));
+        });
     }
     let Some(profile) = aoe4world::fetch_profile(aoe4_id).await else {
-        return Ok(Claim::Refused(RegisterOutcome::LookupFailed));
+        return Ok(Claim::LookupFailed);
     };
     let elo = profile.modes.rm_1v1_elo.map(|data| i64::from(data.rating));
 
-    db::update_player_binding(pool, user_id, aoe4_id).await?;
+    db::upsert_player_binding(pool, user_id, aoe4_id, &profile.name).await?;
     db::set_player_display_name(pool, user_id, &profile.name).await?;
     Ok(Claim::Resolved {
         display_name: profile.name,
         elo,
     })
+}
+
+fn claim_refusal(claim: Claim) -> RegisterOutcome {
+    match claim {
+        Claim::ClaimedByAnother {
+            other_user_id,
+            other_display_name,
+        } => RegisterOutcome::ProfileClaimedByAnother {
+            other_user_id,
+            other_display_name,
+        },
+        Claim::LookupFailed => RegisterOutcome::LookupFailed,
+        Claim::Resolved { .. } => unreachable!("callers only pass a refused claim"),
+    }
 }
 
 /// A claim by someone not yet in the field: the entry is written here.
@@ -367,38 +357,14 @@ async fn claim_and_enter(
     user_id: i64,
     aoe4_id: i64,
 ) -> Result<RegisterOutcome, sqlx::Error> {
-    let (display_name, elo) = match claim_profile(pool, user_id, aoe4_id).await? {
-        Claim::Refused(outcome) => return Ok(outcome),
-        Claim::Resolved { display_name, elo } => (display_name, elo),
+    let claim = claim_profile(pool, user_id, aoe4_id).await?;
+    let Claim::Resolved { display_name, elo } = claim else {
+        return Ok(claim_refusal(claim));
     };
-    db::insert_entry(pool, tournament.id, user_id, Some(aoe4_id), &display_name, elo).await?;
+    db::insert_entry(pool, tournament.id, user_id, aoe4_id, &display_name, elo).await?;
 
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
     Ok(RegisterOutcome::Registered {
-        entrant_number: entrant_number(&entries, user_id),
-        display_name,
-        elo,
-    })
-}
-
-/// A claim by someone already in the field — an invitee binding for the first
-/// time. Their entry carries a null `aoe4_id` and the organizer's guess at their
-/// name; both are replaced with what aoe4world says, and from here they are an
-/// ordinary entrant.
-async fn claim_and_bind_entry(
-    pool: &SqlitePool,
-    tournament: &Tournament,
-    user_id: i64,
-    aoe4_id: i64,
-) -> Result<RegisterOutcome, sqlx::Error> {
-    let (display_name, elo) = match claim_profile(pool, user_id, aoe4_id).await? {
-        Claim::Refused(outcome) => return Ok(outcome),
-        Claim::Resolved { display_name, elo } => (display_name, elo),
-    };
-    db::set_entry_binding(pool, tournament.id, user_id, aoe4_id, &display_name).await?;
-
-    let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-    Ok(RegisterOutcome::ProfileLinked {
         entrant_number: entrant_number(&entries, user_id),
         display_name,
         elo,
@@ -425,20 +391,14 @@ async fn field_full(pool: &SqlitePool, tournament: &Tournament) -> Result<Option
 }
 
 /// Signing up when the field already holds you: an ordinary entrant pressing
-/// Register twice, one coming back from a withdrawal, or an invitee binding a
-/// profile for the first time.
-///
-/// The last is why this exists at all. An invitee's entry is created by an admin
-/// with a guessed name and no profile, and binding is how they replace both —
-/// but the entry short-circuits every path that would have noticed the argument.
-/// Only an **unbound entry** looks at it: one that already carries a profile
-/// behaves exactly as it always has, so `rebind` remains the way to change a
-/// binding and the snapshot on a real entry is still immutable.
+/// Register twice, or one coming back from a withdrawal. An entry can no
+/// longer be unbound (chunk 32's own follow-on made `aoe4_id` required), so
+/// there is nothing left to catch up on here — a real snapshot is immutable,
+/// and `rebind` is the only way to change a binding.
 async fn register_existing_entry(
     pool: &SqlitePool,
     tournament: &Tournament,
     user_id: i64,
-    supplied: Option<i64>,
     entry: TournamentEntry,
     state: RegistrationState,
 ) -> Result<RegisterOutcome, sqlx::Error> {
@@ -455,35 +415,6 @@ async fn register_existing_entry(
             return Ok(full);
         }
         db::update_entry_status(pool, tournament.id, user_id, "active").await?;
-    }
-
-    // Asked of the player row, not the entry: the row is what a binding lives on,
-    // and an invitee's entry is a null snapshot of one that may since have gained
-    // a profile elsewhere.
-    if entry.aoe4_id.is_none()
-        && let Some(player) = db::get_player(pool, user_id).await?
-    {
-        match binding_action(player.aoe4_id, supplied) {
-            BindingAction::ClaimProfile(given) => return claim_and_bind_entry(pool, tournament, user_id, given).await,
-            BindingAction::RefuseDifferent => {
-                return Ok(RegisterOutcome::AlreadyBoundToDifferentProfile {
-                    display_name: player.display_name,
-                });
-            },
-            // Invited despite having bound a profile at an earlier event: there is
-            // nothing to claim, so the entry just catches up with the row.
-            BindingAction::Reenter => {
-                if let Some(aoe4_id) = player.aoe4_id {
-                    db::set_entry_binding(pool, tournament.id, user_id, aoe4_id, &player.display_name).await?;
-                    let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-                    return Ok(RegisterOutcome::ProfileLinked {
-                        entrant_number: entrant_number(&entries, user_id),
-                        display_name: player.display_name,
-                        elo: None,
-                    });
-                }
-            },
-        }
     }
 
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
@@ -513,11 +444,11 @@ pub(crate) async fn register(
         return Ok(RegisterOutcome::RegistrationClosed);
     }
 
-    // Before the invite-only gate, not after: an invitee binding a profile is
-    // running this very command in exactly this state, and refusing them here
-    // would shut the door on the people the mode exists to admit.
+    // Before the invite-only gate, not after: reporting an existing entry's
+    // status is harmless in any mode, and the one write this can still do —
+    // reactivating from a withdrawal — checks the gate itself.
     if let Some(entry) = db::get_entry(pool, tournament.id, user_id).await? {
-        return register_existing_entry(pool, tournament, user_id, aoe4_id, entry, state).await;
+        return register_existing_entry(pool, tournament, user_id, entry, state).await;
     }
 
     if !state.accepts_signups() {
@@ -529,7 +460,7 @@ pub(crate) async fn register(
     }
 
     match db::get_player(pool, user_id).await? {
-        Some(player) => match binding_action(player.aoe4_id, aoe4_id) {
+        Some(player) => match binding_action(Some(player.aoe4_id), aoe4_id) {
             BindingAction::RefuseDifferent => Ok(RegisterOutcome::AlreadyBoundToDifferentProfile {
                 display_name: player.display_name,
             }),
@@ -736,12 +667,6 @@ pub(crate) async fn unbind(pool: &SqlitePool, user_id: i64) -> Result<UnbindOutc
     let Some(player) = db::get_player(pool, user_id).await? else {
         return Ok(UnbindOutcome::NotBound);
     };
-    // Before the entry count, not after: someone an organizer put in a field has a
-    // player row and, by definition, an entry — so asking about entries first
-    // would send them to an admin about a binding they never had.
-    if player.aoe4_id.is_none() {
-        return Ok(UnbindOutcome::NotBound);
-    }
 
     let count = db::count_entries_for_player(pool, user_id).await?;
     if count > 0 {
@@ -772,7 +697,7 @@ pub(crate) async fn rebind(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Res
         return Ok(RebindOutcome::LookupFailed);
     };
     let elo = profile.modes.rm_1v1_elo.map(|data| i64::from(data.rating));
-    db::update_player_binding(pool, user_id, aoe4_id).await?;
+    db::upsert_player_binding(pool, user_id, aoe4_id, &profile.name).await?;
     // The name goes with the profile. Without this the reply names the new one
     // while the roster, the bracket and every thread keep showing the old.
     db::set_player_display_name(pool, user_id, &profile.name).await?;
@@ -816,7 +741,7 @@ mod tests {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: Some(user_id),
+            aoe4_id: user_id,
             invited_by: None,
             seed: None,
             suggested_seed: None,

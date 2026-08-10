@@ -106,7 +106,8 @@ fn pad_with_open_seats(order: &mut Vec<render::Entrant>, target: usize) {
         }
         order.push(render::Entrant {
             seed: seat,
-            name: format!("seed{seat}"),
+            // Wrapped, not bare: `seed4` alone reads as somebody's name.
+            name: format!("<seed{seat}>"),
         });
         seat += 1;
     }
@@ -244,11 +245,10 @@ pub(crate) enum Drawing {
 /// yet while the tournament has not started. Bilingual: one shared message with
 /// many readers.
 fn decorate(name: &str, chunks: Vec<String>, drawing: Drawing) -> Vec<String> {
-    // `seed4` in a bracket reads as somebody's name unless the heading says
-    // otherwise, so the padded preview explains its own placeholders.
+    // `<seed4>` in a bracket still needs the heading to say what it means.
     let open_seats = if drawing == Drawing::PreviewWithOpenSeats {
-        "尚未邀請的空位標示為 `seedN`。\n\
-         Seats still to be invited are shown as `seedN`.\n"
+        "尚未邀請的空位標示為 `<seedN>`。\n\
+         Seats still to be invited are shown as `<seedN>`.\n"
     } else {
         ""
     };
@@ -347,6 +347,18 @@ pub(crate) async fn reconcile(
                 let message = channel_id
                     .send_message(&http, CreateMessage::new().content(chunk))
                     .await?;
+                // Only the message carrying the heading — jumping to it via the
+                // pin and scrolling down reaches every chunk after it. Runs on
+                // whichever message a fresh post lands on, including a repost
+                // after an admin deletes it, so this self-heals.
+                if ordinal == 0
+                    && let Err(err) = message.pin(&http).await
+                {
+                    tracing::error!(
+                        "failed to pin the bracket message for tournament {}: {err:?}",
+                        tournament.id
+                    );
+                }
                 db::upsert_bracket_message(pool, tournament.id, ordinal, to_db_id(message.id)).await?;
                 posted += 1;
             },
@@ -385,7 +397,7 @@ mod tests {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: Some(user_id * 100),
+            aoe4_id: user_id * 100,
             invited_by: None,
             seed: None,
             suggested_seed: None,
@@ -453,7 +465,7 @@ mod tests {
         assert_eq!(rounds[0].matches.len(), 4);
 
         let names: Vec<&str> = drawn(&rounds).into_iter().map(|e| e.name.as_str()).collect();
-        for seat in ["seed4", "seed5", "seed6", "seed7", "seed8"] {
+        for seat in ["<seed4>", "<seed5>", "<seed6>", "<seed7>", "<seed8>"] {
             assert!(names.contains(&seat), "{seat} missing from {names:?}");
         }
 
@@ -461,7 +473,7 @@ mod tests {
         // so nothing in the drawing reads `(bye)` when it means "not invited yet".
         let drawing = render::render(&rounds, render::DEFAULT_WIDTH).join("\n");
         assert!(!drawing.contains("(bye)"), "{drawing}");
-        assert!(drawing.contains("seed8"), "{drawing}");
+        assert!(drawing.contains("<seed8>"), "{drawing}");
     }
 
     #[test]
@@ -480,7 +492,7 @@ mod tests {
 
         let open: Vec<u32> = drawn(&rounds)
             .into_iter()
-            .filter(|e| e.name.starts_with("seed"))
+            .filter(|e| e.name.starts_with('<'))
             .map(|e| e.seed)
             .collect();
         let mut open = open;
@@ -496,14 +508,17 @@ mod tests {
         assert_eq!(rounds.len(), 3);
         let names: Vec<&str> = drawn(&rounds).into_iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names.len(), 8);
-        assert!(names.iter().all(|n| n.starts_with("seed")), "{names:?}");
+        assert!(
+            names.iter().all(|n| n.starts_with('<') && n.ends_with('>')),
+            "{names:?}"
+        );
     }
 
     #[test]
     fn a_full_field_needs_no_open_seats() {
         let rounds = preview_rounds(&field(8), Some(8)).unwrap();
         let names: Vec<&str> = drawn(&rounds).into_iter().map(|e| e.name.as_str()).collect();
-        assert!(!names.iter().any(|n| n.starts_with("seed")), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with('<')), "{names:?}");
     }
 
     #[test]
@@ -800,9 +815,9 @@ mod tests {
 
     #[test]
     fn a_padded_preview_explains_what_seed_n_means() {
-        // Without this a reader takes `seed4` for somebody's name.
+        // Without this a reader takes `<seed4>` for somebody's name.
         let padded = decorate("Relic Cup", vec!["body".to_string()], Drawing::PreviewWithOpenSeats);
-        assert!(padded[0].contains("seedN"), "{}", padded[0]);
+        assert!(padded[0].contains("<seedN>"), "{}", padded[0]);
         assert!(padded[0].contains("still to be invited"), "{}", padded[0]);
         assert!(padded[0].contains("尚未邀請的空位"), "{}", padded[0]);
         // Still a preview, so it keeps saying so.
@@ -810,7 +825,7 @@ mod tests {
 
         for drawing in [Drawing::Preview, Drawing::Real] {
             let plain = decorate("Relic Cup", vec!["body".to_string()], drawing);
-            assert!(!plain[0].contains("seedN"), "{drawing:?}: {}", plain[0]);
+            assert!(!plain[0].contains("<seedN>"), "{drawing:?}: {}", plain[0]);
         }
     }
 

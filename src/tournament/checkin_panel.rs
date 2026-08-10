@@ -174,7 +174,7 @@ mod tests {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: Some(user_id),
+            aoe4_id: user_id,
             invited_by: None,
             seed: None,
             suggested_seed: None,

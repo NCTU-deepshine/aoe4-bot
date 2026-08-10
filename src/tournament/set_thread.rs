@@ -484,9 +484,10 @@ pub(crate) async fn player(pool: &SqlitePool, tournament_id: i64, user_id: i64) 
     Ok(Player {
         user_id,
         seed: entry.as_ref().and_then(|e| e.seed).unwrap_or_default(),
-        // A profile on the entry is what makes the name aoe4world's rather than
-        // an organizer's — a vanished entry is a fallback id, verified by nobody.
-        verified: entry.as_ref().is_some_and(|e| e.aoe4_id.is_some()),
+        // An entry can no longer be unbound, so the only way this reads
+        // unverified any more is a vanished entry — the fallback raw id,
+        // verified by nobody.
+        verified: entry.is_some(),
         name: entry.map_or_else(|| user_id.to_string(), |e| e.display_name),
     })
 }

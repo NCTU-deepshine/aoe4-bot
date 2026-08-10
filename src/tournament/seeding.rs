@@ -25,12 +25,11 @@ pub(crate) fn seedable(entries: &[TournamentEntry]) -> Vec<&TournamentEntry> {
         .collect()
 }
 
-/// The profiles in a field there is anything to look up for.
-///
-/// Pure, so the property that matters — an entrant with no profile costs no
-/// request — is checked here rather than inferred from the loop below.
+/// The profiles in a field there is anything to look up for — every one of
+/// them, since chunk 32's own follow-on: an entrant with no profile is no
+/// longer a state the schema can hold.
 pub(crate) fn rated_ids(field: &[&TournamentEntry]) -> Vec<i64> {
-    field.iter().filter_map(|e| e.aoe4_id).collect()
+    field.iter().map(|e| e.aoe4_id).collect()
 }
 
 /// The default order, as user ids in seed order.
@@ -226,16 +225,10 @@ pub(crate) async fn refresh_ratings(
 
     let mut atr_count = 0;
     for entry in &field {
-        // Skipped outright rather than written as nulls: an entrant with no profile
-        // has nothing to look up, and blanking the row would discard an `atr` an
-        // organizer had set by hand.
-        let Some(aoe4_id) = entry.aoe4_id else {
-            continue;
-        };
-        let elo = aoe4world::fetch_profile(aoe4_id)
+        let elo = aoe4world::fetch_profile(entry.aoe4_id)
             .await
             .and_then(|p| p.modes.rm_1v1_elo.map(|e| i64::from(e.rating)));
-        let atr = atr_by_id.get(&aoe4_id).copied();
+        let atr = atr_by_id.get(&entry.aoe4_id).copied();
         if atr.is_some() {
             atr_count += 1;
         }
@@ -269,7 +262,7 @@ mod tests {
         TournamentEntry {
             tournament_id: 1,
             user_id,
-            aoe4_id: Some(user_id * 100),
+            aoe4_id: user_id * 100,
             invited_by: None,
             seed: None,
             suggested_seed: None,
@@ -284,28 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn only_entrants_with_a_profile_cost_a_lookup() {
-        // An entrant with none has nothing to fetch, so they must not reach the
-        // batched request at all — order preserved for everyone else.
-        let mut unbound = entry(2, "Invitee", None, None);
-        unbound.aoe4_id = None;
-        let entries = vec![
-            entry(1, "Bound", None, Some(1000)),
-            unbound,
-            entry(3, "Also", None, Some(900)),
-        ];
+    fn every_entrant_in_the_field_is_a_profile_to_look_up() {
+        // Chunk 32's own follow-on made an unbound entrant unreachable, so the
+        // batched request now covers the whole field, in order.
+        let entries = vec![entry(1, "Bound", None, Some(1000)), entry(2, "Also", None, Some(900))];
         let field = seedable(&entries);
-        assert_eq!(rated_ids(&field), vec![100, 300]);
-    }
-
-    #[test]
-    fn a_field_of_entrants_without_profiles_asks_for_nothing() {
-        let mut one = entry(1, "A", None, None);
-        one.aoe4_id = None;
-        let mut two = entry(2, "B", None, None);
-        two.aoe4_id = None;
-        let entries = vec![one, two];
-        assert!(rated_ids(&seedable(&entries)).is_empty());
+        assert_eq!(rated_ids(&field), vec![100, 200]);
     }
 
     #[test]

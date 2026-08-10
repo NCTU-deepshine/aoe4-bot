@@ -19,7 +19,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use regex::Regex;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, PermissionOverwrite,
-    PermissionOverwriteType, Permissions, RoleId, User, UserId,
+    PermissionOverwriteType, Permissions, ResolvedValue, RoleId, User, UserId,
 };
 use serenity::json::json;
 use tracing::{error, info};
@@ -141,7 +141,13 @@ async fn auto_complete_id(ctx: Context<'_>, username: &str) -> impl Iterator<Ite
         let hint = Locale::from_context(ctx).pick("請輸入你的遊戲名稱…", "Type your in-game name…");
         return vec![AutocompleteChoice::new(hint, json!(NO_PROFILE_PICKED))].into_iter();
     }
+    aoe4_search_choices(username).await.into_iter()
+}
 
+/// Searches aoe4world by name and formats the results as choices, keyed by
+/// profile id — the part `auto_complete_id` and `auto_complete_invite_profile`
+/// share once past their differing empty-field behavior.
+async fn aoe4_search_choices(username: &str) -> Vec<AutocompleteChoice> {
     info!("search aoe4 world profiles with username {}", username);
     let mut players = match search_players(username).await {
         None => vec![],
@@ -158,8 +164,50 @@ async fn auto_complete_id(ctx: Context<'_>, username: &str) -> impl Iterator<Ite
             ))
         })
         .take(10)
-        .collect::<Vec<_>>()
-        .into_iter()
+        .collect()
+}
+
+/// `/tournament invite`'s profile picker. Unlike `auto_complete_id`, an empty
+/// field is not just a hint: if `user` is already picked, this looks up
+/// whether that Discord account already has a bound aoe4world profile and
+/// offers it as the one obvious suggestion — before a single keystroke, and
+/// which is also what keeps the picker from being how the wrong profile gets
+/// chosen in the first place.
+async fn auto_complete_invite_profile(ctx: Context<'_>, partial: &str) -> impl Iterator<Item = AutocompleteChoice> {
+    // The field is mandatory, so there is no sentinel "nothing picked" choice
+    // to offer here the way `auto_complete_id`'s optional one does — an empty
+    // list, matching `autocomplete_entrant`/`autocomplete_set_player`'s own
+    // required-field precedent, simply asks for more to search on.
+    if partial.trim().is_empty() {
+        if let Some(user_id) = already_selected_user(ctx) {
+            let pool = &ctx.data().database;
+            if let Ok(Some(player)) = tournament_db::get_player(pool, to_db_id(user_id)).await
+                && let Ok(profile_id) = i32::try_from(player.aoe4_id)
+            {
+                let label = Locale::from_context(ctx).pick(
+                    format!("✅ 已連結：{}", player.display_name),
+                    format!("✅ Already linked: {}", player.display_name),
+                );
+                return vec![AutocompleteChoice::new(label, json!(profile_id))].into_iter();
+            }
+        }
+        return Vec::new().into_iter();
+    }
+    aoe4_search_choices(partial).await.into_iter()
+}
+
+/// The `user` option's value, if the admin has already picked one — read out
+/// of the in-progress interaction rather than a second argument, since
+/// Discord sends every filled-in option along with an autocomplete request
+/// for a later one.
+fn already_selected_user(ctx: Context<'_>) -> Option<UserId> {
+    let Context::Application(app) = ctx else {
+        return None;
+    };
+    app.args.iter().find_map(|opt| match &opt.value {
+        ResolvedValue::User(user, _) if opt.name == "user" => Some(user.id),
+        _ => None,
+    })
 }
 
 #[poise::command(slash_command, guild_only, check = "home_only")]
@@ -457,14 +505,16 @@ async fn category_name(ctx: Context<'_>, category_id: Option<ChannelId>) -> Resu
 }
 
 /// The overwrites for an output channel: `@everyone` may read but not
-/// post — **and the bot may post**.
+/// post — **and the bot may post, and pin**.
 ///
-/// The second half is not redundant. A deny on `@everyone` applies to the bot as
-/// much as to anyone else, and without an allow of its own every panel and
-/// bracket post into these channels fails with 403 Missing Permissions. That is
-/// exactly what happened in production: the bracket preview never worked once,
-/// and the failure was only visible in the logs because the redraw is
-/// best-effort.
+/// Neither half of the bot's allow is redundant. A deny on `@everyone` applies
+/// to the bot as much as to anyone else, and without `SEND_MESSAGES` of its own
+/// every panel and bracket post into these channels fails with 403 Missing
+/// Permissions — that is exactly what happened in production once, and the
+/// failure was only visible in the logs because the redraw is best-effort.
+/// `MANAGE_MESSAGES` is the same story for pinning: Discord requires it to pin
+/// or unpin a message, and a channel-level overwrite can grant it even though
+/// the bot holds nothing like it at the guild level.
 fn read_only_overwrites(everyone: RoleId, bot: UserId) -> Vec<PermissionOverwrite> {
     vec![
         PermissionOverwrite {
@@ -473,7 +523,7 @@ fn read_only_overwrites(everyone: RoleId, bot: UserId) -> Vec<PermissionOverwrit
             kind: PermissionOverwriteType::Role(everyone),
         },
         PermissionOverwrite {
-            allow: Permissions::SEND_MESSAGES,
+            allow: Permissions::SEND_MESSAGES | Permissions::MANAGE_MESSAGES,
             deny: Permissions::empty(),
             kind: PermissionOverwriteType::Member(bot),
         },
@@ -740,29 +790,30 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-// Puts a server member in the field without a sign-up and without an aoe4world
-// profile, which is how a curated event is composed: the organizers already know
-// who is playing. The name is free text, deliberately not the profile
-// autocomplete — its whole purpose is resolving a profile that here does not
-// exist. Re-inviting the same person corrects the name.
-/// Puts a member in the field. The name is theirs in game, not their Discord name.
+// Puts a server member in the field without a sign-up, against a real
+// aoe4world profile, which is how a curated event is composed: the organizers
+// already know who is playing and can look their account up. The profile is
+// required — a manual invite means the admin already has it in hand — and
+// re-inviting the same person corrects it.
+/// Puts a member in the field, linked to their aoe4world profile.
 #[poise::command(
     slash_command,
     guild_only,
     check = "tournament_only",
     check = "tournament_manage_only",
-    description_localized("zh-TW", "直接將成員加入參賽名單。名稱請填對方的遊戲名稱，而非 Discord 名稱。")
+    description_localized("zh-TW", "直接將成員加入參賽名單，並連結對方的遊戲帳號。")
 )]
 pub async fn invite(
     ctx: Context<'_>,
     #[description = "The member to put in the field"]
     #[description_localized("zh-TW", "要加入名單的成員")]
     user: User,
-    #[description = "Their in-game name — what their opponent searches for in the lobby browser"]
-    #[description_localized("zh-TW", "對方的遊戲名稱 — 對手要在遊戲大廳搜尋的名稱")]
-    in_game_name: String,
+    #[description = "Their aoe4world profile — search by name"]
+    #[description_localized("zh-TW", "對方的遊戲帳號 — 輸入名稱搜尋")]
+    #[autocomplete = "auto_complete_invite_profile"]
+    profile: i32,
     #[description = "Optional seed; everyone between shifts along"]
-    #[description_localized("zh-TW", "選填的種子序，其他人會順移")]
+    #[description_localized("zh-TW", "選填的種子序，其他人會往後順移")]
     seed: Option<i64>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -776,7 +827,7 @@ pub async fn invite(
         pool,
         &tournament,
         to_db_id(user.id),
-        &in_game_name,
+        i64::from(profile),
         to_db_id(ctx.author().id),
         seed,
     )
@@ -785,14 +836,11 @@ pub async fn invite(
     ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
 
     if outcome.changed_state() {
+        // Unconditional, like `uninvite`'s: the roster changed whether or not a
+        // seed was placed, and the seed panel lists the roster.
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+        seed_panel::refresh_now(ctx.http(), pool, &tournament).await?;
         bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
-        if outcome.changed_seeding() {
-            // Re-read: the placement rewrote the whole order, and the panel is
-            // drawn from a tournament row whose seed_source has just changed.
-            let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
-            seed_panel::refresh_now(ctx.http(), pool, &tournament).await?;
-        }
     }
     Ok(())
 }
@@ -1480,6 +1528,22 @@ pub async fn seed_list(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
     let channel_id = to_channel_id(bracket_channel_id);
+
+    // Delete whatever the old handle points at first — otherwise a repost
+    // orphans a stale duplicate rather than replacing it. Best-effort: the
+    // common case by far is that an admin already removed it by hand, and a
+    // 404 on an already-gone message is exactly as expected as it is for
+    // `delete_checkin_panel`.
+    if let Some(old_message_id) = tournament.seed_message_id
+        && let Err(err) = channel_id
+            .delete_message(ctx.http(), to_message_id(old_message_id))
+            .await
+    {
+        error!(
+            "failed to delete the previous seeding panel for tournament {}: {err:?}",
+            tournament.id
+        );
+    }
 
     // Always a fresh post rather than an edit: the point of `list` is to bring a
     // buried or deleted panel back into view, which editing in place cannot do.
@@ -2234,6 +2298,9 @@ mod tests {
             .find(|o| o.kind == PermissionOverwriteType::Member(bot))
             .expect("the bot should be allowed");
         assert!(allow.allow.contains(Permissions::SEND_MESSAGES));
+        // Needed to pin the seed and bracket panels — without it, pinning 403s
+        // the same way an unposted `SEND_MESSAGES` allow once did.
+        assert!(allow.allow.contains(Permissions::MANAGE_MESSAGES));
         assert!(
             !allow.deny.contains(Permissions::SEND_MESSAGES),
             "the bot's own overwrite must not deny what it allows"

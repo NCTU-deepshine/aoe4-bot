@@ -381,11 +381,12 @@ A seat can only be claimed by a logged-in account, so **every entrant must regis
 their first set. That is an event-running task, not a bot feature: check-in is the natural place to remind
 people (§8.3).
 
-> **The draft tool and aoe4world are two unrelated identities, and only the aoe4world one is optional.** An
-> entrant invited by an admin (§8.3) has no aoe4world profile — that is the point of the verb — but they still
-> need a **draft-tool** account, because that is what claims a seat. Nothing about invited entrants relaxes the
-> requirement in this section. An invite-only event whose players are new to both will need the reminder more
-> than an open one, not less, and its organizers have no roster of aoe4world names to check against.
+> **The draft tool and aoe4world are two unrelated identities.** A resolved aoe4world profile (§4) proves who
+> someone is on the ladder; it authenticates nothing on the draft tool. Every entrant, invited or
+> self-registered, still needs a separate **draft-tool** account, because that is what claims a seat — nothing
+> about an admin's invite (§8.3) relaxes the requirement in this section. An invite-only event whose players are
+> new to both will need the reminder more than an open one, not less, and its organizers have no roster of
+> draft-tool accounts to check against.
 
 Two properties of tool identity to keep in mind, both enforced in `lib/socket/matchHandlers.ts`:
 
@@ -521,10 +522,8 @@ create table if not exists tournament_rounds (
 --    entries are never deleted, so even a withdrawn one blocks it.
 create table if not exists tournament_players (
   user_id bigint primary key,               -- discord user; one main profile each
-  aoe4_id bigint unique,                    -- and one user per profile. NULL = an admin's invitee,
-                                            -- who has no aoe4world profile at all (§8.3, chunk 31)
-  display_name text not null,               -- player-editable; from aoe4world at first sign-up, or the
-                                            -- organizer's assertion for an invitee
+  aoe4_id bigint not null unique,           -- and one user per profile (§8.3)
+  display_name text not null,               -- player-editable; from aoe4world at first sign-up
   bound_at timestamp not null default (datetime('now')),
   updated_at timestamp
 );
@@ -558,7 +557,7 @@ create table if not exists tournament_round_presets (
 create table if not exists tournament_entries (
   tournament_id integer not null references tournaments(id) on delete cascade,
   user_id bigint not null references tournament_players(user_id),
-  aoe4_id bigint,                           -- snapshot, not a fk; see above. NULL for an invitee
+  aoe4_id bigint not null,                  -- snapshot, not a fk; see above. always resolved (§8.3)
   invited_by bigint,                        -- null = self-registered; set = an admin put them in (§8.3)
   seed integer,                             -- FINAL seed; the organizer may override
   suggested_seed integer,                   -- what the bot computed, kept for audit
@@ -676,21 +675,25 @@ create table if not exists tournament_games (
 - **No `map_picked_by` column.** `MAP_SELECT` records who picked, in the draft.
 - **Foreign keys.** sqlx enables `pragma foreign_keys` by default on `SqliteConnectOptions`. Assert this in a
   test — every `references` above is inert if it ever changes.
-- **`aoe4_id` is nullable, and that is what an invitee is.** An admin can put a Discord member straight into a
-  field (§8.3, `/tournament invite`), and such an entrant has no aoe4world profile at all. `unique` on a
-  nullable column is exactly the constraint wanted: SQLite treats NULLs as distinct, so a tournament may hold any
-  number of unbound players while "one Discord user per real profile" is still enforced. What the bot gives up
-  for them is everything derived from that profile — no ELO, no ATR, so §6's tiering sorts them last by name; no
-  cross-check against aoe4world results (§11); and a `display_name` that is an organizer's assertion rather than
-  a verified name, which is why §8.7's set panel marks it as unverified. Binding later is an ordinary
-  `/tournament register` or `/tournament rebind`, after which they are indistinguishable from anyone else.
-- **Relaxing this column is a table rebuild, not an `alter table`.** SQLite has no `ALTER COLUMN`, and
-  `tournament_players(user_id)` is referenced by `tournament_entries`, `tournament_sets` (twice) and
-  `tournament_games`, so `drop table` fires an implicit delete that violates them. The rebuild therefore needs
-  `pragma foreign_keys = off`, which is a **no-op inside a transaction** — so that migration is sqlx's
-  `-- no-transaction` kind, and it must create-copy-drop-rename rather than renaming the old table first, which
-  with `legacy_alter_table` off would rewrite the `REFERENCES` clauses in all three dependants. Those same keys
-  are why an invitee cannot live in a table of their own: one reaching a set would fail `tournament_sets`' key.
+- **Both `aoe4_id` columns are `not null`.** An unbound entrant, and a player row with nothing bound, were
+  originally what an admin's invite produced (§8.3), before `/tournament invite` made the profile mandatory —
+  nothing writes either without one any more, so both constraints now say so at the schema level rather than
+  only in the application (`0010_required_aoe4_id.sql`, `0011_required_player_aoe4_id.sql`). `unique` on
+  `tournament_players.aoe4_id` predates and survives this unchanged: SQLite treats NULLs as distinct, so
+  nullable-and-unique was always about letting many unbound rows coexist while still enforcing one Discord
+  user per real profile — `not null` just removes the "many unbound rows" half of that, since there is no
+  longer a way to create one. The two rows that predated the tightening (both from before `/tournament invite`
+  resolved a profile) were deleted by hand ahead of `0011`, which is what let it run at all — the migration
+  itself does not touch data, only the constraint.
+- **The `tournament_players` rebuild needed `pragma foreign_keys = off`; `tournament_entries`' did not.**
+  SQLite has no `ALTER COLUMN`, so both are table rebuilds, but `tournament_players(user_id)` is referenced by
+  `tournament_entries`, `tournament_sets` (twice) and `tournament_games`, while nothing holds a foreign key into
+  `tournament_entries` itself. Disabling the check is a **no-op inside a transaction**, so `0011` is sqlx's
+  `-- no-transaction` kind and `0010` is not. Both create-copy-drop-rename rather than renaming the old table
+  first, which with `legacy_alter_table` off would rewrite the `references` clauses in every dependant to point
+  at the renamed-away table, which then gets dropped out from under them. Those same keys are why an invitee
+  could never have lived in a table of their own even while unbound: one reaching a set would fail
+  `tournament_sets`' key.
 - **`invited_by` is on the entry, not the player.** Being invited is a fact about one tournament — the same
   person may be invited to one and sign up for the next — and §8.3's no-show sweep needs it per entry.
 
@@ -755,9 +758,9 @@ per entrant and may reassign any seed; only `seed` is authoritative. The tiering
 mixed professional/guild field, **not** a claim that ATR and ELO are comparable — say so in the command output
 as well as here.
 
-An entrant with **neither** rating — an invitee with no aoe4world profile (§4), or anyone the ELO fetch failed
-for — sorts after every rated entrant, then by name. That is the reason every rating column is nullable and the
-reason seeding must never drop an unrated player.
+An entrant with **neither** rating — unranked in 1v1 on aoe4world, or anyone the ELO fetch failed for — sorts
+after every rated entrant, then by name. That is the reason every rating column is nullable and the reason
+seeding must never drop an unrated player.
 
 ### A hand-made order outlives the rating pass
 
@@ -1015,16 +1018,23 @@ consequence: a withdrawal during `seeding` leaves a gap in the seed order, and `
 
 #### Invited entrants, and an invite-only field
 
-**An admin can put a Discord member straight into the field.** `/tournament invite` writes the entry itself,
-with an in-game name the admin supplies and optionally a seed — no aoe4world profile, no sign-up, no
-autocomplete against a profile that may not exist (§4). It is how a curated event is composed: the organizers
-already know who is playing and in what order.
+**An admin can put a Discord member straight into the field.** `/tournament invite` writes the entry itself, and
+optionally a seed — no sign-up required. It is how a curated event is composed: the organizers already know who
+is playing, so **the profile is required, not optional** — there is no "invite them unverified" path, and every
+successful invite is rated exactly like a self-registered entrant from the moment it lands.
 
-- **The in-game name is required, not derived from Discord.** §8.7's set panel puts it in front of each player as
-  the name to search for in the game's lobby browser, so a Discord handle there is a wrong instruction at the
-  moment two players are trying to find each other. An admin who does not know it can type the Discord name and
-  own that choice, which is better than the bot silently substituting one. Re-inviting the same person updates
-  the name, so a typo needs no separate verb.
+- **The profile resolves against aoe4world exactly like `/tournament register` does** — the same search-by-name
+  autocomplete, keyed to the same profile id. Picking one claims it immediately: the entry is written with the
+  real name and a snapshotted ELO, no separate sign-up step ever needed. The autocomplete's own prefill —
+  offering the account's existing binding, if any, the moment `user` is picked and before a keystroke — is what
+  makes this fast for the common case of inviting someone who has played before.
+- **A profile is never silently rebound.** The same guard `register` uses — an unbound account may claim a
+  profile, a bound one never gets overridden — applies here too: picking a profile that conflicts with what this
+  Discord account is *already* linked to (from an earlier tournament, say) is refused outright, pointing at
+  `/tournament rebind`. The prefill is what is meant to keep that refusal rare rather than routine.
+- **Re-inviting the same person is a correction, not a second verb.** Picking the profile they are already bound
+  to reuses it with no fetch; picking a genuinely new one — an admin who mis-searched the first time — claims it
+  the same way a fresh invite does.
 - **An invitee is exempt from the no-show sweep**, because check-in was never asked of them: the sweep skips
   entries with an `invited_by`. The alternative — stamping `checked_in_at` at invite time — is a lie that
   unravels twice, since `reopen-registration` clears that column and the check-in counter would then report a
@@ -1139,7 +1149,7 @@ Discord allows only two levels of nesting, and **a command cannot be both a grou
 | `/tournament rebind in_game_name` | anyone | Change which game account you're linked to; refused during a running event |
 | `/tournament unbind` | anyone | Unlink your game account entirely; refused while you have any entry |
 | `/tournament withdraw` | anyone | Before start only · also a button · stays available in invite-only |
-| `/tournament invite user in_game_name [seed]` | admin | Puts a server member in the field with no aoe4world profile; the name is theirs in game |
+| `/tournament invite user profile [seed]` | admin | Puts a server member in the field, linked to a required aoe4world profile — resolves like `register`, prefilled from an existing binding |
 | `/tournament uninvite user` | admin | Removes an invited entrant; refused for a self-registered one (§12) |
 | `/tournament lock` | admin | Invite-only only: closes registration straight to `seeding`, with no check-in |
 | `/tournament open-checkin [minutes]` | admin | Posts the check-in panel |
@@ -1207,9 +1217,9 @@ MarineLorD · Puppypaw · Wam01 · Anotand · …
 - **Changing your display name** is a separate action from rebind — it never touches which aoe4 profile is
   bound, and unlike rebind is not blocked by a running tournament, since a name carries no result attribution
   (§4 notes). It writes through to every active entry immediately.
-- **An invitee binding for the first time** uses the same `/tournament register in_game_name:<profile>` as anyone
-  else. They already have a player row, with no profile on it, so registering claims one — and their real
-  aoe4world name replaces the organizer's guess. From then on they are an ordinary entrant with ratings.
+- **An invitee is already bound.** `/tournament invite` resolves the profile itself (§8.3), so an invited
+  entrant reaches this panel exactly as rated and as verified as anyone who signed up on their own — there is
+  no separate first-registration step left for them to take.
 
 **Invite-only changes the panel's heading, its explanation, and only one of its buttons:**
 
@@ -1722,9 +1732,6 @@ than panicking (buttons from an older deploy will be pressed).
 
 Tracked separately; not part of this design.
 
-- **An unbound entrant cannot be cross-checked.** The follow-up below is keyed on `profile_id`, which an
-  invited entrant does not have (§4), so any such check has to skip them rather than treat a missing result as a
-  discrepancy. The same is true of every future feature that resolves an entrant through aoe4world.
 - **Result cross-checking.** `GET /api/v0/players/:profile_id/games?opponent_profile_id=X` returns games
   between two players with map, civs and winner, and supports `since=`/`updated_since=` for cheap incremental
   polling. This could verify the draft tool's results independently. Once migrations exist, adding

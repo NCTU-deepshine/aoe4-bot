@@ -81,11 +81,12 @@ than in whatever landed last.
 **An invited entrant is still a Discord member.** `/tournament invite` names one, and the entry is keyed on their
 Discord id — which is how they are notified, added to their set thread, mentioned in its panel and handed their
 draft link. Every one of the eight has a Discord account in every version of this event; what an invite removes
-is the aoe4world profile and the sign-up step, not the person.
+is the sign-up step, not the person, and not the profile either — `/tournament invite`'s profile argument
+resolves against aoe4world exactly like `/tournament register` does, so an invitee ends up rated exactly like a
+self-registered one from the moment the invite lands.
 
-An all-invited field is also entirely unrated, so §6's tiering falls back to alphabetical order. The seeding that
-matters is therefore the organizers' own — which chunk 30 has already made survive the rating pass and the one
-backward lifecycle edge.
+An all-invited field is therefore rated same as a self-registered one — the seeding that matters is still the
+organizers' own, which chunk 30 has already made survive the rating pass and the one backward lifecycle edge.
 
 ### M2 — running one comfortably
 
@@ -308,24 +309,69 @@ call sites need no guard of their own, and three fixes the nullability exposes: 
 unbound player who supplies a profile, `unbind` should answer "not bound" rather than "blocked by entries", and
 `rebind` should finally write the display name through `db::set_player_display_name`, which has had no production
 caller since it was written.
-**This migration is a table rebuild, not an `alter table`, and cannot run in sqlx's transaction** — see §4's
-notes for why and for the exact shape. It is the highest-risk commit in this group by a distance.
+**This migration is a table rebuild, not an `alter table`** (SQLite has no `ALTER COLUMN`), **but it does not
+preserve data.** `tournament_players(user_id)` is referenced by `tournament_entries`, and rebuilding a table
+others hold foreign keys into needs `pragma foreign_keys = off` to survive the `drop table` — a no-op inside a
+transaction, which would force the whole migration untransacted. `0007_optional_aoe4_id.sql` sidesteps that
+instead: `delete from tournaments; delete from tournament_players;` first, emptying both tables (and, via
+cascade, everything under them) before either is dropped and recreated, so the foreign keys are satisfied at
+every step and this stays an ordinary transacted migration. That trade only reads as free because nothing real
+had been run yet — the note this leaves for whoever changes the column again is in §4.
 Design: §4 (the schema block and its notes on nullable `aoe4_id`).
-Gate: the migrator against a **populated** database preserves every row and leaves `pragma foreign_key_check`
-clean — every existing migrator test starts from empty, so none of them would catch a data-losing rebuild. Also:
-many null `aoe4_id`s accepted while a duplicate real one is still rejected; foreign keys enforced again
-afterwards; the ratings pass making no HTTP call for an unbound entrant.
+Gate: every existing tournament, entrant, bracket, set and game is gone after the migration runs, while the
+ranked board's own `accounts` table — untouched, unrelated keys — survives; foreign keys enforced again
+afterwards, with `pragma_foreign_key_check` clean; many null `aoe4_id`s accepted while a duplicate real one is
+still rejected; the ratings pass making no HTTP call for an unbound entrant.
 
 **32. `/tournament invite` and `/tournament uninvite`**
 `tournament_entries.invited_by`, and the no-show sweep skipping entries that have one — with the reasoning
 recorded, because stamping `checked_in_at` instead is the tempting version and it unravels twice.
 `db::invite_player_and_entry` mirrors `register_new_player_and_entry`: one transaction, null `aoe4_id`. The
 optional seed goes through `seeding::reorder` + `set_seed_order`, never a direct `seed` write, so
-`unique (tournament_id, seed)` is never touched. `in_game_name` is required free text — not the profile
-autocomplete, whose whole purpose is resolving a profile that here does not exist. `uninvite` is scoped to
-invited entries and re-writes the order so the field stays startable. `set_thread::Player` gains `verified`, and
-the seat line marks an unverified name: chunk 16's panel presents that name as the one to search for in the lobby
-browser, which is the only landed code whose *behaviour*, not just its types, is wrong for an unbound entrant.
+`unique (tournament_id, seed)` is never touched. `uninvite` is scoped to invited entries and re-writes the
+order so the field stays startable. `set_thread::Player` gains `verified`, and the seat line marks an
+unverified name: chunk 16's panel presents that name as the one to search for in the lobby browser, which is
+the only landed code whose *behaviour*, not just its types, is wrong for an unbound entrant.
+
+**A follow-on revisited the name, three times.** `in_game_name` shipped as required free text, on the
+reasoning that the profile autocomplete's whole purpose was resolving a profile that here does not exist. It
+first became an *optional* profile pick with a Discord-name fallback — then, since a manual invite means the
+admin already has the right account in hand, the fallback was dropped and the profile made mandatory again:
+there is no "invite them unverified" path any more, and every invite lands rated. It resolves through the same
+autocomplete `register` uses, reusing `registration::{binding_action, claim_profile}` (the latter promoted to
+`pub(crate)` and its refusal made neutral so this module need not depend on `RegisterOutcome`) — prefilled with
+whatever the invitee's Discord account already has bound, so the common case of inviting someone who has
+played before costs no typing. The argument is never allowed to *rebind*: the same guard `register` uses
+refuses a pick that conflicts with an existing binding outright, rather than overriding it or silently keeping
+the old one — nothing written either way.
+
+With every entry now landing bound, `tournament_entries.aoe4_id` stopped being merely never-null-in-practice
+and became `not null` on the schema (`0010_required_aoe4_id.sql`, a plain transacted rebuild — nothing else
+holds a foreign key into this table). `invite_player_and_entry` and the separate `set_entry_binding` call that
+used to follow it collapse into one `upsert_invited_entry`, an `insert ... on conflict do update` that writes
+`aoe4_id` in the same statement instead of a second one — a correctness fix as much as a simplification, since
+the two-statement version could never have satisfied the new constraint on its first write. `update_player_binding`
+becomes `upsert_player_binding` for the same reason: the insert-or-update it used to depend on happening
+separately in `invite.rs` now happens in the one place that binds a player. The constraint change also exposed a
+latent gap in `register()`'s own `Reenter` branch — an existing-but-unbound player row reaching that branch
+would have tried to write an entry with no `aoe4_id`, which the schema now forbids — closed with the same
+refusal a brand-new player already gets.
+
+`tournament_players.aoe4_id` followed the same way, once the two live rows that predated a resolved-profile
+invite — an admin's direct placeholders from before this follow-on — were deleted by hand
+(`0011_required_player_aoe4_id.sql`). Unlike 0010's, this rebuild has real dependents:
+`tournament_entries`, `tournament_sets` (twice) and `tournament_games` all hold live foreign keys into
+`tournament_players(user_id)`, which chunk 31's own original relaxation (`0007_optional_aoe4_id.sql`) sidestepped
+entirely by deleting every table's rows first, since nothing mattered yet at the time. This one instead needs
+`pragma foreign_keys = off` to survive the `drop table`, which is a no-op inside a transaction — sqlx's
+`-- no-transaction` migration kind — and creates the replacement table under its own name before dropping the
+old one, rather than renaming the old one out of the way first, which with `legacy_alter_table` off would
+rewrite the `references` clauses in all three dependants to point at a table about to disappear.
+`insert_player_if_absent` — already redundant once `upsert_player_binding` started creating the row itself —
+is deleted outright rather than merely retyped, and every one of its ~40 fixture call sites in the test suite
+now goes through `upsert_player_binding` instead. `registration::unbind`'s own `aoe4_id.is_none()` guard, which
+existed to word "nothing bound" for a player row that had one but no profile, is now unreachable and dropped:
+a player row existing is itself the definition of bound.
 Design: §8.3 ("Invited entrants, and an invite-only field"), §8.4, §8.5, §8.7.
 Gate: §10 — an invitee survives `close-checkin` without checking in while a self-registered no-show does not; the
 check-in counter excludes invitees; an invite past the cap is refused; `uninvite` refuses a self-registered entry;

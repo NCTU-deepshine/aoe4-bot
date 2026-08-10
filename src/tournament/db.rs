@@ -599,9 +599,7 @@ pub(crate) async fn get_round(pool: &SqlitePool, id: i64) -> Result<Option<Tourn
 #[derive(FromRow)]
 pub(crate) struct TournamentPlayer {
     pub user_id: i64,
-    /// `None` for someone an organizer put in a field directly: they have no
-    /// aoe4world profile at all, and so no ratings and an unverified name.
-    pub aoe4_id: Option<i64>,
+    pub aoe4_id: i64,
     pub display_name: String,
     pub bound_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -638,35 +636,6 @@ pub(crate) async fn get_player_by_aoe4_id(
     .inspect_err(log_db_error)
 }
 
-/// A no-op if `user_id` already has a bound profile — registration uses this to
-/// write the player row on a first sign-up only, and
-/// otherwise falls through to `insert_entry` against the row that's already there.
-pub(crate) async fn insert_player_if_absent(
-    pool: &SqlitePool,
-    user_id: i64,
-    aoe4_id: Option<i64>,
-    display_name: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r"
-        insert into tournament_players (user_id, aoe4_id, display_name)
-        values (?1, ?2, ?3)
-        on conflict (user_id) do nothing
-        ",
-    )
-    .bind(user_id)
-    .bind(aoe4_id)
-    .bind(display_name)
-    .execute(pool)
-    .await
-    .inspect_err(log_db_error)?;
-    Ok(())
-}
-
-/// Changes which aoe4 profile is bound, and nothing else. The caller pairs this
-/// with `set_player_display_name` when the new profile carries a new name; the two
-/// are separate because changing a name is its own action, unblocked by a running
-/// tournament in a way rebinding is not.
 /// Every entry a player has ever had, in any tournament and whatever its status.
 ///
 /// Counts `withdrawn` rows too, deliberately: entries are never deleted, and
@@ -695,18 +664,33 @@ pub(crate) async fn delete_player(pool: &SqlitePool, user_id: i64) -> Result<(),
     Ok(())
 }
 
-pub(crate) async fn update_player_binding(pool: &SqlitePool, user_id: i64, aoe4_id: i64) -> Result<(), sqlx::Error> {
+/// Binds a profile, creating the player row first if there was none.
+///
+/// `display_name` only ever lands from this call on the fresh-insert branch —
+/// the column is `not null`, so an insert needs something, and it is
+/// immediately superseded by `set_player_display_name`'s own update on every
+/// caller that already has a row. The on-conflict branch leaves the name
+/// alone entirely, which is what keeps every existing caller's behavior
+/// exactly as it was before this could ever insert anything.
+pub(crate) async fn upsert_player_binding(
+    pool: &SqlitePool,
+    user_id: i64,
+    aoe4_id: i64,
+    display_name: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r"
-        update tournament_players
+        insert into tournament_players (user_id, aoe4_id, display_name)
+        values (?1, ?2, ?3)
+        on conflict(user_id) do update
         set
-            aoe4_id = ?1,
+            aoe4_id = excluded.aoe4_id,
             updated_at = datetime('now')
-        where user_id = ?2
         ",
     )
-    .bind(aoe4_id)
     .bind(user_id)
+    .bind(aoe4_id)
+    .bind(display_name)
     .execute(pool)
     .await
     .inspect_err(log_db_error)?;
@@ -823,34 +807,27 @@ pub(crate) async fn register_new_player_and_entry(
 ///
 /// The caller has already refused a self-registered entry, so the `status =
 /// 'active'` in the update can only ever revive an entry an admin created.
-pub(crate) async fn invite_player_and_entry(
+/// Writes (or reactivates) the entry `/tournament invite` creates.
+///
+/// No player-row write here any more: by the time `invite`'s own resolution
+/// reaches this call, the player row is already guaranteed to exist with the
+/// right binding — `claim_profile` created or updated it for a fresh claim,
+/// and every other branch only ever reaches here from one that already did.
+pub(crate) async fn upsert_invited_entry(
     pool: &SqlitePool,
     tournament_id: i64,
     user_id: i64,
+    aoe4_id: i64,
     display_name: &str,
     invited_by: i64,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
-
     sqlx::query(
         r"
-        insert into tournament_players (user_id, aoe4_id, display_name)
-        values (?1, null, ?2)
-        on conflict(user_id) do nothing
-        ",
-    )
-    .bind(user_id)
-    .bind(display_name)
-    .execute(&mut *tx)
-    .await
-    .inspect_err(log_db_error)?;
-
-    sqlx::query(
-        r"
-        insert into tournament_entries (tournament_id, user_id, display_name, invited_by)
-        values (?1, ?2, ?3, ?4)
+        insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name, invited_by)
+        values (?1, ?2, ?3, ?4, ?5)
         on conflict(tournament_id, user_id) do update
         set
+            aoe4_id = excluded.aoe4_id,
             display_name = excluded.display_name,
             invited_by = excluded.invited_by,
             status = 'active'
@@ -858,43 +835,9 @@ pub(crate) async fn invite_player_and_entry(
     )
     .bind(tournament_id)
     .bind(user_id)
-    .bind(display_name)
-    .bind(invited_by)
-    .execute(&mut *tx)
-    .await
-    .inspect_err(log_db_error)?;
-
-    tx.commit().await.inspect_err(log_db_error)?;
-    Ok(())
-}
-
-/// Writes a profile onto an entry that had none, once its holder binds for real.
-///
-/// The counterpart to `insert_entry` for someone already in the field: an
-/// invitee's entry carries a null `aoe4_id` and an organizer's guess at their
-/// name, and binding replaces both with what aoe4world says. `elo` is left to
-/// `registration::snapshot_entry_elo`, as it is on every other path.
-pub(crate) async fn set_entry_binding(
-    pool: &SqlitePool,
-    tournament_id: i64,
-    user_id: i64,
-    aoe4_id: i64,
-    display_name: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r"
-        update tournament_entries
-        set
-            aoe4_id = ?1,
-            display_name = ?2
-        where tournament_id = ?3
-          and user_id = ?4
-        ",
-    )
     .bind(aoe4_id)
     .bind(display_name)
-    .bind(tournament_id)
-    .bind(user_id)
+    .bind(invited_by)
     .execute(pool)
     .await
     .inspect_err(log_db_error)?;
@@ -933,9 +876,10 @@ pub(crate) async fn has_running_tournament_entry(pool: &SqlitePool, user_id: i64
 pub(crate) struct TournamentEntry {
     pub tournament_id: i64,
     pub user_id: i64,
-    /// Snapshotted from the player row at sign-up, and `None` when they had no
-    /// profile to snapshot.
-    pub aoe4_id: Option<i64>,
+    /// Snapshotted from the player row at sign-up. `not null` since chunk
+    /// 32's own follow-on: every entry is bound the moment it is written,
+    /// whether by `register` or by `invite` resolving one immediately.
+    pub aoe4_id: i64,
     /// The admin who put them in the field, or `None` for a self-registered
     /// entrant. Being invited is a fact about one tournament, not about a player.
     pub invited_by: Option<i64>,
@@ -957,7 +901,7 @@ pub(crate) async fn insert_entry(
     pool: &SqlitePool,
     tournament_id: i64,
     user_id: i64,
-    aoe4_id: Option<i64>,
+    aoe4_id: i64,
     display_name: &str,
     elo: Option<i64>,
 ) -> Result<(), sqlx::Error> {
