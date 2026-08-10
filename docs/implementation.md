@@ -37,12 +37,13 @@ decides the order is one concrete event: **an invite-only 8-player single elimin
 end.** Everything that event needs is M1. Everything that only makes running it nicer is M2. Everything that
 replaces work a human can already do is M3.
 
-Landed so far: chunks 1–12, 14, 16, 17, 24–30. Dropped: 13, 15.
+Landed so far: chunks 1–12, 14, 16–19, 24–31. Dropped: 13, 15.
 
-**Where that event stops today.** `set_thread::open` has exactly one caller — `/tournament start` — and
-`record_set_result` is only ever reached for byes. So the first round's threads and draft rooms open, and then
-nothing: no result can be recorded, no winner advances, no later round is opened, and nothing ever writes
-`completed`. The bracket is a picture that never moves.
+**Where that event stops today.** The core loop runs: `/set report` and `/set award` put a result in, the winner
+advances, the next round's threads and draft rooms open, and the final writes `completed`. What is missing is the
+door the event comes in through. Every entrant must still sign themselves up against a real aoe4world profile,
+so a curated field cannot be composed at all — no admin can put a player in, and nothing shuts the public door
+behind them.
 
 ### M1 — the event runs end to end
 
@@ -410,10 +411,11 @@ played result does, and whatever games were reported stay in the score.
 come back with whatever ends up consuming it.
 Design: §3.7, §7 ("Fallback — manual"), §8.4.
 
-> **Chunk 19 closes M1.** With it the bot runs a whole tournament in its own guild — entrants in, check-in,
-> seeding, bracket, threads, drafts created on the tool, results entered by hand — and needs nothing from the
-> draft tool's API beyond what already exists. Everything after this either makes running one more comfortable
-> (M2) or replaces the hand-entry with import (M3).
+> **Chunk 19 closes the core loop**, and with it the bot's need for the draft tool's API: a self-registered
+> field goes in, checks in, is seeded, gets a bracket, threads and drafts, and plays down to a champion on
+> results typed in by hand. What M1 still owes is the entry path — 31 through 33, the invited field the target
+> event is composed of. Everything after those either makes running one more comfortable (M2) or replaces the
+> hand entry with import (M3).
 
 **20. `/set redraft`**
 Overwrite the pointer, increment `redraft_count`, clear the sync and announcement state, re-post the panel, and
