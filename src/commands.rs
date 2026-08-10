@@ -388,9 +388,10 @@ pub async fn create(
     // show them from the start even though `/tournament setup` has not run yet.
     let fresh = tournament_db::get_tournament(pool, tournament_id).await?;
     let cap = fresh.as_ref().map_or(32, |t| t.entrant_cap);
-    let state = fresh
-        .as_ref()
-        .map_or(registration::RegistrationState::Open, panel::state_of);
+    let state = fresh.as_ref().map_or(
+        registration::RegistrationState::Open,
+        registration::RegistrationState::of,
+    );
     let register_message_id = panel::post_initial(ctx.http(), register.id, tournament_id, &name, cap, state).await?;
     tournament_db::set_register_message_id(pool, tournament_id, to_db_id(register_message_id)).await?;
 
@@ -1308,7 +1309,7 @@ fn setup_summary(
 
     // The resolved state rather than the raw mode, so this and the panel cannot
     // describe the same event differently.
-    let door = match panel::state_of(tournament) {
+    let door = match registration::RegistrationState::of(tournament) {
         registration::RegistrationState::Open => locale.pick("公開報名", "open to sign-ups"),
         registration::RegistrationState::InviteOnly => locale.pick("邀請制（僅限主辦方加入）", "invite-only"),
         registration::RegistrationState::Closed => locale.pick("已結束", "closed"),
@@ -1714,7 +1715,7 @@ async fn refresh_register_panel(
         tournament.id,
         &tournament.name,
         tournament.entrant_cap,
-        panel::state_of(tournament),
+        registration::RegistrationState::of(tournament),
     )
     .await
     {

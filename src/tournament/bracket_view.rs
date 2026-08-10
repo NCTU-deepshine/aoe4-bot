@@ -13,6 +13,7 @@
 use crate::Error;
 use crate::db::{to_channel_id, to_db_id, to_message_id};
 use crate::tournament::db::{self, Tournament, TournamentEntry, TournamentRound, TournamentSet};
+use crate::tournament::registration::RegistrationState;
 use crate::tournament::seeding;
 use crate::tournament::{bracket, render};
 use serenity::all::{CacheHttp, CreateMessage, EditMessage};
@@ -85,15 +86,54 @@ fn draw_order(entries: &[TournamentEntry]) -> Vec<render::Entrant> {
         .collect()
 }
 
+/// The seats an invite-only field has not filled yet, as drawable entrants.
+///
+/// Without them `bracket::build` leaves those positions empty and `render::leaf`
+/// draws them `(bye)` — which is right for a seed advancing free and wrong for a
+/// seat waiting on an invite. The two mean opposite things and look identical, so
+/// the vacancies are named instead of inferred.
+///
+/// A placeholder takes the lowest number nobody holds, which makes the drawing a
+/// list of the seeds still to be filled. Real seeds may already have gaps in them
+/// (a withdrawal leaves 1, 2, 4, 5), and this is the same rule read from the
+/// other side.
+fn pad_with_open_seats(order: &mut Vec<render::Entrant>, target: usize) {
+    let taken: Vec<u32> = order.iter().map(|e| e.seed).collect();
+    let mut seat = 1;
+    while order.len() < target {
+        while taken.contains(&seat) {
+            seat += 1;
+        }
+        order.push(render::Entrant {
+            seed: seat,
+            name: format!("seed{seat}"),
+        });
+        seat += 1;
+    }
+}
+
 /// The provisional bracket implied by the current field.
 ///
-/// `None` below two entrants, where `bracket::build` correctly refuses.
-pub(crate) fn preview_rounds(entries: &[TournamentEntry]) -> Option<Vec<render::Round>> {
-    let order = draw_order(entries);
+/// `open_seats_to` draws the whole target bracket rather than one sized to who is
+/// in it so far: an organizer filling eight seats should be looking at eight, not
+/// at a four-bracket that will reshape twice more before it is done. `None` keeps
+/// the field's own size, which is what an open registration wants — it genuinely
+/// does not know how big it will end up.
+///
+/// `None` below two entrants, where `bracket::build` correctly refuses. Padding
+/// happens first, so a target of its own is enough to draw from an empty field.
+pub(crate) fn preview_rounds(entries: &[TournamentEntry], open_seats_to: Option<usize>) -> Option<Vec<render::Round>> {
+    let mut order = draw_order(entries);
+    if let Some(target) = open_seats_to {
+        pad_with_open_seats(&mut order, target);
+    }
     if order.len() < MIN_ENTRANTS {
         return None;
     }
 
+    // Sized from the order rather than the target, so a cap lowered under a field
+    // that already exists grows the bracket to hold everyone instead of dropping
+    // whoever no longer fits.
     let round_count = bracket::round_count(bracket::size(order.len()));
     let built = bracket::build(order.len(), &vec![RENDER_ONLY_BEST_OF; round_count]).ok()?;
 
@@ -188,18 +228,39 @@ fn played_match(set: &TournamentSet, entries: &[TournamentEntry]) -> render::Mat
     }
 }
 
+/// Which drawing this is, which is what the heading above it has to say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Drawing {
+    /// Computed from the current field, before `start` writes a real one.
+    Preview,
+    /// A preview padded out to the target field, so the empty slots are seats
+    /// still to be invited rather than byes.
+    PreviewWithOpenSeats,
+    /// The bracket `start` wrote.
+    Real,
+}
+
 /// Wraps the drawing with a heading, and says plainly that it is not the draw
 /// yet while the tournament has not started. Bilingual: one shared message with
 /// many readers.
-fn decorate(name: &str, chunks: Vec<String>, provisional: bool) -> Vec<String> {
-    let heading = if provisional {
+fn decorate(name: &str, chunks: Vec<String>, drawing: Drawing) -> Vec<String> {
+    // `seed4` in a bracket reads as somebody's name unless the heading says
+    // otherwise, so the padded preview explains its own placeholders.
+    let open_seats = if drawing == Drawing::PreviewWithOpenSeats {
+        "尚未邀請的空位標示為 `seedN`。\n\
+         Seats still to be invited are shown as `seedN`.\n"
+    } else {
+        ""
+    };
+    let heading = if drawing == Drawing::Real {
+        format!("**{name} — 賽程表 / bracket**\n")
+    } else {
         format!(
             "**{name} — 賽程表預覽 / bracket preview**\n\
              這是依目前報名者推算的暫定賽程表，開賽前都可能變動。\n\
-             Provisional, based on who has registered so far; it will change until the event starts.\n"
+             Provisional, based on who has registered so far; it will change until the event starts.\n\
+             {open_seats}"
         )
-    } else {
-        format!("**{name} — 賽程表 / bracket**\n")
     };
 
     chunks
@@ -248,19 +309,26 @@ pub(crate) async fn reconcile(
     let channel_id = to_channel_id(bracket_channel_id);
 
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
+
+    // Open seats only while the organizers can still fill them. Once check-in
+    // opens the field is settled, and a vacancy nobody can take would be a lie.
+    let open_seats_to = (RegistrationState::of(tournament) == RegistrationState::InviteOnly)
+        .then(|| bracket::size(usize::try_from(tournament.entrant_cap).unwrap_or(MIN_ENTRANTS)));
+
     // Whether this is still a preview is the same question as which drawing we
     // have, so it is answered once rather than read off the status separately.
-    let (rounds, provisional) = match persisted_rounds(pool, tournament.id, &entries).await? {
-        Some(rounds) => (rounds, false),
-        None => match preview_rounds(&entries) {
-            Some(rounds) => (rounds, true),
+    let (rounds, drawing) = match persisted_rounds(pool, tournament.id, &entries).await? {
+        Some(rounds) => (rounds, Drawing::Real),
+        None => match preview_rounds(&entries, open_seats_to) {
+            Some(rounds) if open_seats_to.is_some() => (rounds, Drawing::PreviewWithOpenSeats),
+            Some(rounds) => (rounds, Drawing::Preview),
             None => return Ok(ReconcileOutcome::TooFewEntrants),
         },
     };
     let chunks = decorate(
         &tournament.name,
         render::render(&rounds, render::DEFAULT_WIDTH),
-        provisional,
+        drawing,
     );
 
     let (mut posted, mut edited, mut deleted) = (0, 0, 0);
@@ -371,13 +439,85 @@ mod tests {
 
     #[test]
     fn there_is_nothing_to_draw_below_two_entrants() {
-        assert!(preview_rounds(&[]).is_none());
-        assert!(preview_rounds(&field(1)).is_none());
+        assert!(preview_rounds(&[], None).is_none());
+        assert!(preview_rounds(&field(1), None).is_none());
+    }
+
+    #[test]
+    fn open_seats_draw_the_bracket_being_filled_rather_than_the_one_filled_so_far() {
+        // Three of eight invited. Without padding this is a 4-bracket that will
+        // reshape twice more; with it the organizer sees the eight seats they
+        // are actually filling.
+        let rounds = preview_rounds(&field(3), Some(8)).unwrap();
+        assert_eq!(rounds.len(), 3, "an 8-bracket is three rounds");
+        assert_eq!(rounds[0].matches.len(), 4);
+
+        let names: Vec<&str> = drawn(&rounds).into_iter().map(|e| e.name.as_str()).collect();
+        for seat in ["seed4", "seed5", "seed6", "seed7", "seed8"] {
+            assert!(names.contains(&seat), "{seat} missing from {names:?}");
+        }
+
+        // The point of naming them: a padded round one has no empty slot left,
+        // so nothing in the drawing reads `(bye)` when it means "not invited yet".
+        let drawing = render::render(&rounds, render::DEFAULT_WIDTH).join("\n");
+        assert!(!drawing.contains("(bye)"), "{drawing}");
+        assert!(drawing.contains("seed8"), "{drawing}");
+    }
+
+    #[test]
+    fn an_open_seat_takes_the_lowest_number_nobody_holds() {
+        // Seeds 1, 2 and 5 are taken, so the seats still to fill are 3, 4, 6, 7
+        // and 8 — which is exactly the list an organizer has left to invite.
+        let entries = vec![
+            with_seed(entry(1, "A", Some(2000)), 1),
+            with_seed(entry(2, "B", Some(1900)), 2),
+            with_seed(entry(3, "C", Some(1800)), 5),
+        ];
+        let rounds = preview_rounds(&entries, Some(8)).unwrap();
+        let mut seeds: Vec<u32> = drawn(&rounds).into_iter().map(|e| e.seed).collect();
+        seeds.sort_unstable();
+        assert_eq!(seeds, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let open: Vec<u32> = drawn(&rounds)
+            .into_iter()
+            .filter(|e| e.name.starts_with("seed"))
+            .map(|e| e.seed)
+            .collect();
+        let mut open = open;
+        open.sort_unstable();
+        assert_eq!(open, vec![3, 4, 6, 7, 8]);
+    }
+
+    #[test]
+    fn an_invite_only_bracket_is_drawn_before_anyone_is_in_it() {
+        // The whole target field, every seat open. This is what an organizer sees
+        // the moment they mark an event invite-only, and it fills in from there.
+        let rounds = preview_rounds(&[], Some(8)).unwrap();
+        assert_eq!(rounds.len(), 3);
+        let names: Vec<&str> = drawn(&rounds).into_iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names.len(), 8);
+        assert!(names.iter().all(|n| n.starts_with("seed")), "{names:?}");
+    }
+
+    #[test]
+    fn a_full_field_needs_no_open_seats() {
+        let rounds = preview_rounds(&field(8), Some(8)).unwrap();
+        let names: Vec<&str> = drawn(&rounds).into_iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.iter().any(|n| n.starts_with("seed")), "{names:?}");
+    }
+
+    #[test]
+    fn a_field_larger_than_its_cap_grows_the_bracket_rather_than_dropping_anyone() {
+        // Reachable only by lowering the cap under a field that already exists.
+        // Nobody may vanish from the drawing over it.
+        let rounds = preview_rounds(&field(5), Some(4)).unwrap();
+        assert_eq!(rounds.len(), 3, "five entrants still need an 8-bracket");
+        assert_eq!(drawn(&rounds).len(), 5);
     }
 
     #[test]
     fn two_entrants_are_a_single_final() {
-        let rounds = preview_rounds(&field(2)).unwrap();
+        let rounds = preview_rounds(&field(2), None).unwrap();
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].name, "Final");
         assert_eq!(rounds[0].matches.len(), 1);
@@ -386,7 +526,7 @@ mod tests {
     #[test]
     fn a_field_that_is_not_a_power_of_two_gets_byes_on_the_top_seeds() {
         // 5 entrants play an 8-bracket, so seeds 1, 2 and 3 are unopposed.
-        let rounds = preview_rounds(&field(5)).unwrap();
+        let rounds = preview_rounds(&field(5), None).unwrap();
         assert_eq!(rounds.len(), 3);
 
         let unopposed: Vec<u32> = rounds[0]
@@ -406,7 +546,7 @@ mod tests {
             entry(2, "Middle", Some(1500)),
             entry(3, "Strong", Some(2000)),
         ];
-        let rounds = preview_rounds(&entries).unwrap();
+        let rounds = preview_rounds(&entries, None).unwrap();
         let top = rounds[0]
             .matches
             .iter()
@@ -439,7 +579,7 @@ mod tests {
             with_seed(entry(2, "Middle", Some(1500)), 2),
             with_seed(entry(3, "Strong", Some(2000)), 3),
         ];
-        let rounds = preview_rounds(&entries).unwrap();
+        let rounds = preview_rounds(&entries, None).unwrap();
         let top = drawn(&rounds)
             .into_iter()
             .find(|e| e.seed == 1)
@@ -457,7 +597,7 @@ mod tests {
             with_seed(entry(3, "C", Some(1800)), 4),
             with_seed(entry(4, "D", Some(1700)), 5),
         ];
-        let rounds = preview_rounds(&entries).unwrap();
+        let rounds = preview_rounds(&entries, None).unwrap();
         let mut seeds: Vec<u32> = drawn(&rounds).into_iter().map(|e| e.seed).collect();
         seeds.sort_unstable();
         assert_eq!(seeds, vec![1, 2, 4, 5]);
@@ -473,7 +613,7 @@ mod tests {
             entry(2, "Middle", Some(1500)),
             entry(3, "Strong", Some(2000)),
         ];
-        let rounds = preview_rounds(&entries).unwrap();
+        let rounds = preview_rounds(&entries, None).unwrap();
         let placed: Vec<(u32, &str)> = drawn(&rounds).into_iter().map(|e| (e.seed, e.name.as_str())).collect();
 
         // Seed 1 stands; the unseeded pair follow it in rating order.
@@ -492,7 +632,7 @@ mod tests {
             with_seed(entry(3, "C", Some(1800)), 5),
             entry(4, "Latecomer", Some(1700)),
         ];
-        let rounds = preview_rounds(&entries).unwrap();
+        let rounds = preview_rounds(&entries, None).unwrap();
         let mut seeds: Vec<u32> = drawn(&rounds).into_iter().map(|e| e.seed).collect();
         seeds.sort_unstable();
         assert_eq!(seeds, vec![1, 2, 5, 6]);
@@ -500,7 +640,7 @@ mod tests {
 
     #[test]
     fn no_scores_before_anything_is_played() {
-        let rounds = preview_rounds(&field(4)).unwrap();
+        let rounds = preview_rounds(&field(4), None).unwrap();
         assert!(rounds.iter().flat_map(|r| &r.matches).all(|m| m.score.is_none()));
     }
 
@@ -508,7 +648,7 @@ mod tests {
     fn withdrawn_entrants_are_not_in_the_draw() {
         let mut entries = field(4);
         entries[3].status = "withdrawn".to_string();
-        let rounds = preview_rounds(&entries).unwrap();
+        let rounds = preview_rounds(&entries, None).unwrap();
         // Three entrants play a 4-bracket: two rounds, one bye.
         assert_eq!(rounds.len(), 2);
         assert_eq!(rounds[0].matches.len(), 2);
@@ -633,7 +773,7 @@ mod tests {
         // The preview and the real bracket of the same field are the same
         // shape, so `/tournament start` only changes the label and the scores.
         let entries = seeded_field(4);
-        let preview = preview_rounds(&entries).unwrap();
+        let preview = preview_rounds(&entries, None).unwrap();
         let played = played_rounds(
             &[round(10, 1, "Semifinal"), round(11, 2, "Final")],
             &[
@@ -650,17 +790,37 @@ mod tests {
 
     #[test]
     fn the_preview_says_it_is_provisional_and_the_real_bracket_does_not() {
-        let chunks = decorate("Relic Cup", vec!["body".to_string()], true);
+        let chunks = decorate("Relic Cup", vec!["body".to_string()], Drawing::Preview);
         assert!(chunks[0].contains("賽程表預覽"), "{}", chunks[0]);
         assert!(chunks[0].contains("Provisional"), "{}", chunks[0]);
 
-        let chunks = decorate("Relic Cup", vec!["body".to_string()], false);
+        let chunks = decorate("Relic Cup", vec!["body".to_string()], Drawing::Real);
         assert!(!chunks[0].contains("Provisional"), "{}", chunks[0]);
     }
 
     #[test]
+    fn a_padded_preview_explains_what_seed_n_means() {
+        // Without this a reader takes `seed4` for somebody's name.
+        let padded = decorate("Relic Cup", vec!["body".to_string()], Drawing::PreviewWithOpenSeats);
+        assert!(padded[0].contains("seedN"), "{}", padded[0]);
+        assert!(padded[0].contains("still to be invited"), "{}", padded[0]);
+        assert!(padded[0].contains("尚未邀請的空位"), "{}", padded[0]);
+        // Still a preview, so it keeps saying so.
+        assert!(padded[0].contains("Provisional"), "{}", padded[0]);
+
+        for drawing in [Drawing::Preview, Drawing::Real] {
+            let plain = decorate("Relic Cup", vec!["body".to_string()], drawing);
+            assert!(!plain[0].contains("seedN"), "{drawing:?}: {}", plain[0]);
+        }
+    }
+
+    #[test]
     fn only_the_first_chunk_carries_the_heading() {
-        let chunks = decorate("Relic Cup", vec!["one".to_string(), "two".to_string()], true);
+        let chunks = decorate(
+            "Relic Cup",
+            vec!["one".to_string(), "two".to_string()],
+            Drawing::Preview,
+        );
         assert!(chunks[0].contains("Relic Cup"));
         assert_eq!(chunks[1], "two", "a continuation chunk is the drawing alone");
     }
@@ -669,7 +829,7 @@ mod tests {
     fn a_large_field_splits_into_several_messages() {
         // The split starts at 16, which is what makes the message count
         // vary with the field and `reconcile` necessary.
-        let rounds = preview_rounds(&field(16)).unwrap();
+        let rounds = preview_rounds(&field(16), None).unwrap();
         let chunks = render::render(&rounds, render::DEFAULT_WIDTH);
         assert!(chunks.len() > 1, "16 entrants should not fit one message");
         assert!(chunks.iter().all(|c| c.len() <= 2000));

@@ -203,7 +203,7 @@ async fn edit(
     tournament: &Tournament,
 ) -> Result<(), Error> {
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-    let state = state_of(tournament);
+    let state = RegistrationState::of(tournament);
     let body = render(&entries, tournament.entrant_cap, tournament.scheduled_start_at, state);
 
     let channel_id = to_channel_id(register_channel_id);
@@ -220,13 +220,6 @@ async fn edit(
         )
         .await?;
     Ok(())
-}
-
-/// The state a tournament's panel should be showing. One derivation, shared with
-/// `commands.rs`'s two `post_initial` callers, so a reposted panel and an edited
-/// one cannot advertise different doors.
-pub(crate) fn state_of(tournament: &Tournament) -> RegistrationState {
-    RegistrationState::resolve(&tournament.status, &tournament.registration_mode)
 }
 
 #[cfg(test)]

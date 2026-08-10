@@ -63,6 +63,12 @@ impl RegistrationState {
         }
     }
 
+    /// The same question asked of a whole tournament row, which is how every
+    /// caller outside this module actually holds it.
+    pub(crate) fn of(tournament: &Tournament) -> Self {
+        Self::resolve(&tournament.status, &tournament.registration_mode)
+    }
+
     pub(crate) fn accepts_signups(self) -> bool {
         matches!(self, RegistrationState::Open)
     }
