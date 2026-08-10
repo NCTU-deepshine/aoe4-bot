@@ -34,6 +34,9 @@ pub(crate) mod completion;
 // separate from `Emperor`, which is home-guild meme/reaction logic with no
 // tournament knowledge; registered as a second handler in `main.rs`.
 pub(crate) mod dispatch;
+// `/tournament invite|uninvite`: the organizers' own door into the field, for an
+// entrant who has no aoe4world profile and never signed themselves up.
+pub(crate) mod invite;
 // The registration panel: rendering plus the Discord/DB glue
 // `commands::create` and `dispatch::Dispatcher` call into.
 pub(crate) mod panel;

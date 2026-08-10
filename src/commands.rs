@@ -11,8 +11,8 @@ use crate::tournament::access::{
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
-    audit, bracket, bracket_view, checkin, checkin_panel, completion, panel, registration, report, seed_panel, seeding,
-    set_thread, setup as tournament_setup, start as tournament_start, teardown,
+    audit, bracket, bracket_view, checkin, checkin_panel, completion, invite as tournament_invite, panel, registration,
+    report, seed_panel, seeding, set_thread, setup as tournament_setup, start as tournament_start, teardown,
 };
 use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
@@ -240,6 +240,8 @@ pub async fn refresh(ctx: Context<'_>) -> Result<(), Error> {
         "rebind",
         "unbind",
         "withdraw",
+        "invite",
+        "uninvite",
         "open_checkin",
         "check_in",
         "close_checkin",
@@ -714,6 +716,99 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
 
     if outcome.changed_state() {
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+    }
+    Ok(())
+}
+
+// Puts a server member in the field without a sign-up and without an aoe4world
+// profile, which is how a curated event is composed: the organizers already know
+// who is playing. The name is free text, deliberately not the profile
+// autocomplete — its whole purpose is resolving a profile that here does not
+// exist. Re-inviting the same person corrects the name.
+/// Puts a member in the field. The name is theirs in game, not their Discord name.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    description_localized("zh-TW", "直接將成員加入參賽名單。名稱請填對方的遊戲名稱，而非 Discord 名稱。")
+)]
+pub async fn invite(
+    ctx: Context<'_>,
+    #[description = "The member to put in the field"]
+    #[description_localized("zh-TW", "要加入名單的成員")]
+    user: User,
+    #[description = "Their in-game name — what their opponent searches for in the lobby browser"]
+    #[description_localized("zh-TW", "對方的遊戲名稱 — 對手要在遊戲大廳搜尋的名稱")]
+    in_game_name: String,
+    #[description = "Optional seed; everyone between shifts along"]
+    #[description_localized("zh-TW", "選填的種子序，其他人會順移")]
+    seed: Option<i64>,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let outcome = tournament_invite::invite(
+        pool,
+        &tournament,
+        to_db_id(user.id),
+        &in_game_name,
+        to_db_id(ctx.author().id),
+        seed,
+    )
+    .await?;
+    audit::log_action("invite", tournament.id, &tournament.slug, ctx.author(), &outcome);
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
+
+    if outcome.changed_state() {
+        panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+        if outcome.changed_seeding() {
+            // Re-read: the placement rewrote the whole order, and the panel is
+            // drawn from a tournament row whose seed_source has just changed.
+            let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
+            seed_panel::refresh(ctx.http(), pool, &tournament).await?;
+        }
+    }
+    Ok(())
+}
+
+// The inverse of `invite`, and scoped to entries an admin created: whether an
+// admin may remove a player who signed themselves up is a separate question this
+// deliberately does not answer.
+/// Removes an invited entrant. Self-registered players withdraw themselves.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    check = "tournament_manage_only",
+    description_localized("zh-TW", "將受邀的參賽者移出名單。自行報名者請由本人退賽。")
+)]
+pub async fn uninvite(
+    ctx: Context<'_>,
+    #[description = "The invited member to remove"]
+    #[description_localized("zh-TW", "要移出名單的受邀成員")]
+    user: User,
+) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
+    let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
+        return Ok(());
+    };
+
+    let pool = &ctx.data().database;
+    let outcome = tournament_invite::uninvite(pool, &tournament, to_db_id(user.id)).await?;
+    audit::log_action("uninvite", tournament.id, &tournament.slug, ctx.author(), &outcome);
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
+
+    if outcome.changed_state() {
+        panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
+        seed_panel::refresh(ctx.http(), pool, &tournament).await?;
         bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
     }
     Ok(())

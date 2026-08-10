@@ -793,6 +793,95 @@ pub(crate) async fn register_new_player_and_entry(
     Ok(())
 }
 
+/// An admin putting someone in the field: writes the player row and the entry
+/// together, the way a first sign-up does, but with no profile on either.
+///
+/// Both statements are upserts, which is what makes re-inviting the same person
+/// a name correction rather than a second verb — and what brings an uninvited
+/// entry back to `active`. The player row is left alone if it already exists:
+/// an invitee who has played before keeps whatever profile they bound then, and
+/// only their entry says they were invited to this one.
+///
+/// The caller has already refused a self-registered entry, so the `status =
+/// 'active'` in the update can only ever revive an entry an admin created.
+pub(crate) async fn invite_player_and_entry(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    display_name: &str,
+    invited_by: i64,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        insert into tournament_players (user_id, aoe4_id, display_name)
+        values (?1, null, ?2)
+        on conflict(user_id) do nothing
+        ",
+    )
+    .bind(user_id)
+    .bind(display_name)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        insert into tournament_entries (tournament_id, user_id, display_name, invited_by)
+        values (?1, ?2, ?3, ?4)
+        on conflict(tournament_id, user_id) do update
+        set
+            display_name = excluded.display_name,
+            invited_by = excluded.invited_by,
+            status = 'active'
+        ",
+    )
+    .bind(tournament_id)
+    .bind(user_id)
+    .bind(display_name)
+    .bind(invited_by)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    tx.commit().await.inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Writes a profile onto an entry that had none, once its holder binds for real.
+///
+/// The counterpart to `insert_entry` for someone already in the field: an
+/// invitee's entry carries a null `aoe4_id` and an organizer's guess at their
+/// name, and binding replaces both with what aoe4world says. `elo` is left to
+/// `registration::snapshot_entry_elo`, as it is on every other path.
+pub(crate) async fn set_entry_binding(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    aoe4_id: i64,
+    display_name: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        update tournament_entries
+        set
+            aoe4_id = ?1,
+            display_name = ?2
+        where tournament_id = ?3
+          and user_id = ?4
+        ",
+    )
+    .bind(aoe4_id)
+    .bind(display_name)
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 /// Whether `user_id` holds an entry in any `running` tournament — the guard for
 /// `/tournament rebind`: a rebind is refused while the user has an entry in a
 /// running tournament, since the profile is snapshotted onto entries and sets
@@ -828,6 +917,9 @@ pub(crate) struct TournamentEntry {
     /// Snapshotted from the player row at sign-up, and `None` when they had no
     /// profile to snapshot.
     pub aoe4_id: Option<i64>,
+    /// The admin who put them in the field, or `None` for a self-registered
+    /// entrant. Being invited is a fact about one tournament, not about a player.
+    pub invited_by: Option<i64>,
     pub seed: Option<i64>,
     pub suggested_seed: Option<i64>,
     pub display_name: String,
@@ -874,7 +966,7 @@ pub(crate) async fn get_entry(
 ) -> Result<Option<TournamentEntry>, sqlx::Error> {
     sqlx::query_as(
         r"
-        select tournament_id, user_id, aoe4_id, seed, suggested_seed, display_name, elo, atr,
+        select tournament_id, user_id, aoe4_id, invited_by, seed, suggested_seed, display_name, elo, atr,
                atr_source, status, registered_at, checked_in_at
         from tournament_entries
         where tournament_id = ?1
@@ -894,7 +986,7 @@ pub(crate) async fn list_entries_for_tournament(
 ) -> Result<Vec<TournamentEntry>, sqlx::Error> {
     sqlx::query_as(
         r"
-        select tournament_id, user_id, aoe4_id, seed, suggested_seed, display_name, elo, atr,
+        select tournament_id, user_id, aoe4_id, invited_by, seed, suggested_seed, display_name, elo, atr,
                atr_source, status, registered_at, checked_in_at
         from tournament_entries
         where tournament_id = ?1
@@ -956,6 +1048,11 @@ pub(crate) async fn set_entry_checked_in(
 /// `active` entry that never checked in becomes `no_show` in one statement.
 /// Already-`withdrawn`/`no_show` entries are untouched. Returns how many rows
 /// changed, for the closing reply.
+///
+/// An invited entry is exempt, because check-in was never asked of it. Stamping
+/// `checked_in_at` at invite time would spare it here too and is the tempting
+/// version, but it is a lie the rest of the system reads back: a reopen clears
+/// that column, and the check-in counter would report a field nobody confirmed.
 pub(crate) async fn mark_no_shows(pool: &SqlitePool, tournament_id: i64) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         r"
@@ -964,6 +1061,7 @@ pub(crate) async fn mark_no_shows(pool: &SqlitePool, tournament_id: i64) -> Resu
         where tournament_id = ?1
           and status = 'active'
           and checked_in_at is null
+          and invited_by is null
         ",
     )
     .bind(tournament_id)

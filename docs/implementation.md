@@ -37,7 +37,7 @@ decides the order is one concrete event: **an invite-only 8-player single elimin
 end.** Everything that event needs is M1. Everything that only makes running it nicer is M2. Everything that
 replaces work a human can already do is M3.
 
-Landed so far: chunks 1–12, 14, 16–19, 24–31. Dropped: 13, 15.
+Landed so far: chunks 1–12, 14, 16–19, 24–32. Dropped: 13, 15.
 
 **Where that event stops today.** The core loop runs: `/set report` and `/set award` put a result in, the winner
 advances, the next round's threads and draft rooms open, and the final writes `completed`. What is missing is the

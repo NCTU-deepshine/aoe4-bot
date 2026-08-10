@@ -40,10 +40,15 @@ pub(crate) fn registration_is_reopenable(status: &str) -> bool {
 /// running. `withdrawn` entries never entered that pool and are excluded
 /// either way, matching `panel::render`'s own active-only filter for
 /// registration.
+///
+/// Invited entrants are excluded from both numbers: nobody asked them to
+/// confirm, so counting them would make the panel read `2/8` for a field that is
+/// entirely present. One who presses the button anyway is still not counted —
+/// the denominator has to mean the same thing all the way through.
 pub(crate) fn checkin_counts(entries: &[TournamentEntry]) -> (i64, i64) {
     let counted: Vec<&TournamentEntry> = entries
         .iter()
-        .filter(|e| matches!(e.status.as_str(), "active" | "no_show"))
+        .filter(|e| matches!(e.status.as_str(), "active" | "no_show") && e.invited_by.is_none())
         .collect();
     let checked_in = counted.iter().filter(|e| e.checked_in_at.is_some()).count();
     (
@@ -362,6 +367,7 @@ mod tests {
             tournament_id: 1,
             user_id,
             aoe4_id: Some(user_id),
+            invited_by: None,
             seed: None,
             suggested_seed: None,
             display_name: format!("player-{user_id}"),
@@ -424,6 +430,25 @@ mod tests {
     #[test]
     fn counts_are_zero_with_no_entries() {
         assert_eq!(checkin_counts(&[]), (0, 0));
+    }
+
+    #[test]
+    fn invited_entrants_are_in_neither_half_of_the_counter() {
+        // Nobody asked them to confirm, so an all-invited field must not read
+        // `0/8` — and one who presses the button anyway must not read `1/8`
+        // either, or the denominator changes meaning halfway through.
+        let now = Utc::now();
+        let invited = |user_id, checked_in_at| TournamentEntry {
+            invited_by: Some(99),
+            ..entry(user_id, "active", checked_in_at)
+        };
+        let entries = vec![
+            entry(1, "active", Some(now)),
+            entry(2, "active", None),
+            invited(3, None),
+            invited(4, Some(now)),
+        ];
+        assert_eq!(checkin_counts(&entries), (1, 2));
     }
 
     #[test]

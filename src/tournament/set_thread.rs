@@ -103,21 +103,21 @@ pub(crate) fn render_panel(
     // somebody in the game's lobby browser.
     let body = format!(
         "{header}\nDraft 房間 / Draft room: {}\n\
-         **<@{}> 選 Player 1**，並在遊戲中開房；對手遊戲 ID：`{}`\n\
-         **<@{}> 選 Player 2**；對手遊戲 ID：`{}`\n\
-         **<@{}> takes seat Player 1** and hosts the lobby in game — opponent: `{}`\n\
-         **<@{}> takes seat Player 2** — opponent: `{}`\n\
+         **<@{}> 選 Player 1**，並在遊戲中開房；對手遊戲 ID：{}\n\
+         **<@{}> 選 Player 2**；對手遊戲 ID：{}\n\
+         **<@{}> takes seat Player 1** and hosts the lobby in game — opponent: {}\n\
+         **<@{}> takes seat Player 2** — opponent: {}\n\
          Draft 有任何問題，請找管理員重新產生。\n\
          If anything is wrong with the draft, ask an admin to regenerate it.\n",
         room.match_url,
         one.user_id,
-        render::sanitize(&two.name),
+        opponent(two, "（名稱未驗證）"),
         two.user_id,
-        render::sanitize(&one.name),
+        opponent(one, "（名稱未驗證）"),
         one.user_id,
-        render::sanitize(&two.name),
+        opponent(two, " (name unverified)"),
         two.user_id,
-        render::sanitize(&one.name),
+        opponent(one, " (name unverified)"),
     );
 
     // The call-admin button is what a player has instead of knowing who to ask:
@@ -134,6 +134,21 @@ pub(crate) fn render_panel(
     ])];
 
     (body, components)
+}
+
+/// The opponent's in-game name, as the seat instruction hands it over.
+///
+/// An invited entrant's name is whatever the organizer typed, and this line is
+/// the one place it is read as an instruction — search the lobby browser for
+/// this — so an unverified one says so rather than failing silently in game.
+/// Inside a code span, hence `sanitize`: a backtick cannot be escaped there.
+fn opponent(player: &Player, unverified_note: &str) -> String {
+    let name = render::sanitize(&player.name);
+    if player.verified {
+        format!("`{name}`")
+    } else {
+        format!("`{name}`{unverified_note}")
+    }
 }
 
 /// The public post in `#…-draft`: one per set, carrying the spectator link
@@ -191,6 +206,10 @@ pub(crate) struct Player {
     pub user_id: i64,
     pub seed: i64,
     pub name: String,
+    /// Whether `name` came from aoe4world or from the organizer who invited
+    /// them. The panel hands it to their opponent as the string to search for in
+    /// the lobby browser, so a guess has to be labelled as one.
+    pub verified: bool,
 }
 
 /// The two links a draft room has: one to play in, one to watch.
@@ -465,6 +484,9 @@ pub(crate) async fn player(pool: &SqlitePool, tournament_id: i64, user_id: i64) 
     Ok(Player {
         user_id,
         seed: entry.as_ref().and_then(|e| e.seed).unwrap_or_default(),
+        // A profile on the entry is what makes the name aoe4world's rather than
+        // an organizer's — a vanished entry is a fallback id, verified by nobody.
+        verified: entry.as_ref().is_some_and(|e| e.aoe4_id.is_some()),
         name: entry.map_or_else(|| user_id.to_string(), |e| e.display_name),
     })
 }
@@ -521,6 +543,14 @@ mod tests {
             user_id,
             seed,
             name: name.to_string(),
+            verified: true,
+        }
+    }
+
+    fn invitee(user_id: i64, seed: i64, name: &str) -> Player {
+        Player {
+            verified: false,
+            ..player(user_id, seed, name)
         }
     }
 
@@ -583,6 +613,37 @@ mod tests {
         assert!(content.contains("<@9>"), "{content}");
         assert!(content.contains("<@7> takes seat Player 1"), "{content}");
         assert!(content.contains("<@9> takes seat Player 2"), "{content}");
+    }
+
+    #[test]
+    fn a_verified_name_is_handed_over_without_qualification() {
+        let (content, _) = render_panel(
+            &heading(1, "Round 1", 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            Some(&room()),
+            &[],
+        );
+        assert!(content.contains("opponent: `Beasty`"), "{content}");
+        assert!(!content.to_lowercase().contains("unverified"), "{content}");
+    }
+
+    #[test]
+    fn an_invitees_name_is_marked_where_it_is_read_as_an_instruction() {
+        // The seat line is what a player types into the lobby browser. An
+        // organizer's guess going in unmarked is how two people fail to find
+        // each other with no idea why.
+        let (content, _) = render_panel(
+            &heading(1, "Round 1", 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &invitee(9, 8, "Beasty"),
+            Some(&room()),
+            &[],
+        );
+        assert!(content.contains("opponent: `Beasty` (name unverified)"), "{content}");
+        assert!(content.contains("`Beasty`（名稱未驗證）"), "{content}");
+        // Only the unverified side is marked.
+        assert!(content.contains("opponent: `MarineLorD`\n"), "{content}");
     }
 
     #[test]

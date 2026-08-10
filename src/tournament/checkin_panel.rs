@@ -175,6 +175,7 @@ mod tests {
             tournament_id: 1,
             user_id,
             aoe4_id: Some(user_id),
+            invited_by: None,
             seed: None,
             suggested_seed: None,
             display_name: format!("player-{user_id}"),

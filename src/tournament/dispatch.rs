@@ -13,7 +13,6 @@ use crate::guilds::{Feature, Guilds};
 use crate::locale::Locale;
 use crate::tournament::action::{self, Action};
 use crate::tournament::checkin::CheckinOutcome;
-use crate::tournament::registration::{RegisterOutcome, WithdrawOutcome};
 use crate::tournament::throttle::EditThrottle;
 use crate::tournament::{audit, bracket_view, checkin, checkin_panel, db, panel, registration};
 use serenity::all::{
@@ -119,10 +118,10 @@ impl Dispatcher {
             error!("failed to edit the register response for tournament {tournament_id}: {err:?}");
         }
 
-        if matches!(
-            outcome,
-            RegisterOutcome::Registered { .. } | RegisterOutcome::Reactivated { .. }
-        ) {
+        // Asked of the outcome rather than listed here: the slash command uses the
+        // same method, and a variant added to one surface must not quietly skip
+        // the other.
+        if outcome.changed_state() {
             if let Ok(Some(entry)) = db::get_entry(&self.pool, tournament.id, user_id).await {
                 registration::snapshot_entry_elo(&self.pool, tournament.id, user_id, entry.aoe4_id).await;
             }
@@ -218,7 +217,7 @@ impl Dispatcher {
             error!("failed to respond to a withdraw interaction for tournament {tournament_id}: {err:?}");
         }
 
-        if matches!(outcome, WithdrawOutcome::Success) {
+        if outcome.changed_state() {
             self.refresh_panel(ctx, &tournament).await;
             self.reconcile_bracket(ctx, &tournament).await;
         }

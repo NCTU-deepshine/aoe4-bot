@@ -56,6 +56,9 @@ mod tests {
     /// the reader agree on which migration is under test.
     const OPTIONAL_AOE4_ID: i64 = 7;
 
+    /// The version that adds `invited_by`.
+    const INVITED_ENTRANTS: i64 = 8;
+
     /// A pool migrated to just *before* `version`, so a migration can be applied to
     /// a database that already holds rows.
     ///
@@ -3233,5 +3236,467 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn adding_invited_by_leaves_every_existing_entry_untouched() {
+        // Additive, unlike the rebuild before it — but a column landing on rows
+        // that already exist is exactly what the empty-database migrator tests
+        // cannot see, and the two migrations before this one both did it.
+        let pool = pool_migrated_to_before(INVITED_ENTRANTS).await;
+        sqlx::query("insert into tournaments (slug, name, created_by) values ('cup', 'Cup', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("insert into tournament_players (user_id, aoe4_id, display_name) values (1, 100, 'A')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into tournament_entries (tournament_id, user_id, aoe4_id, display_name, seed) \
+             values (1, 1, 100, 'A', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::migrate!().run(&pool).await.unwrap();
+
+        let entry = crate::tournament::db::get_entry(&pool, 1, 1).await.unwrap().unwrap();
+        assert_eq!(entry.aoe4_id, Some(100));
+        assert_eq!(entry.seed, Some(1));
+        assert_eq!(entry.display_name, "A");
+        // A row that predates the column is self-registered, not invited by nobody.
+        assert_eq!(entry.invited_by, None);
+    }
+
+    /// An invited entrant, as `/tournament invite` creates one. User 1 is the
+    /// inviting admin throughout.
+    async fn invite_to(
+        pool: &SqlitePool,
+        tournament: &crate::tournament::db::Tournament,
+        user_id: i64,
+        name: &str,
+        seed: Option<i64>,
+    ) -> crate::tournament::invite::InviteOutcome {
+        crate::tournament::invite::invite(pool, tournament, user_id, name, 1, seed)
+            .await
+            .unwrap()
+    }
+
+    /// A self-registered entrant, written the way `register` would.
+    async fn sign_up(pool: &SqlitePool, tournament_id: i64, user_id: i64, aoe4_id: i64, name: &str) {
+        crate::tournament::db::insert_player_if_absent(pool, user_id, Some(aoe4_id), name)
+            .await
+            .unwrap();
+        crate::tournament::db::insert_entry(pool, tournament_id, user_id, Some(aoe4_id), name, None)
+            .await
+            .unwrap();
+    }
+
+    async fn entries_of(pool: &SqlitePool, tournament_id: i64) -> Vec<crate::tournament::db::TournamentEntry> {
+        crate::tournament::db::list_entries_for_tournament(pool, tournament_id)
+            .await
+            .unwrap()
+    }
+
+    async fn reload(pool: &SqlitePool, tournament_id: i64) -> crate::tournament::db::Tournament {
+        crate::tournament::db::get_tournament(pool, tournament_id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_invitee_survives_close_checkin_and_is_left_out_of_its_counts() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        // 2 signs up and checks in, 3 signs up and never does, 4 is invited.
+        sign_up(&pool, tournament.id, 2, 200, "Checked").await;
+        sign_up(&pool, tournament.id, 3, 300, "Absent").await;
+        let outcome = invite_to(&pool, &tournament, 4, "Invitee", None).await;
+        assert!(
+            matches!(outcome, crate::tournament::invite::InviteOutcome::Invited { .. }),
+            "{outcome:?}"
+        );
+
+        crate::tournament::db::update_tournament_status(&pool, tournament.id, "checkin")
+            .await
+            .unwrap();
+        let tournament = reload(&pool, tournament.id).await;
+        crate::tournament::checkin::checkin(&pool, &tournament, 2)
+            .await
+            .unwrap();
+
+        // 1 of 2, not 1 of 3: the invitee was never asked, so counting them
+        // would report a field that had not confirmed.
+        let outcome = crate::tournament::checkin::close(&pool, &tournament).await.unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::checkin::CloseCheckinOutcome::Closed {
+                checked_in_count: 1,
+                no_show_count: 1
+            }
+        );
+
+        let entries = entries_of(&pool, tournament.id).await;
+        let status_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().status.clone();
+        assert_eq!(status_of(2), "active");
+        assert_eq!(status_of(3), "no_show");
+        assert_eq!(status_of(4), "active", "an invitee is exempt from the sweep");
+    }
+
+    #[tokio::test]
+    async fn an_invite_past_the_cap_is_refused_but_a_correction_inside_a_full_field_is_not() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::set_entrant_cap(&pool, tournament.id, 2)
+            .await
+            .unwrap();
+        let tournament = reload(&pool, tournament.id).await;
+
+        invite_to(&pool, &tournament, 2, "A", None).await;
+        invite_to(&pool, &tournament, 3, "B", None).await;
+
+        let outcome = invite_to(&pool, &tournament, 4, "C", None).await;
+        assert_eq!(outcome, crate::tournament::invite::InviteOutcome::FieldFull { cap: 2 });
+        assert!(
+            crate::tournament::db::get_entry(&pool, tournament.id, 4)
+                .await
+                .unwrap()
+                .is_none(),
+            "a refused invite must write nothing"
+        );
+
+        // Correcting a name is not a third entrant, so the cap must not block it.
+        let outcome = invite_to(&pool, &tournament, 3, "B-corrected", None).await;
+        assert!(
+            matches!(outcome, crate::tournament::invite::InviteOutcome::Reinvited { .. }),
+            "{outcome:?}"
+        );
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 3)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.display_name, "B-corrected");
+    }
+
+    #[tokio::test]
+    async fn uninvite_is_scoped_to_entries_an_admin_created() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        sign_up(&pool, tournament.id, 2, 200, "SelfMade").await;
+        invite_to(&pool, &tournament, 3, "Invited", None).await;
+
+        let uninvite = async |user_id| {
+            crate::tournament::invite::uninvite(&pool, &tournament, user_id)
+                .await
+                .unwrap()
+        };
+
+        assert_eq!(
+            uninvite(2).await,
+            crate::tournament::invite::UninviteOutcome::NotInvited {
+                display_name: "SelfMade".to_string()
+            }
+        );
+        assert_eq!(
+            uninvite(99).await,
+            crate::tournament::invite::UninviteOutcome::NotInField
+        );
+        assert_eq!(
+            uninvite(3).await,
+            crate::tournament::invite::UninviteOutcome::Uninvited {
+                display_name: "Invited".to_string()
+            }
+        );
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 3)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.status, "withdrawn", "entries are never deleted");
+        assert_eq!(entry.invited_by, Some(1), "how the entry came to exist is kept");
+        assert_eq!(
+            uninvite(3).await,
+            crate::tournament::invite::UninviteOutcome::AlreadyOut {
+                display_name: "Invited".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reinvite_brings_an_uninvited_entrant_back() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "Invited", None).await;
+        crate::tournament::invite::uninvite(&pool, &tournament, 2)
+            .await
+            .unwrap();
+
+        let outcome = invite_to(&pool, &tournament, 2, "Invited", None).await;
+        assert!(
+            matches!(outcome, crate::tournament::invite::InviteOutcome::Reinvited { .. }),
+            "{outcome:?}"
+        );
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.status, "active");
+    }
+
+    #[tokio::test]
+    async fn a_seeded_invite_leaves_the_field_contiguous_and_the_order_manual() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "A", None).await;
+        invite_to(&pool, &tournament, 3, "B", None).await;
+
+        let outcome = invite_to(&pool, &tournament, 4, "C", Some(1)).await;
+        assert_eq!(
+            outcome,
+            crate::tournament::invite::InviteOutcome::Invited {
+                display_name: "C".to_string(),
+                seed: Some(1)
+            }
+        );
+
+        let entries = entries_of(&pool, tournament.id).await;
+        let mut seeds: Vec<i64> = entries.iter().filter_map(|e| e.seed).collect();
+        seeds.sort_unstable();
+        assert_eq!(seeds, vec![1, 2, 3], "the field must stay 1..n for start");
+        let placed = entries.iter().find(|e| e.user_id == 4).unwrap();
+        assert_eq!(placed.seed, Some(1));
+
+        // Without this the seeding pass at close-checkin discards the placement.
+        assert_eq!(reload(&pool, tournament.id).await.seed_source, "manual");
+    }
+
+    #[tokio::test]
+    async fn a_seed_outside_the_field_is_refused_before_the_invite_is_written() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "A", None).await;
+
+        // Two entrants after this one lands, so 3 is one past the end.
+        let outcome = invite_to(&pool, &tournament, 3, "B", Some(3)).await;
+        assert_eq!(
+            outcome,
+            crate::tournament::invite::InviteOutcome::SeedOutOfRange { field_size: 2 }
+        );
+        assert!(
+            crate::tournament::db::get_entry(&pool, tournament.id, 3)
+                .await
+                .unwrap()
+                .is_none(),
+            "a half-written invite would leave an admin guessing which half"
+        );
+    }
+
+    #[tokio::test]
+    async fn uninviting_from_a_seeded_field_closes_the_gap_it_leaves() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "A", None).await;
+        invite_to(&pool, &tournament, 3, "B", None).await;
+        invite_to(&pool, &tournament, 4, "C", Some(1)).await;
+
+        crate::tournament::invite::uninvite(&pool, &tournament, 4)
+            .await
+            .unwrap();
+
+        let entries = entries_of(&pool, tournament.id).await;
+        let mut seeds: Vec<i64> = entries
+            .iter()
+            .filter(|e| e.status == "active")
+            .filter_map(|e| e.seed)
+            .collect();
+        seeds.sort_unstable();
+        assert_eq!(
+            seeds,
+            vec![1, 2],
+            "removing seed 1 must not leave the field starting at 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unseeded_field_is_left_unseeded_by_an_uninvite() {
+        // Compacting an order nobody wrote would invent one, and the seeding
+        // panel would then show a ranking no organizer asked for.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "A", None).await;
+        invite_to(&pool, &tournament, 3, "B", None).await;
+
+        crate::tournament::invite::uninvite(&pool, &tournament, 3)
+            .await
+            .unwrap();
+
+        let entries = entries_of(&pool, tournament.id).await;
+        assert!(
+            entries.iter().all(|e| e.seed.is_none()),
+            "no seed should have been invented"
+        );
+    }
+
+    #[tokio::test]
+    async fn inviting_closes_once_the_order_is_being_finalized() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "seeding").await;
+
+        let outcome = invite_to(&pool, &tournament, 2, "A", None).await;
+        assert_eq!(
+            outcome,
+            crate::tournament::invite::InviteOutcome::InvitesClosed {
+                current_status: "seeding".to_string()
+            }
+        );
+        assert!(
+            crate::tournament::db::get_entry(&pool, tournament.id, 2)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invite_needs_a_name_to_search_the_lobby_browser_for() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+
+        let outcome = invite_to(&pool, &tournament, 2, "   ", None).await;
+        assert_eq!(outcome, crate::tournament::invite::InviteOutcome::NameRequired);
+        assert!(
+            crate::tournament::db::get_entry(&pool, tournament.id, 2)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invite_never_overwrites_a_profile_the_player_already_bound() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(200), "RealName")
+            .await
+            .unwrap();
+
+        invite_to(&pool, &tournament, 2, "Guess", None).await;
+
+        let player = crate::tournament::db::get_player(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(player.aoe4_id, Some(200), "the binding is theirs, not the organizer's");
+        assert_eq!(player.display_name, "RealName");
+        // The entry still carries the organizer's assertion, which is what the
+        // set panel marks as unverified.
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.aoe4_id, None);
+        assert_eq!(entry.display_name, "Guess");
+    }
+
+    #[tokio::test]
+    async fn an_invitee_who_already_had_a_profile_has_their_entry_bound_on_register() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(200), "RealName")
+            .await
+            .unwrap();
+        invite_to(&pool, &tournament, 2, "Guess", None).await;
+
+        // No argument and no aoe4world call: the entry catches up with the row.
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::ProfileLinked {
+                display_name: "RealName".to_string(),
+                elo: None,
+                entrant_number: 1
+            }
+        );
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.aoe4_id, Some(200));
+        assert_eq!(entry.display_name, "RealName");
+    }
+
+    #[tokio::test]
+    async fn an_invitee_naming_a_profile_another_user_owns_is_refused_with_nothing_written() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::insert_player_if_absent(&pool, 9, Some(500), "Owner")
+            .await
+            .unwrap();
+        invite_to(&pool, &tournament, 2, "Guess", None).await;
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, Some(500))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::ProfileClaimedByAnother {
+                other_user_id: 9,
+                other_display_name: "Owner".to_string()
+            }
+        );
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.aoe4_id, None, "a refused claim must leave the entry alone");
+    }
+
+    #[tokio::test]
+    async fn an_invitee_with_no_profile_and_no_argument_is_simply_already_registered() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "Guess", None).await;
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::AlreadyRegistered {
+                display_name: "Guess".to_string(),
+                entrant_number: 1
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_entry_still_ignores_a_supplied_profile() {
+        // Only an unbound entry looks at the argument. A real snapshot stays
+        // immutable, and `/tournament rebind` stays the way to change a binding.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        sign_up(&pool, tournament.id, 2, 200, "Bound").await;
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, Some(999))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::AlreadyRegistered {
+                display_name: "Bound".to_string(),
+                entrant_number: 1
+            }
+        );
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.aoe4_id, Some(200));
     }
 }
