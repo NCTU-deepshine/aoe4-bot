@@ -59,6 +59,9 @@ mod tests {
     /// The version that adds `invited_by`.
     const INVITED_ENTRANTS: i64 = 8;
 
+    /// The version that adds `registration_mode`.
+    const REGISTRATION_MODE: i64 = 9;
+
     /// A pool migrated to just *before* `version`, so a migration can be applied to
     /// a database that already holds rows.
     ///
@@ -224,6 +227,47 @@ mod tests {
 
         let result = crate::tournament::db::set_seed_source(&pool, id, "invited").await;
         assert!(result.is_err(), "the check constraint should have refused it");
+    }
+
+    #[tokio::test]
+    async fn registration_mode_round_trips_and_rejects_anything_else() {
+        let pool = test_pool().await;
+        let id = crate::tournament::db::insert_tournament(&pool, "relic-cup", "Relic Cup", 1)
+            .await
+            .unwrap();
+
+        let mode_of = async |id| {
+            crate::tournament::db::get_tournament(&pool, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .registration_mode
+        };
+        assert_eq!(mode_of(id).await, "open", "a new tournament has a public door");
+
+        crate::tournament::db::set_registration_mode(&pool, id, "invite_only")
+            .await
+            .unwrap();
+        assert_eq!(mode_of(id).await, "invite_only");
+
+        let result = crate::tournament::db::set_registration_mode(&pool, id, "members_only").await;
+        assert!(result.is_err(), "the check constraint should have refused it");
+    }
+
+    #[tokio::test]
+    async fn migrating_a_populated_database_defaults_registration_mode_to_open() {
+        // A tournament that predates the column was taking public sign-ups, and
+        // must keep taking them rather than silently shutting its door.
+        let pool = pool_migrated_to_before(REGISTRATION_MODE).await;
+        sqlx::query("insert into tournaments (slug, name, created_by) values ('cup', 'Cup', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::migrate!().run(&pool).await.unwrap();
+
+        let tournament = crate::tournament::db::get_tournament(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(tournament.registration_mode, "open");
     }
 
     #[tokio::test]
@@ -3698,5 +3742,153 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.aoe4_id, Some(200));
+    }
+
+    /// A tournament with the public door shut.
+    async fn invite_only_tournament(pool: &SqlitePool) -> crate::tournament::db::Tournament {
+        let tournament = setup_tournament(pool, "registration").await;
+        crate::tournament::db::set_registration_mode(pool, tournament.id, "invite_only")
+            .await
+            .unwrap();
+        reload(pool, tournament.id).await
+    }
+
+    #[tokio::test]
+    async fn a_stranger_cannot_sign_themselves_into_an_invite_only_field() {
+        let pool = test_pool().await;
+        let tournament = invite_only_tournament(&pool).await;
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(200), "Stranger")
+            .await
+            .unwrap();
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, None)
+            .await
+            .unwrap();
+        // Not RegistrationClosed: that wording sends people looking for a reopen
+        // that is never coming.
+        assert_eq!(outcome, crate::tournament::registration::RegisterOutcome::InviteOnly);
+        assert!(
+            crate::tournament::db::get_entry(&pool, tournament.id, 2)
+                .await
+                .unwrap()
+                .is_none(),
+            "a refused sign-up must write nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invited_entrant_can_still_withdraw_from_an_invite_only_field() {
+        // The whole reason this is three states and not two: shutting the public
+        // door does not lock anyone in.
+        let pool = test_pool().await;
+        let tournament = invite_only_tournament(&pool).await;
+        invite_to(&pool, &tournament, 2, "Invited", None).await;
+
+        let outcome = crate::tournament::registration::withdraw(&pool, &tournament, 2)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::tournament::registration::WithdrawOutcome::Success);
+    }
+
+    #[tokio::test]
+    async fn coming_back_from_a_withdrawal_needs_another_invite() {
+        let pool = test_pool().await;
+        let tournament = invite_only_tournament(&pool).await;
+        invite_to(&pool, &tournament, 2, "Invited", None).await;
+        crate::tournament::registration::withdraw(&pool, &tournament, 2)
+            .await
+            .unwrap();
+
+        // Rejoining is a sign-up, so the shut door refuses it too.
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::tournament::registration::RegisterOutcome::InviteOnly);
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.status, "withdrawn", "the refusal must not have revived them");
+
+        // The way back in is the organizers' own verb.
+        invite_to(&pool, &tournament, 2, "Invited", None).await;
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.status, "active");
+    }
+
+    #[tokio::test]
+    async fn an_invitee_can_still_bind_a_profile_in_an_invite_only_field() {
+        // Invite-only is exactly the state an invitee binds in, so the gate must
+        // not shut the door on the people the mode exists to admit.
+        let pool = test_pool().await;
+        let tournament = invite_only_tournament(&pool).await;
+        crate::tournament::db::insert_player_if_absent(&pool, 2, Some(200), "RealName")
+            .await
+            .unwrap();
+        invite_to(&pool, &tournament, 2, "Guess", None).await;
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::ProfileLinked {
+                display_name: "RealName".to_string(),
+                elo: None,
+                entrant_number: 1
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn inviting_does_not_consult_the_mode() {
+        // `invite` is the organizers' door; `registration_mode` governs the public
+        // one. An open event can still have invited entrants alongside sign-ups.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        assert_eq!(tournament.registration_mode, "open");
+
+        let outcome = invite_to(&pool, &tournament, 2, "Invited", None).await;
+        assert!(
+            matches!(outcome, crate::tournament::invite::InviteOutcome::Invited { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutting_the_door_leaves_everyone_already_in_the_field_in_it() {
+        // The mode governs the door, not the roster — flipping it mid-registration
+        // must not eject the people who arrived through the open one.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        sign_up(&pool, tournament.id, 2, 200, "Early").await;
+
+        crate::tournament::db::set_registration_mode(&pool, tournament.id, "invite_only")
+            .await
+            .unwrap();
+        let tournament = reload(&pool, tournament.id).await;
+
+        let entry = crate::tournament::db::get_entry(&pool, tournament.id, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.status, "active");
+        // And they can still be told apart from an invitee, so the sweep and the
+        // counter treat them as the self-registered entrant they are.
+        assert_eq!(entry.invited_by, None);
+
+        let outcome = crate::tournament::registration::register(&pool, &tournament, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::tournament::registration::RegisterOutcome::AlreadyRegistered {
+                display_name: "Early".to_string(),
+                entrant_number: 1
+            }
+        );
     }
 }

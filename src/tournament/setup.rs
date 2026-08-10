@@ -422,6 +422,7 @@ mod tests {
             entrant_cap: 32,
             scheduled_start_at: scheduled.then(Utc::now),
             seed_source: "suggested".to_string(),
+            registration_mode: "open".to_string(),
             created_by: 1,
             created_at: Utc::now(),
             started_at: None,

@@ -384,12 +384,14 @@ pub async fn create(
     // Tournaments start in `registration` status immediately, with no separate
     // "open registration" command — so this is the only
     // place the panel can ever get posted.
-    // The cap is `not null default 32`, so the panel can show it from the start
-    // even though `/tournament setup` has not run yet.
-    let cap = tournament_db::get_tournament(pool, tournament_id)
-        .await?
-        .map_or(32, |t| t.entrant_cap);
-    let register_message_id = panel::post_initial(ctx.http(), register.id, tournament_id, &name, cap).await?;
+    // The cap and the mode are both `not null` with defaults, so the panel can
+    // show them from the start even though `/tournament setup` has not run yet.
+    let fresh = tournament_db::get_tournament(pool, tournament_id).await?;
+    let cap = fresh.as_ref().map_or(32, |t| t.entrant_cap);
+    let state = fresh
+        .as_ref()
+        .map_or(registration::RegistrationState::Open, panel::state_of);
+    let register_message_id = panel::post_initial(ctx.http(), register.id, tournament_id, &name, cap, state).await?;
     tournament_db::set_register_message_id(pool, tournament_id, to_db_id(register_message_id)).await?;
 
     // The record a later `/tournament delete` is audited against: what existed,
@@ -1151,6 +1153,9 @@ pub async fn setup(
     #[description = "When it starts, as YYYY-MM-DD HH:MM in UTC+8"]
     #[description_localized("zh-TW", "開賽時間，格式 YYYY-MM-DD HH:MM（UTC+8）")]
     start_time: Option<String>,
+    #[description = "Invite-only: nobody can sign themselves up, only /tournament invite adds them"]
+    #[description_localized("zh-TW", "邀請制：無法自行報名，只能由主辦方用 /tournament invite 加入")]
+    invite_only: Option<bool>,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let locale = Locale::from_context(ctx);
@@ -1186,6 +1191,14 @@ pub async fn setup(
         tournament_db::set_scheduled_start_at(pool, tournament.id, parsed).await?;
     }
 
+    if let Some(invite_only) = invite_only {
+        // Only the door changes. Anyone who already signed up stays in the field
+        // — the summary reports both, so a mode flip over an existing roster is
+        // visible rather than surprising.
+        let mode = if invite_only { "invite_only" } else { "open" };
+        tournament_db::set_registration_mode(pool, tournament.id, mode).await?;
+    }
+
     // Re-read so the summary reflects what was just written.
     let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
     let presets = tournament_db::list_round_presets(pool, tournament.id).await?;
@@ -1194,11 +1207,11 @@ pub async fn setup(
         tournament.id,
         &tournament.slug,
         ctx.author(),
-        &(cap, start_time),
+        &(cap, start_time, invite_only),
     );
 
-    // The panel displays both the cap and the start time, so it goes stale the
-    // moment either is written.
+    // The panel displays the cap, the start time and which door is open, so it
+    // goes stale the moment any of them is written.
     panel::refresh_now(ctx.http(), pool, &tournament).await?;
 
     let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
@@ -1293,12 +1306,21 @@ fn setup_summary(
         )
     };
 
+    // The resolved state rather than the raw mode, so this and the panel cannot
+    // describe the same event differently.
+    let door = match panel::state_of(tournament) {
+        registration::RegistrationState::Open => locale.pick("公開報名", "open to sign-ups"),
+        registration::RegistrationState::InviteOnly => locale.pick("邀請制（僅限主辦方加入）", "invite-only"),
+        registration::RegistrationState::Closed => locale.pick("已結束", "closed"),
+    };
+
     format!(
-        "**{} — {}**\n{}: {registered}/{}\n{}: {start}{placeholder}\n{}:\n{preset_lines}{still_needed}",
+        "**{} — {}**\n{}: {registered}/{}\n{}: {door}\n{}: {start}{placeholder}\n{}:\n{preset_lines}{still_needed}",
         tournament.name,
         locale.pick("賽事設定", "setup"),
         locale.pick("已報名 / 上限", "Registered / cap"),
         tournament.entrant_cap,
+        locale.pick("報名方式", "Registration"),
         locale.pick("開賽時間", "Start time"),
         locale.pick("抽選預設", "Draft presets"),
     )
@@ -1692,6 +1714,7 @@ async fn refresh_register_panel(
         tournament.id,
         &tournament.name,
         tournament.entrant_cap,
+        panel::state_of(tournament),
     )
     .await
     {

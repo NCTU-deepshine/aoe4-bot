@@ -34,6 +34,49 @@ pub(crate) fn registration_is_open(status: &str) -> bool {
     status == "registration"
 }
 
+/// Which door into the field is open, from the phase and the mode together.
+///
+/// This exists because the gate and the panel used to share an `open: bool`, and
+/// a third state cannot be spelled as a bool without them eventually disagreeing
+/// about which door is shut. Every reader — the sign-up gate, the title, the
+/// body and the two buttons — resolves the same value from the same two columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegistrationState {
+    Open,
+    /// Still gathering a field, but only the organizers may add to it.
+    InviteOnly,
+    /// Past registration entirely: the panel is a record of what happened.
+    Closed,
+}
+
+impl RegistrationState {
+    /// Total on purpose: `registration_mode`'s `check` makes anything else
+    /// unreachable, and falling back to the open door beats a panic on a value a
+    /// later migration adds — `seeding::SeedPolicy::from_source`'s precedent.
+    pub(crate) fn resolve(status: &str, registration_mode: &str) -> Self {
+        if !registration_is_open(status) {
+            RegistrationState::Closed
+        } else if registration_mode == "invite_only" {
+            RegistrationState::InviteOnly
+        } else {
+            RegistrationState::Open
+        }
+    }
+
+    pub(crate) fn accepts_signups(self) -> bool {
+        matches!(self, RegistrationState::Open)
+    }
+
+    /// Broader than `accepts_signups`, and the reason this is three states rather
+    /// than two: an invited player pulling out before the event is legitimate, so
+    /// invite-only shuts the door without locking anyone in. Past registration
+    /// both go together — the panel is history by then, and
+    /// `/tournament withdraw` still works.
+    pub(crate) fn accepts_withdrawals(self) -> bool {
+        matches!(self, RegistrationState::Open | RegistrationState::InviteOnly)
+    }
+}
+
 /// 1-based rank of `user_id`'s entry by `registered_at` (ties broken by `user_id`
 /// for determinism) — not a raw row count, which would drift after a
 /// withdraw-then-rejoin cycle if other entrants joined in the meantime.
@@ -92,6 +135,10 @@ pub(crate) enum RegisterOutcome {
     ProfileClaimRace,
     LookupFailed,
     RegistrationClosed,
+    /// Not the same refusal as `RegistrationClosed`, whose wording sends people
+    /// looking for a reopen. Here there is nothing to wait for: the field is the
+    /// organizers' to pick.
+    InviteOnly,
     /// The field is at its cap. Refused before any write.
     FieldFull {
         cap: i64,
@@ -192,6 +239,13 @@ impl RegisterOutcome {
             RegisterOutcome::RegistrationClosed => locale.pick(
                 format!("**{tournament_name}** 的報名已經結束。"),
                 format!("Registration is closed for **{tournament_name}**."),
+            ),
+            RegisterOutcome::InviteOnly => locale.pick(
+                format!("**{tournament_name}** 是邀請制賽事，參賽名單由主辦方決定。如果覺得應該有你，請聯絡主辦方。"),
+                format!(
+                    "**{tournament_name}** is invite-only — the organizers pick the field. Talk to them if you \
+                     think you should be in it."
+                ),
             ),
             RegisterOutcome::FieldFull { cap } => locale.pick(
                 format!("**{tournament_name}** 的名額已滿（上限 {cap} 人）。有人退賽時就會空出名額。"),
@@ -380,9 +434,15 @@ async fn register_existing_entry(
     user_id: i64,
     supplied: Option<i64>,
     entry: TournamentEntry,
+    state: RegistrationState,
 ) -> Result<RegisterOutcome, sqlx::Error> {
     let reactivated = entry.status == "withdrawn";
     if reactivated {
+        // Coming back is a sign-up, so an invite-only field refuses it the same
+        // way it refuses a stranger — the way back in is another invite.
+        if !state.accepts_signups() {
+            return Ok(RegisterOutcome::InviteOnly);
+        }
         // Rejoining takes a slot like any other sign-up, so the cap applies
         // here too — otherwise withdraw-then-rejoin walks straight past it.
         if let Some(full) = field_full(pool, tournament).await? {
@@ -442,12 +502,20 @@ pub(crate) async fn register(
     user_id: i64,
     aoe4_id: Option<i64>,
 ) -> Result<RegisterOutcome, sqlx::Error> {
-    if !registration_is_open(&tournament.status) {
+    let state = RegistrationState::resolve(&tournament.status, &tournament.registration_mode);
+    if state == RegistrationState::Closed {
         return Ok(RegisterOutcome::RegistrationClosed);
     }
 
+    // Before the invite-only gate, not after: an invitee binding a profile is
+    // running this very command in exactly this state, and refusing them here
+    // would shut the door on the people the mode exists to admit.
     if let Some(entry) = db::get_entry(pool, tournament.id, user_id).await? {
-        return register_existing_entry(pool, tournament, user_id, aoe4_id, entry).await;
+        return register_existing_entry(pool, tournament, user_id, aoe4_id, entry, state).await;
+    }
+
+    if !state.accepts_signups() {
+        return Ok(RegisterOutcome::InviteOnly);
     }
 
     if let Some(full) = field_full(pool, tournament).await? {
@@ -829,6 +897,69 @@ mod tests {
 
         assert_eq!(entrant_number(&entries, 2), 1);
         assert_eq!(entrant_number(&entries, 5), 2);
+    }
+
+    #[test]
+    fn the_phase_decides_before_the_mode_does() {
+        // Invite-only is a state of an open registration, not a fourth phase —
+        // once check-in has opened there is no door of either kind.
+        for status in ["checkin", "seeding", "running", "completed", "canceled"] {
+            for mode in ["open", "invite_only"] {
+                assert_eq!(
+                    RegistrationState::resolve(status, mode),
+                    RegistrationState::Closed,
+                    "{status}/{mode}"
+                );
+            }
+        }
+        assert_eq!(
+            RegistrationState::resolve("registration", "open"),
+            RegistrationState::Open
+        );
+        assert_eq!(
+            RegistrationState::resolve("registration", "invite_only"),
+            RegistrationState::InviteOnly
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_mode_leaves_the_public_door_open() {
+        // The column's `check` makes this unreachable; falling back beats a panic
+        // on a value a later migration adds, and the safe fallback is the one
+        // that refuses nobody.
+        assert_eq!(RegistrationState::resolve("registration", ""), RegistrationState::Open);
+        assert_eq!(
+            RegistrationState::resolve("registration", "members_only"),
+            RegistrationState::Open
+        );
+    }
+
+    #[test]
+    fn invite_only_is_the_one_state_where_the_two_buttons_disagree() {
+        assert!(RegistrationState::Open.accepts_signups());
+        assert!(RegistrationState::Open.accepts_withdrawals());
+
+        // Shutting the public door does not lock the invited in.
+        assert!(!RegistrationState::InviteOnly.accepts_signups());
+        assert!(RegistrationState::InviteOnly.accepts_withdrawals());
+
+        // Past registration the panel is a record and both go together.
+        assert!(!RegistrationState::Closed.accepts_signups());
+        assert!(!RegistrationState::Closed.accepts_withdrawals());
+    }
+
+    #[test]
+    fn the_invite_only_refusal_does_not_send_anyone_looking_for_a_reopen() {
+        for locale in [Locale::ZhTw, Locale::En] {
+            let invite_only = RegisterOutcome::InviteOnly.message("Relic Cup", locale);
+            let closed = RegisterOutcome::RegistrationClosed.message("Relic Cup", locale);
+            assert_ne!(invite_only, closed, "the two refusals must not read alike");
+            assert!(invite_only.contains("Relic Cup"), "{invite_only}");
+        }
+        let zh = RegisterOutcome::InviteOnly.message("Relic Cup", Locale::ZhTw);
+        let en = RegisterOutcome::InviteOnly.message("Relic Cup", Locale::En);
+        assert!(zh.contains("邀請制"), "{zh}");
+        assert!(en.contains("invite-only"), "{en}");
     }
 
     #[test]

@@ -41,6 +41,9 @@ pub(crate) struct Tournament {
     pub entrant_cap: i64,
     pub scheduled_start_at: Option<DateTime<Utc>>,
     pub seed_source: String,
+    /// `open | invite_only`. Which door into the field is open, as opposed to
+    /// `status`, which says whether any door is.
+    pub registration_mode: String,
     pub created_by: i64,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -80,7 +83,7 @@ pub(crate) async fn get_tournament(pool: &SqlitePool, id: i64) -> Result<Option<
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
                draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
-               entrant_cap, scheduled_start_at, seed_source, created_by, created_at,
+               entrant_cap, scheduled_start_at, seed_source, registration_mode, created_by, created_at,
                started_at, completed_at
         from tournaments
         where id = ?1
@@ -98,7 +101,7 @@ pub(crate) async fn get_tournament_by_slug(pool: &SqlitePool, slug: &str) -> Res
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
                draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
-               entrant_cap, scheduled_start_at, seed_source, created_by, created_at,
+               entrant_cap, scheduled_start_at, seed_source, registration_mode, created_by, created_at,
                started_at, completed_at
         from tournaments
         where slug = ?1
@@ -288,6 +291,23 @@ pub(crate) async fn set_seed_source(pool: &SqlitePool, id: i64, seed_source: &st
     Ok(())
 }
 
+/// Whether the public may sign themselves up. Read only through
+/// `registration::RegistrationState`, so the gate and the panel cannot form
+/// different opinions of it; `/tournament setup` is the only writer.
+pub(crate) async fn set_registration_mode(
+    pool: &SqlitePool,
+    id: i64,
+    registration_mode: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournaments set registration_mode = ?1 where id = ?2")
+        .bind(registration_mode)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
 /// Entrants occupying a slot. `withdrawn` and `no_show` rows persist but are
 /// not in the field, so withdrawing genuinely frees a place against the cap.
 pub(crate) async fn count_active_entries(pool: &SqlitePool, tournament_id: i64) -> Result<i64, sqlx::Error> {
@@ -386,7 +406,7 @@ pub(crate) async fn get_tournament_by_any_channel_id(
         select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
                register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
                draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
-               entrant_cap, scheduled_start_at, seed_source, created_by, created_at,
+               entrant_cap, scheduled_start_at, seed_source, registration_mode, created_by, created_at,
                started_at, completed_at
         from tournaments
         where announce_channel_id = ?1

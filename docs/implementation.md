@@ -37,13 +37,14 @@ decides the order is one concrete event: **an invite-only 8-player single elimin
 end.** Everything that event needs is M1. Everything that only makes running it nicer is M2. Everything that
 replaces work a human can already do is M3.
 
-Landed so far: chunks 1–12, 14, 16–19, 24–32. Dropped: 13, 15.
+Landed so far: chunks 1–12, 14, 16–19, 24–33. Dropped: 13, 15. **M1 is complete**; what remains is M2 and M3.
 
-**Where that event stops today.** The core loop runs: `/set report` and `/set award` put a result in, the winner
-advances, the next round's threads and draft rooms open, and the final writes `completed`. What is missing is the
-door the event comes in through. Every entrant must still sign themselves up against a real aoe4world profile,
-so a curated field cannot be composed at all — no admin can put a player in, and nothing shuts the public door
-behind them.
+**Where that event stands today.** Every piece of it is built. An organizer creates the tournament, marks it
+invite-only, invites eight members by name, closes check-in with nobody having pressed anything, starts, and the
+bracket runs on `/set report` down to a champion. **What has not happened is running it.** Every Discord surface
+across 18–33 — thread opening, archive-and-lock, the next round's thread, the unverified seat line, every panel
+edit — has no automated coverage and cannot get any, so none of it has executed even once. The dry run below is
+what turns "complete" into "works".
 
 ### M1 — the event runs end to end
 
@@ -66,12 +67,16 @@ are additive on top of a proven core; the reverse is not true.
 - **33** — invite-only registration mode, so the public door is actually shut rather than merely unadvertised.
   `entrant_cap` alone does not do it: a stranger can still take one of the eight seats.
 
-**The event is run once, at the end, not after each chunk.** Nothing between here and 33 can be exercised
-end to end anyway — an invited field needs 31 through 33 before it exists — so a dry run per chunk would
-test the same partial path repeatedly. The cost is that the Discord half of 18 and 19 accumulates unrun
-until then: opening a thread, archiving and locking it, opening the next round's, and every panel edit along
-the way. **None of it has automated coverage and none of it can get any**, so when the run finally happens,
-treat a failure as being anywhere in 18–33 rather than in whatever landed last.
+**The event is run once, at the end, not after each chunk.** Nothing between 18 and 33 could be exercised end to
+end anyway — an invited field needs 31 through 33 before it exists — so a dry run per chunk would have tested the
+same partial path repeatedly. The cost is that the Discord half of all five accumulated unrun: opening a thread,
+archiving and locking it, opening the next round's, and every panel edit along the way. **None of it has
+automated coverage and none of it can get any**, so treat a failure in the run as being anywhere in 18–33 rather
+than in whatever landed last.
+
+**The run, now that 33 has landed.** Create; `setup` with a cap, a real start time and `invite_only: true`;
+`preset`; eight invites; `close-checkin`; `start`; then `/set report` a set through and let it play down to
+`completed`.
 
 **An invited entrant is still a Discord member.** `/tournament invite` names one, and the entry is keyed on their
 Discord id — which is how they are notified, added to their set thread, mentioned in its panel and handed their
