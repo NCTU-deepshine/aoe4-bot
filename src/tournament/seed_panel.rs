@@ -25,7 +25,8 @@ const SEED_DISPLAY_CAP: usize = 24;
 
 /// Pure. Ordered by `seeding::display_order`, the same key the bracket drawing
 /// uses — `seed` is authoritative, and `suggested_seed` is shown alongside only
-/// so an organizer can see what they overrode.
+/// so an organizer can see what they overrode. A 📌 marks a pinned seat, so an
+/// organizer can tell a claimed seat from one the tiering just happened to fill.
 pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
     let field = display_order(entries);
 
@@ -42,10 +43,11 @@ pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
         .take(SEED_DISPLAY_CAP)
         .map(|e| {
             let seed = e.seed.map_or_else(|| "—".to_string(), |s| s.to_string());
+            let pin = if e.manual_seed.is_some() { " 📌" } else { "" };
             // Two columns, never one blended number.
             let atr = e.atr.map_or_else(|| "—".to_string(), |a| format!("{a:.0}"));
             let elo = e.elo.map_or_else(|| "—".to_string(), |e| e.to_string());
-            format!("`{seed:>3}` {} · ATR {atr} · ELO {elo}", e.display_name)
+            format!("`{seed:>3}` {}{pin} · ATR {atr} · ELO {elo}", e.display_name)
         })
         .collect();
     if truncated > 0 {
@@ -146,6 +148,7 @@ mod tests {
             invited_by: None,
             seed,
             suggested_seed: seed,
+            manual_seed: None,
             display_name: display_name.to_string(),
             elo,
             atr,
@@ -237,6 +240,18 @@ mod tests {
         assert!(content.contains("尚無參賽者"), "{content}");
         assert!(content.contains("No entrants yet"), "{content}");
         assert!(!content.contains("checked-in"), "{content}");
+    }
+
+    #[test]
+    fn a_pinned_seat_is_marked_and_an_unpinned_one_is_not() {
+        let mut pinned = entry(1, "Pinned", Some(1), None, Some(1000));
+        pinned.manual_seed = Some(1);
+        let entries = vec![pinned, entry(2, "Unpinned", Some(2), None, Some(900))];
+        let content = render("Relic Cup", &entries);
+        let pinned_row = content.lines().find(|line| line.contains("Pinned")).unwrap();
+        let unpinned_row = content.lines().find(|line| line.contains("Unpinned")).unwrap();
+        assert!(pinned_row.contains('📌'), "{content}");
+        assert!(!unpinned_row.contains('📌'), "{content}");
     }
 
     #[test]

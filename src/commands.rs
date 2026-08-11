@@ -812,8 +812,8 @@ pub async fn invite(
     #[description_localized("zh-TW", "對方的遊戲帳號 — 輸入名稱搜尋")]
     #[autocomplete = "auto_complete_invite_profile"]
     profile: i32,
-    #[description = "Optional seed; everyone between shifts along"]
-    #[description_localized("zh-TW", "選填的種子序，其他人會往後順移")]
+    #[description = "Optional seed to pin them to, up to the entrant cap"]
+    #[description_localized("zh-TW", "選填的種子序，可釘選至上限人數")]
     seed: Option<i64>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -1561,7 +1561,7 @@ pub async fn seed_list(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Moves an entrant to a seed. Everyone between shifts along to keep 1..n intact.
+/// Pins an entrant to a seed. Everyone else fills the rest by the suggested order.
 #[poise::command(
     slash_command,
     guild_only,
@@ -1571,10 +1571,10 @@ pub async fn seed_list(ctx: Context<'_>) -> Result<(), Error> {
 )]
 pub async fn seed_set(
     ctx: Context<'_>,
-    #[description = "The entrant to move — pick from the field"]
+    #[description = "The entrant to pin — pick from the field"]
     #[autocomplete = "autocomplete_entrant"]
     entrant: String,
-    #[description = "Their new seed; everyone between shifts along"] seed: i64,
+    #[description = "The seed to pin them to, up to the entrant cap"] seed: i64,
 ) -> Result<(), Error> {
     ctx.defer().await?;
     let locale = Locale::from_context(ctx);
@@ -1595,32 +1595,35 @@ pub async fn seed_set(
         ephemeral(ctx, outcome.message(locale)).await?;
         return Ok(());
     };
-    let field_size = i64::try_from(field.len()).unwrap_or(i64::MAX);
-    if seed < 1 || seed > field_size {
-        let outcome = seeding::SeedOutcome::OutOfRange { field_size };
+    let display_name = entry.display_name.clone();
+    if seed < 1 || seed > tournament.entrant_cap {
+        let outcome = seeding::SeedOutcome::OutOfRange {
+            cap: tournament.entrant_cap,
+        };
         audit::log_action("seed set", tournament.id, &tournament.slug, ctx.author(), &outcome);
         ephemeral(ctx, outcome.message(locale)).await?;
         return Ok(());
     }
 
-    let from = entry.seed.unwrap_or(field_size);
-    let display_name = entry.display_name.clone();
-    // Current order by seed, so the shift is relative to what the panel shows.
-    let mut ordered: Vec<&tournament_db::TournamentEntry> = field.clone();
-    ordered.sort_by_key(|e| (e.seed.unwrap_or(i64::MAX), e.user_id));
-    let current: Vec<i64> = ordered.iter().map(|e| e.user_id).collect();
-
-    // `also_suggested: false` — an override must not overwrite what the tiering
-    // proposed, or the panel loses the comparison.
-    tournament_db::set_seed_order(pool, tournament.id, &seeding::reorder(&current, target, seed), false).await?;
+    let displaced_by = tournament_db::set_manual_seed(pool, tournament.id, target, seed).await?;
+    let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
+    let displaced = displaced_by.and_then(|uid| {
+        entries
+            .iter()
+            .find(|e| e.user_id == uid)
+            .map(|e| e.display_name.clone())
+    });
+    // `also_suggested: false` — a pin must not overwrite what the tiering
+    // proposed, or the panel loses the comparison for anyone left to it.
+    tournament_db::set_seed_order(pool, tournament.id, &seeding::resolved_order(&entries), false).await?;
     // Takes the *whole* field manual, not just this entrant: seeds are
-    // written as one 1..n order, so there is no per-row notion of who was moved.
+    // written as one 1..n order, so there is no per-row notion of who was pinned.
     tournament_db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
 
-    let outcome = seeding::SeedOutcome::Moved {
+    let outcome = seeding::SeedOutcome::Pinned {
         display_name,
-        from,
-        to: seed,
+        seed,
+        displaced,
     };
     audit::log_action("seed set", tournament.id, &tournament.slug, ctx.author(), &outcome);
 

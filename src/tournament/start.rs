@@ -208,6 +208,7 @@ mod tests {
             invited_by: None,
             seed,
             suggested_seed: seed,
+            manual_seed: None,
             display_name: format!("P{user_id}"),
             elo: None,
             atr: None,

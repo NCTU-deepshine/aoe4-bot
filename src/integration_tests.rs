@@ -3064,8 +3064,8 @@ mod tests {
             .await
             .unwrap();
 
-        let shifted = crate::tournament::seeding::reorder(&[1, 2, 3, 4], 4, 1);
-        crate::tournament::db::set_seed_order(&pool, tournament.id, &shifted, false)
+        // User 4 moved to the front; the rest keep their relative order.
+        crate::tournament::db::set_seed_order(&pool, tournament.id, &[4, 1, 2, 3], false)
             .await
             .unwrap();
 
@@ -3503,6 +3503,7 @@ mod tests {
             crate::tournament::invite::InviteOutcome::Invited {
                 display_name: "C".to_string(),
                 seed: Some(1),
+                displaced: None,
                 elo: None,
             }
         );
@@ -3519,16 +3520,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_seed_outside_the_field_is_refused_before_the_invite_is_written() {
+    async fn a_seed_past_the_cap_is_refused_before_the_invite_is_written() {
         let pool = test_pool().await;
         let tournament = setup_tournament(&pool, "registration").await;
+        crate::tournament::db::set_entrant_cap(&pool, tournament.id, 4)
+            .await
+            .unwrap();
+        let tournament = reload(&pool, tournament.id).await;
         invite_to(&pool, &tournament, 2, "A", None).await;
 
-        // Two entrants after this one lands, so 3 is one past the end.
-        let outcome = invite_to(&pool, &tournament, 3, "B", Some(3)).await;
+        let outcome = invite_to(&pool, &tournament, 3, "B", Some(5)).await;
         assert_eq!(
             outcome,
-            crate::tournament::invite::InviteOutcome::SeedOutOfRange { field_size: 2 }
+            crate::tournament::invite::InviteOutcome::SeedOutOfRange { cap: 4 }
         );
         assert!(
             crate::tournament::db::get_entry(&pool, tournament.id, 3)
@@ -3537,6 +3541,96 @@ mod tests {
                 .is_none(),
             "a half-written invite would leave an admin guessing which half"
         );
+
+        let outcome = invite_to(&pool, &tournament, 3, "B", Some(0)).await;
+        assert_eq!(
+            outcome,
+            crate::tournament::invite::InviteOutcome::SeedOutOfRange { cap: 4 }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seed_past_the_current_field_is_accepted_up_to_the_cap_and_compacts() {
+        // The seat range is the event's own size, not the field composed so
+        // far — an invite-only bracket preview already draws every seat up to
+        // the cap, and an organizer should be able to place someone into one
+        // before the seats in front of it are filled.
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "A", None).await;
+
+        let outcome = invite_to(&pool, &tournament, 3, "B", Some(8)).await;
+        assert_eq!(
+            outcome,
+            crate::tournament::invite::InviteOutcome::Invited {
+                display_name: "B".to_string(),
+                seed: Some(8),
+                displaced: None,
+                elo: None,
+            },
+            "the reply names the seat asked for, even though only 2 seats are filled"
+        );
+
+        let entries = entries_of(&pool, tournament.id).await;
+        let mut seeds: Vec<i64> = entries.iter().filter_map(|e| e.seed).collect();
+        seeds.sort_unstable();
+        assert_eq!(
+            seeds,
+            vec![1, 2],
+            "the pin compacts onto the second seat until the field grows into seat 8"
+        );
+        let placed = entries.iter().find(|e| e.user_id == 3).unwrap();
+        assert_eq!(placed.seed, Some(2));
+        assert_eq!(placed.manual_seed, Some(8));
+
+        // The resolution is only recomputed on the next write that touches
+        // seeds — plain unseeded invites do not trigger one, exactly like
+        // before this change. Growing the field this far and then pinning one
+        // more entrant is what forces a fresh resolution over the whole field.
+        for (user_id, name) in [(4, "C"), (5, "D"), (6, "E"), (7, "F"), (8, "G"), (9, "H")] {
+            invite_to(&pool, &tournament, user_id, name, None).await;
+        }
+        invite_to(&pool, &tournament, 10, "I", Some(9)).await;
+
+        let entries = entries_of(&pool, tournament.id).await;
+        let placed = entries.iter().find(|e| e.user_id == 3).unwrap();
+        assert_eq!(
+            placed.seed,
+            Some(8),
+            "the field grew into seat 8, so the pin holds it now"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinning_a_seat_someone_else_holds_displaces_them() {
+        let pool = test_pool().await;
+        let tournament = setup_tournament(&pool, "registration").await;
+        invite_to(&pool, &tournament, 2, "A", Some(1)).await;
+
+        let outcome = invite_to(&pool, &tournament, 3, "B", Some(1)).await;
+        assert_eq!(
+            outcome,
+            crate::tournament::invite::InviteOutcome::Invited {
+                display_name: "B".to_string(),
+                seed: Some(1),
+                displaced: Some("A".to_string()),
+                elo: None,
+            }
+        );
+
+        let entries = entries_of(&pool, tournament.id).await;
+        let seed_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().seed;
+        let manual_seed_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().manual_seed;
+        assert_eq!(seed_of(3), Some(1));
+        assert_eq!(manual_seed_of(3), Some(1));
+        assert_eq!(
+            manual_seed_of(2),
+            None,
+            "the previous holder's pin is unset, not just outranked"
+        );
+        let mut seeds: Vec<i64> = entries.iter().filter_map(|e| e.seed).collect();
+        seeds.sort_unstable();
+        assert_eq!(seeds, vec![1, 2], "the field stays contiguous");
     }
 
     #[tokio::test]
@@ -3622,6 +3716,7 @@ mod tests {
             crate::tournament::invite::InviteOutcome::Invited {
                 display_name: "RealName".to_string(),
                 seed: None,
+                displaced: None,
                 elo: None,
             }
         );

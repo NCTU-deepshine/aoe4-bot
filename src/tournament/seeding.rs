@@ -9,6 +9,7 @@ use crate::aoe4world;
 use crate::locale::Locale;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
 use sqlx::SqlitePool;
+use std::collections::HashSet;
 
 /// The field a seeding applies to: checked-in entrants only. Closing check-in
 /// has already marked everyone else `no_show`, so a no-show or a withdrawal
@@ -71,14 +72,46 @@ pub(crate) fn display_order(entries: &[TournamentEntry]) -> Vec<&TournamentEntry
     field
 }
 
-/// The organizers' own order, as user ids — `display_order` without the rows.
+/// The field's final order: every pinned entrant on the seat it was pinned to,
+/// everyone else filling what is left, in `suggested_order`.
 ///
-/// Seeded entrants keep their relative order and anyone unseeded follows by the
-/// tiering, so writing this back **compacts** the field: a gap left by a no-show
-/// or a withdrawal closes, which is what keeps `start`'s contiguous 1..n
-/// requirement true with no separate renumber step.
-pub(crate) fn manual_order(entries: &[TournamentEntry]) -> Vec<i64> {
-    display_order(entries).iter().map(|e| e.user_id).collect()
+/// Total, and always a permutation of the field, so writing it back leaves
+/// seeds 1..n contiguous — `start`'s requirement, met by construction rather
+/// than a renumber step. A pin past the end of the field lands on the last
+/// seat instead, and climbs back to its own seat as the field grows into it —
+/// which is also what closes the gap a no-show or a withdrawal leaves, with no
+/// separate compaction pass.
+pub(crate) fn resolved_order(entries: &[TournamentEntry]) -> Vec<i64> {
+    let field = seedable(entries);
+    let seats = field.len();
+
+    let mut pins: Vec<(i64, i64)> = field
+        .iter()
+        .filter_map(|e| e.manual_seed.map(|seat| (seat, e.user_id)))
+        .collect();
+    pins.sort_by_key(|&(seat, _)| seat);
+    let pinned_ids: HashSet<i64> = pins.iter().map(|&(_, user_id)| user_id).collect();
+    let rest: Vec<i64> = suggested_order(entries)
+        .into_iter()
+        .filter(|id| !pinned_ids.contains(id))
+        .collect();
+
+    let mut pins = pins.into_iter().peekable();
+    let mut rest = rest.into_iter().peekable();
+    let mut order = Vec::with_capacity(seats);
+    for seat in 1..=i64::try_from(seats).unwrap_or(i64::MAX) {
+        // A pin is taken the moment the sweep reaches its own seat — or, for
+        // one past the field's end, once the tiering has nothing left to fill
+        // the remaining seats with.
+        let due = matches!(pins.peek(), Some(&(pin_seat, _)) if pin_seat == seat) || rest.peek().is_none();
+        let user_id = if due {
+            pins.next().map(|(_, id)| id)
+        } else {
+            rest.next()
+        };
+        order.push(user_id.expect("pins and the tiering exhaust exactly at `seats`, by construction"));
+    }
+    order
 }
 
 /// What a rating refresh does to the field's order, from
@@ -107,23 +140,6 @@ impl SeedPolicy {
             SeedPolicy::KeepManual => "manual",
         }
     }
-}
-
-/// Moves `user_id` to `new_seed` (1-based) and shifts everyone between, returning
-/// the whole new order.
-///
-/// Total by construction: the result is always a permutation of `order`, so
-/// writing it back always leaves seeds 1..n contiguous. An out-of-range seed is
-/// clamped rather than rejected — the command validates and reports separately,
-/// and this function having no failure mode is what keeps the field startable.
-pub(crate) fn reorder(order: &[i64], user_id: i64, new_seed: i64) -> Vec<i64> {
-    let mut reordered: Vec<i64> = order.iter().copied().filter(|id| *id != user_id).collect();
-    if reordered.len() == order.len() {
-        return order.to_vec(); // not in the field; nothing to move
-    }
-    let index = usize::try_from(new_seed.max(1) - 1).unwrap_or(0).min(reordered.len());
-    reordered.insert(index, user_id);
-    reordered
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,25 +191,49 @@ impl RefreshOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SeedOutcome {
-    Moved { display_name: String, from: i64, to: i64 },
+    Pinned {
+        display_name: String,
+        seed: i64,
+        /// Whoever held that seat before this pin took it, if anyone.
+        displaced: Option<String>,
+    },
     NotInField,
-    OutOfRange { field_size: i64 },
+    OutOfRange {
+        cap: i64,
+    },
 }
 
 impl SeedOutcome {
     pub(crate) fn message(&self, locale: Locale) -> String {
         match self {
-            SeedOutcome::Moved { display_name, from, to } => locale.pick(
-                format!("已將 **{display_name}** 從第 {from} 種子改到第 {to} 種子，其他人依序遞移。"),
-                format!("Moved **{display_name}** from seed {from} to seed {to}; everyone between shifts along."),
-            ),
+            SeedOutcome::Pinned {
+                display_name,
+                seed,
+                displaced,
+            } => {
+                let displaced_clause = displaced.as_deref().map_or_else(String::new, |name| {
+                    locale.pick(
+                        format!("，讓 **{name}** 讓出該種子"),
+                        format!(", displacing **{name}**"),
+                    )
+                });
+                locale.pick(
+                    format!(
+                        "已將 **{display_name}** 釘選在第 {seed} 種子{displaced_clause}；其餘參賽者依建議順序遞補。"
+                    ),
+                    format!(
+                        "Pinned **{display_name}** to seed {seed}{displaced_clause}; everyone else fills the rest \
+                         by the suggested order."
+                    ),
+                )
+            },
             SeedOutcome::NotInField => locale.pick(
                 "那位玩家不在已簽到的參賽名單中。".to_string(),
                 "That player isn't in the checked-in field.".to_string(),
             ),
-            SeedOutcome::OutOfRange { field_size } => locale.pick(
-                format!("種子序號必須介於 1 到 {field_size} 之間。"),
-                format!("Seed must be between 1 and {field_size}."),
+            SeedOutcome::OutOfRange { cap } => locale.pick(
+                format!("種子序號必須介於 1 到 {cap} 之間。"),
+                format!("Seed must be between 1 and {cap}."),
             ),
         }
     }
@@ -235,19 +275,24 @@ pub(crate) async fn refresh_ratings(
         db::set_entry_ratings(pool, tournament.id, entry.user_id, elo, atr, atr.map(|_| "esports")).await?;
     }
 
-    // Re-read: the rows above are what the ordering must sort on.
-    let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
     let total = field.len();
     match policy {
+        // "Take the suggestion back" means dropping every pin, not just
+        // outrunning them: with none left, `resolved_order` is `suggested_order`.
         SeedPolicy::Suggest => {
-            db::set_seed_order(pool, tournament.id, &suggested_order(&entries), true).await?;
+            db::clear_manual_seeds(pool, tournament.id).await?;
+            let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
+            db::set_seed_order(pool, tournament.id, &resolved_order(&entries), true).await?;
             Ok(RefreshOutcome::Refreshed { total, atr_count })
         },
-        // `also_suggested: false` — the order being kept is the organizers', so
-        // recording it as what the tiering proposed would erase the comparison
-        // the panel shows.
+        // `also_suggested: false` — pinned seats are the organizers', not the
+        // tiering's proposal, and recording them as such would erase the
+        // comparison the panel shows for anyone left to the default order.
         SeedPolicy::KeepManual => {
-            db::set_seed_order(pool, tournament.id, &manual_order(&entries), false).await?;
+            // Re-read: the ratings written above are what `resolved_order`'s own
+            // tiering pass sorts the unpinned entrants by.
+            let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
+            db::set_seed_order(pool, tournament.id, &resolved_order(&entries), false).await?;
             Ok(RefreshOutcome::KeptManual { total, atr_count })
         },
     }
@@ -266,6 +311,7 @@ mod tests {
             invited_by: None,
             seed: None,
             suggested_seed: None,
+            manual_seed: None,
             display_name: display_name.to_string(),
             elo,
             atr,
@@ -273,6 +319,13 @@ mod tests {
             status: "active".to_string(),
             registered_at: Utc::now(),
             checked_in_at: Some(Utc::now()),
+        }
+    }
+
+    fn pinned(user_id: i64, display_name: &str, seat: i64, atr: Option<f64>, elo: Option<i64>) -> TournamentEntry {
+        TournamentEntry {
+            manual_seed: Some(seat),
+            ..entry(user_id, display_name, atr, elo)
         }
     }
 
@@ -336,14 +389,6 @@ mod tests {
         assert_eq!(suggested_order(&entries), vec![1]);
     }
 
-    fn seeded(user_id: i64, display_name: &str, seed: i64, atr: Option<f64>, elo: Option<i64>) -> TournamentEntry {
-        TournamentEntry {
-            seed: Some(seed),
-            suggested_seed: Some(seed),
-            ..entry(user_id, display_name, atr, elo)
-        }
-    }
-
     #[test]
     fn the_policy_comes_from_the_column_and_is_total() {
         assert_eq!(SeedPolicy::from_source("manual"), SeedPolicy::KeepManual);
@@ -362,116 +407,143 @@ mod tests {
     }
 
     #[test]
-    fn keeping_a_manual_order_preserves_it_while_closing_a_gap() {
-        // Seed 3 no-showed, so the field is 1, 2, 4. Writing this order back is
-        // what renumbers it 1..3, so the field stays startable with no separate step.
-        let mut no_show = seeded(3, "NoShow", 3, Some(2200.0), None);
-        no_show.status = "no_show".to_string();
+    fn a_pin_holds_its_seat_while_the_rest_tier_around_it() {
+        // Pinning the weakest player to seed 1 does not touch anyone else's
+        // relative order — the strongest two still rank Strongest above Second.
         let entries = vec![
-            seeded(4, "Fourth", 4, None, Some(900)),
-            seeded(1, "First", 1, None, Some(1000)),
-            no_show,
-            seeded(2, "Second", 2, None, Some(950)),
+            pinned(1, "Weakest", 1, None, Some(900)),
+            entry(2, "Second", None, Some(1200)),
+            entry(3, "Strongest", None, Some(1500)),
         ];
-        assert_eq!(manual_order(&entries), vec![1, 2, 4]);
-    }
-
-    #[test]
-    fn a_manual_order_wins_over_ratings_that_say_the_exact_opposite() {
-        // The organizers seeded the weakest player first and the strongest last,
-        // so the ratings disagree with every single position. Anything less than
-        // a total reversal would let a partly-rating-driven sort pass by luck.
-        let entries = vec![
-            seeded(1, "Weakest", 1, None, Some(900)),
-            seeded(2, "Middle", 2, None, Some(1200)),
-            seeded(3, "Strongest", 3, None, Some(1500)),
-        ];
-
-        assert_eq!(manual_order(&entries), vec![1, 2, 3], "the seeds decide, not the ELO");
-        // And the suggestion the override is overriding really is the reverse —
-        // otherwise the assertion above proves nothing.
+        assert_eq!(resolved_order(&entries), vec![1, 3, 2]);
+        // And the suggestion the pin overrides really would have put Weakest
+        // last — otherwise the assertion above proves nothing.
         assert_eq!(suggested_order(&entries), vec![3, 2, 1]);
     }
 
     #[test]
-    fn a_later_registrant_lands_at_the_end_of_a_manual_order_rather_than_inside_it() {
-        // The price of keeping an order: the newcomer is not merged in by rating,
-        // however strong they are, until someone refreshes.
+    fn a_pin_wins_over_ratings_that_say_the_exact_opposite() {
+        // The organizers pinned the weakest player first and the strongest
+        // last, so the ratings disagree with every single seat. Anything less
+        // than a total reversal would let a partly-rating-driven sort pass by luck.
         let entries = vec![
-            seeded(1, "First", 1, None, Some(900)),
-            seeded(2, "Second", 2, None, Some(950)),
-            entry(3, "Latecomer", Some(2292.0), None),
+            pinned(1, "Weakest", 1, None, Some(900)),
+            pinned(2, "Middle", 2, None, Some(1200)),
+            pinned(3, "Strongest", 3, None, Some(1500)),
         ];
-        assert_eq!(manual_order(&entries), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn suggesting_still_discards_an_override() {
-        // The same field the two tests above keep: under `Suggest` the seeds
-        // count for nothing and the tiering decides.
-        let entries = vec![
-            seeded(1, "First", 1, None, Some(900)),
-            seeded(2, "Second", 2, None, Some(950)),
-            entry(3, "Latecomer", Some(2292.0), None),
-        ];
+        assert_eq!(resolved_order(&entries), vec![1, 2, 3], "the pins decide, not the ELO");
         assert_eq!(suggested_order(&entries), vec![3, 2, 1]);
     }
 
     #[test]
-    fn reorder_moves_a_seed_up_and_shifts_the_rest_down() {
-        assert_eq!(reorder(&[10, 20, 30, 40], 40, 2), vec![10, 40, 20, 30]);
+    fn a_pin_past_the_end_of_the_field_compacts_to_the_last_seat() {
+        let entries = vec![
+            pinned(10, "Pinned", 12, None, None),
+            entry(1, "A", None, Some(998)),
+            entry(2, "B", None, Some(997)),
+        ];
+        assert_eq!(resolved_order(&entries), vec![1, 2, 10]);
     }
 
     #[test]
-    fn reorder_moves_a_seed_down() {
-        assert_eq!(reorder(&[10, 20, 30, 40], 10, 3), vec![20, 30, 10, 40]);
-    }
-
-    #[test]
-    fn reorder_to_the_current_seed_is_a_no_op() {
-        let order = [10, 20, 30];
-        assert_eq!(reorder(&order, 20, 2), order.to_vec());
-    }
-
-    #[test]
-    fn reorder_clamps_out_of_range_seeds_rather_than_dropping_anyone() {
-        assert_eq!(reorder(&[10, 20, 30], 30, 0), vec![30, 10, 20]);
-        assert_eq!(reorder(&[10, 20, 30], 10, 99), vec![20, 30, 10]);
-    }
-
-    #[test]
-    fn reorder_always_returns_a_permutation_so_the_field_stays_contiguous() {
-        let order = [10, 20, 30, 40, 50];
-        for target in 1..=5 {
-            for moved in order {
-                let result = reorder(&order, moved, target);
-                assert_eq!(result.len(), order.len());
-                let mut sorted = result.clone();
-                sorted.sort();
-                assert_eq!(sorted, vec![10, 20, 30, 40, 50], "moving {moved} to {target}");
-            }
+    fn a_compacted_pin_climbs_back_to_its_own_seat_as_the_field_grows_into_it() {
+        let mut entries = vec![pinned(1, "Pinned", 12, None, None)];
+        for id in 2..=3 {
+            entries.push(entry(id, &format!("Filler{id}"), None, Some(1000 - id)));
         }
+        assert_eq!(
+            resolved_order(&entries),
+            vec![2, 3, 1],
+            "a field of 3 compacts the pin onto the last seat"
+        );
+
+        for id in 4..=12 {
+            entries.push(entry(id, &format!("Filler{id}"), None, Some(1000 - id)));
+        }
+        assert_eq!(
+            entries.len(),
+            12,
+            "10 fillers plus the pin, seat 12 now within the field"
+        );
+        let order = resolved_order(&entries);
+        assert_eq!(order.len(), 12);
+        assert_eq!(
+            order.last(),
+            Some(&1),
+            "the field grew into seat 12, so the pin holds it again"
+        );
     }
 
     #[test]
-    fn reorder_leaves_the_order_alone_for_someone_not_in_the_field() {
-        let order = [10, 20, 30];
-        assert_eq!(reorder(&order, 99, 1), order.to_vec());
+    fn two_pins_past_the_end_keep_their_relative_order() {
+        let mut entries = vec![
+            pinned(10, "PinnedFirst", 11, None, None),
+            pinned(11, "PinnedSecond", 12, None, None),
+        ];
+        for id in 1..=8 {
+            entries.push(entry(id, &format!("Filler{id}"), None, Some(500 - id)));
+        }
+        let order = resolved_order(&entries);
+        assert_eq!(
+            &order[8..],
+            &[10, 11],
+            "both land at the end, in the order they were pinned"
+        );
+    }
+
+    #[test]
+    fn a_pin_on_a_withdrawn_entrant_is_ignored() {
+        let mut withdrawn = pinned(1, "Gone", 1, None, Some(1000));
+        withdrawn.status = "withdrawn".to_string();
+        let entries = vec![withdrawn, entry(2, "Active", None, Some(900))];
+        assert_eq!(
+            resolved_order(&entries),
+            vec![2],
+            "a withdrawn entrant holds no seat, pinned or not"
+        );
+    }
+
+    #[test]
+    fn resolved_order_is_always_a_permutation_of_the_field() {
+        let entries = vec![
+            pinned(1, "A", 3, None, Some(950)),
+            pinned(2, "B", 7, None, Some(900)),
+            entry(3, "C", None, Some(850)),
+            entry(4, "D", None, Some(800)),
+            entry(5, "E", None, Some(750)),
+        ];
+        let order = resolved_order(&entries);
+        assert_eq!(order.len(), entries.len());
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn seed_messages_render_in_both_locales() {
-        let outcome = SeedOutcome::Moved {
+        let outcome = SeedOutcome::Pinned {
             display_name: "MarineLorD".to_string(),
-            from: 3,
-            to: 1,
+            seed: 3,
+            displaced: None,
         };
         let zh = outcome.message(Locale::ZhTw);
         let en = outcome.message(Locale::En);
         assert_ne!(zh, en);
-        // Both seeds are data and must survive either rendering.
-        assert!(zh.contains('3') && zh.contains('1'), "{zh}");
-        assert!(en.contains("seed 3") && en.contains("seed 1"), "{en}");
+        assert!(zh.contains('3'), "{zh}");
+        assert!(en.contains("seed 3"), "{en}");
+    }
+
+    #[test]
+    fn a_pin_that_displaces_someone_names_them_in_both_locales() {
+        let outcome = SeedOutcome::Pinned {
+            display_name: "MarineLorD".to_string(),
+            seed: 3,
+            displaced: Some("TheViper".to_string()),
+        };
+        let zh = outcome.message(Locale::ZhTw);
+        let en = outcome.message(Locale::En);
+        assert!(zh.contains("TheViper"), "{zh}");
+        assert!(en.contains("TheViper") && en.contains("displacing"), "{en}");
     }
 
     #[test]

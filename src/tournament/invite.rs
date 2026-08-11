@@ -43,6 +43,8 @@ pub(crate) enum InviteOutcome {
     Invited {
         display_name: String,
         seed: Option<i64>,
+        /// Whoever held that seat before this pin took it, if anyone.
+        displaced: Option<String>,
         /// Only ever `Some` alongside a fresh claim; reusing an existing
         /// binding carries none rather than an extra fetch just to show one.
         elo: Option<i64>,
@@ -52,6 +54,7 @@ pub(crate) enum InviteOutcome {
     Reinvited {
         display_name: String,
         seed: Option<i64>,
+        displaced: Option<String>,
         elo: Option<i64>,
     },
     /// They signed themselves up, so this is not an invite to withdraw on the
@@ -78,7 +81,7 @@ pub(crate) enum InviteOutcome {
         cap: i64,
     },
     SeedOutOfRange {
-        field_size: i64,
+        cap: i64,
     },
     InvitesClosed {
         current_status: String,
@@ -91,13 +94,31 @@ impl InviteOutcome {
             InviteOutcome::Invited {
                 display_name,
                 seed,
+                displaced,
                 elo,
-            } => invited_message(display_name, *seed, *elo, tournament_name, locale, false),
+            } => invited_message(
+                display_name,
+                *seed,
+                displaced.as_deref(),
+                *elo,
+                tournament_name,
+                locale,
+                false,
+            ),
             InviteOutcome::Reinvited {
                 display_name,
                 seed,
+                displaced,
                 elo,
-            } => invited_message(display_name, *seed, *elo, tournament_name, locale, true),
+            } => invited_message(
+                display_name,
+                *seed,
+                displaced.as_deref(),
+                *elo,
+                tournament_name,
+                locale,
+                true,
+            ),
             InviteOutcome::AlreadySelfRegistered { display_name } => locale.pick(
                 format!("**{display_name}** 是自己報名的，不是受邀參賽，因此無法用邀請指令調整。"),
                 format!(
@@ -135,9 +156,9 @@ impl InviteOutcome {
                 format!("**{tournament_name}** 的名額已滿（上限 {cap} 人），無法再邀請。"),
                 format!("**{tournament_name}** is full ({cap} entrants), so there's no place to invite them into."),
             ),
-            InviteOutcome::SeedOutOfRange { field_size } => locale.pick(
-                format!("種子序必須介於 1 到 {field_size} 之間。"),
-                format!("The seed must be between 1 and {field_size}."),
+            InviteOutcome::SeedOutOfRange { cap } => locale.pick(
+                format!("種子序必須介於 1 到 {cap} 之間。"),
+                format!("The seed must be between 1 and {cap}."),
             ),
             InviteOutcome::InvitesClosed { current_status } => locale.pick(
                 format!(
@@ -167,28 +188,42 @@ impl InviteOutcome {
 fn invited_message(
     display_name: &str,
     seed: Option<i64>,
+    displaced: Option<&str>,
     elo: Option<i64>,
     tournament_name: &str,
     locale: Locale,
     reinvited: bool,
 ) -> String {
     let seed = seed_clause(seed, locale);
+    let displaced = displaced
+        .map(|name| {
+            locale.pick(
+                format!("，讓 **{name}** 讓出該種子"),
+                format!(", displacing **{name}**"),
+            )
+        })
+        .unwrap_or_default();
     let elo_suffix = elo.map(|e| format!(" (ELO {e})")).unwrap_or_default();
     if reinvited {
         locale.pick(
             format!(
-                "已更新 **{display_name}**{elo_suffix} 在 **{tournament_name}** 的邀請{seed}，已連結其真實遊戲帳號。"
+                "已更新 **{display_name}**{elo_suffix} 在 **{tournament_name}** 的邀請{seed}{displaced}，已連結其\
+                 真實遊戲帳號。"
             ),
             format!(
-                "Updated **{display_name}**{elo_suffix}'s invitation to **{tournament_name}**{seed}, linked to \
-                 their real profile."
+                "Updated **{display_name}**{elo_suffix}'s invitation to **{tournament_name}**{seed}{displaced}, \
+                 linked to their real profile."
             ),
         )
     } else {
         locale.pick(
-            format!("已將 **{display_name}**{elo_suffix} 加入 **{tournament_name}**{seed}，已連結其真實遊戲帳號。"),
             format!(
-                "Added **{display_name}**{elo_suffix} to **{tournament_name}**{seed}, linked to their real profile."
+                "已將 **{display_name}**{elo_suffix} 加入 **{tournament_name}**{seed}{displaced}，已連結其真實遊戲\
+                 帳號。"
+            ),
+            format!(
+                "Added **{display_name}**{elo_suffix} to **{tournament_name}**{seed}{displaced}, linked to their \
+                 real profile."
             ),
         )
     }
@@ -279,16 +314,16 @@ pub(crate) async fn invite(
         });
     }
 
-    // Checked against the field this invite is about to produce, and before any
-    // write: an invite that half-happened and then reported a bad seed would
-    // leave an admin guessing which half.
-    let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-    let field_size =
-        i64::try_from(seeding::seedable(&entries).len()).unwrap_or(i64::MAX) + i64::from(u8::from(takes_a_place));
+    // The seat range is the event's own size, not the field composed so far —
+    // an invite-only bracket preview already draws every seat up to the cap.
+    // Checked before any write: an invite that half-happened and then reported
+    // a bad seed would leave an admin guessing which half.
     if let Some(seed) = seed
-        && (seed < 1 || seed > field_size)
+        && (seed < 1 || seed > tournament.entrant_cap)
     {
-        return Ok(InviteOutcome::SeedOutOfRange { field_size });
+        return Ok(InviteOutcome::SeedOutOfRange {
+            cap: tournament.entrant_cap,
+        });
     }
 
     let player = db::get_player(pool, user_id).await?;
@@ -328,29 +363,40 @@ pub(crate) async fn invite(
         db::set_entry_elo(pool, tournament.id, user_id, elo).await?;
     }
 
-    if let Some(seed) = seed {
-        // Through `reorder`, never a direct `seed` write: the order is rewritten
-        // whole, so `unique (tournament_id, seed)` is never contended and the
-        // result is contiguous. `also_suggested: false` — this is the organizers'
+    let displaced = if let Some(seed) = seed {
+        // A pin on the seat, not a direct `seed` write: `resolved_order` is what
+        // turns every pin in the field into the whole 1..n order, so
+        // `unique (tournament_id, seed)` is never contended and the result is
+        // contiguous. `also_suggested: false` — this is the organizers'
         // placement, not the tiering's proposal.
+        let displaced_by = db::set_manual_seed(pool, tournament.id, user_id, seed).await?;
         let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-        let order = seeding::reorder(&seeding::manual_order(&entries), user_id, seed);
-        db::set_seed_order(pool, tournament.id, &order, false).await?;
+        db::set_seed_order(pool, tournament.id, &seeding::resolved_order(&entries), false).await?;
         // Without this the placement is destroyed by the seeding pass at
         // close-checkin, silently — the bug chunk 30 exists to have fixed.
         db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
-    }
+        displaced_by.and_then(|uid| {
+            entries
+                .iter()
+                .find(|e| e.user_id == uid)
+                .map(|e| e.display_name.clone())
+        })
+    } else {
+        None
+    };
 
     Ok(if existing.is_some() {
         InviteOutcome::Reinvited {
             display_name,
             seed,
+            displaced,
             elo: fresh_elo,
         }
     } else {
         InviteOutcome::Invited {
             display_name,
             seed,
+            displaced,
             elo: fresh_elo,
         }
     })
@@ -385,11 +431,14 @@ pub(crate) async fn uninvite(
     db::update_entry_status(pool, tournament.id, user_id, "withdrawn").await?;
 
     // Removing someone from the middle of a seeded field leaves a gap that
-    // `start` refuses, so the order is compacted here. A field nobody has seeded
-    // yet is left alone — writing an order into it would invent one.
+    // `start` refuses; `resolved_order` recomputes the whole field and closes
+    // it. Their own pin, if any, simply drops out along with them — it is
+    // still in the column, ready to reclaim their seat if they are reinvited.
+    // A field nobody has seeded yet is left alone — writing an order into it
+    // would invent one.
     let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
     if entries.iter().any(|e| e.seed.is_some()) {
-        db::set_seed_order(pool, tournament.id, &seeding::manual_order(&entries), false).await?;
+        db::set_seed_order(pool, tournament.id, &seeding::resolved_order(&entries), false).await?;
     }
 
     Ok(UninviteOutcome::Uninvited {
@@ -429,6 +478,7 @@ mod tests {
         let outcome = InviteOutcome::Invited {
             display_name: "Beasty".to_string(),
             seed: Some(2),
+            displaced: None,
             elo: Some(1800),
         };
         let zh = outcome.message("Relic Cup", Locale::ZhTw);
@@ -451,10 +501,33 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_that_displaces_someone_names_them() {
+        let outcome = InviteOutcome::Invited {
+            display_name: "Beasty".to_string(),
+            seed: Some(2),
+            displaced: Some("TheViper".to_string()),
+            elo: None,
+        };
+        let zh = outcome.message("Relic Cup", Locale::ZhTw);
+        let en = outcome.message("Relic Cup", Locale::En);
+        assert!(zh.contains("TheViper"), "{zh}");
+        assert!(en.contains("TheViper") && en.contains("displacing"), "{en}");
+    }
+
+    #[test]
+    fn a_seed_past_the_cap_names_the_cap() {
+        for locale in [Locale::ZhTw, Locale::En] {
+            let message = InviteOutcome::SeedOutOfRange { cap: 8 }.message("Relic Cup", locale);
+            assert!(message.contains('8'), "{message}");
+        }
+    }
+
+    #[test]
     fn a_reinvite_says_updated_rather_than_added() {
         let outcome = InviteOutcome::Reinvited {
             display_name: "Beasty".to_string(),
             seed: None,
+            displaced: None,
             elo: None,
         };
         let zh = outcome.message("Relic Cup", Locale::ZhTw);
@@ -496,6 +569,7 @@ mod tests {
             InviteOutcome::Invited {
                 display_name: "A".to_string(),
                 seed: None,
+                displaced: None,
                 elo: None,
             }
             .changed_state()
@@ -504,6 +578,7 @@ mod tests {
             InviteOutcome::Reinvited {
                 display_name: "A".to_string(),
                 seed: None,
+                displaced: None,
                 elo: None,
             }
             .changed_state()

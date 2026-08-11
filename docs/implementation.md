@@ -402,6 +402,27 @@ Design: §8.3 (the `registration ──lock──▶ seeding` edge).
 Gate: the gate as a pure function — closeable from `checkin` always, from `registration` only when invite-only,
 never otherwise; no entry marked `no_show` on that edge; the registration panel closed afterwards.
 
+**35. A manual seed becomes a pin, resolved against the default order**
+Chunk 30's mechanism — a seed as a one-off insert-and-shift into the current field, range bounded by how many
+entrants had landed so far — fought composing a curated field: an invite-only bracket preview already draws
+every seat up to `entrant_cap`, but the old range only ever accepted the next unfilled one. `manual_seed`
+(`0012_manual_seed.sql`, unique per tournament like `seed` itself) now records the seat an organizer claimed;
+`seeding::resolved_order` replaces `reorder`/`manual_order`, placing every pin on its seat and tiering
+everyone else into what is left — total and always a permutation, so `seed` stays a contiguous 1..n by
+construction. A pin past the field's current end compacts onto the last seat and climbs back to its own as the
+field grows into it, which is also what closes a no-show's or a withdrawal's gap with no separate pass. Pinning
+a seat someone else already holds evicts them outright (`db::set_manual_seed`, evict-then-write in one
+transaction so the unique index is never contended) rather than shifting them elsewhere, and the reply names
+who it displaced. `/tournament invite` and `seed set` both take the cap as their range now; `/tournament seed
+refresh` clears every pin before re-tiering, which is what "take the suggestion back" already claimed to mean.
+The seeding panel marks a pinned seat with 📌 so an organizer can tell a claimed seat from one the tiering
+just happened to fill.
+Design: §8.5 ("A manual seed is a pin, resolved against the default order").
+Gate: `resolved_order` — a pin holds its seat around the tiering, compacts past the end and climbs back as the
+field grows, is dropped from the resolution for a withdrawn entrant while the column value survives, and the
+result is always a permutation of the field; a pin and a corrected invite still write nothing on refusal; the
+panel marks pinned seats and not unpinned ones.
+
 ## Phase E — the draft tool
 
 **14. Draft-tool client**

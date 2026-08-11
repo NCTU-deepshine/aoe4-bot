@@ -235,6 +235,7 @@ mod tests {
             invited_by: None,
             seed: None,
             suggested_seed: None,
+            manual_seed: None,
             display_name: display_name.to_string(),
             elo: None,
             atr: None,

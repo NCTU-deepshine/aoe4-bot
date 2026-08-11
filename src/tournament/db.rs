@@ -885,6 +885,10 @@ pub(crate) struct TournamentEntry {
     pub invited_by: Option<i64>,
     pub seed: Option<i64>,
     pub suggested_seed: Option<i64>,
+    /// The seat an organizer pinned this entrant to, or `None` for an entrant
+    /// left to the default tiering. `seed` is always the resolution of every
+    /// pin in the field — this column is the pin itself.
+    pub manual_seed: Option<i64>,
     pub display_name: String,
     pub elo: Option<i64>,
     pub atr: Option<f64>,
@@ -929,8 +933,8 @@ pub(crate) async fn get_entry(
 ) -> Result<Option<TournamentEntry>, sqlx::Error> {
     sqlx::query_as(
         r"
-        select tournament_id, user_id, aoe4_id, invited_by, seed, suggested_seed, display_name, elo, atr,
-               atr_source, status, registered_at, checked_in_at
+        select tournament_id, user_id, aoe4_id, invited_by, seed, suggested_seed, manual_seed, display_name, elo,
+               atr, atr_source, status, registered_at, checked_in_at
         from tournament_entries
         where tournament_id = ?1
           and user_id = ?2
@@ -949,8 +953,8 @@ pub(crate) async fn list_entries_for_tournament(
 ) -> Result<Vec<TournamentEntry>, sqlx::Error> {
     sqlx::query_as(
         r"
-        select tournament_id, user_id, aoe4_id, invited_by, seed, suggested_seed, display_name, elo, atr,
-               atr_source, status, registered_at, checked_in_at
+        select tournament_id, user_id, aoe4_id, invited_by, seed, suggested_seed, manual_seed, display_name, elo,
+               atr, atr_source, status, registered_at, checked_in_at
         from tournament_entries
         where tournament_id = ?1
         ",
@@ -1205,6 +1209,83 @@ pub(crate) async fn set_seed_order(
     }
 
     tx.commit().await.inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Pins `user_id` to `seat`, evicting anyone else already pinned there — a
+/// newer pin always wins. Returns who it evicted, if anyone, so the caller can
+/// name them in the reply.
+///
+/// One transaction, evicted row nulled before the new pin is written, so the
+/// unique index on `(tournament_id, manual_seed)` is never contended —
+/// `set_seed_order`'s own clear-first pass is the same trick for the same reason.
+pub(crate) async fn set_manual_seed(
+    pool: &SqlitePool,
+    tournament_id: i64,
+    user_id: i64,
+    seat: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    let mut tx = pool.begin().await.inspect_err(log_db_error)?;
+
+    let displaced: Option<i64> = sqlx::query_scalar(
+        r"
+        select user_id
+        from tournament_entries
+        where tournament_id = ?1
+          and manual_seed = ?2
+          and user_id <> ?3
+        ",
+    )
+    .bind(tournament_id)
+    .bind(seat)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        update tournament_entries
+        set manual_seed = null
+        where tournament_id = ?1
+          and manual_seed = ?2
+          and user_id <> ?3
+        ",
+    )
+    .bind(tournament_id)
+    .bind(seat)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    sqlx::query(
+        r"
+        update tournament_entries
+        set manual_seed = ?1
+        where tournament_id = ?2
+          and user_id = ?3
+        ",
+    )
+    .bind(seat)
+    .bind(tournament_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    tx.commit().await.inspect_err(log_db_error)?;
+    Ok(displaced)
+}
+
+/// Drops every pin in the tournament — what `/tournament seed refresh` means by
+/// "take the suggestion back."
+pub(crate) async fn clear_manual_seeds(pool: &SqlitePool, tournament_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_entries set manual_seed = null where tournament_id = ?1")
+        .bind(tournament_id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
     Ok(())
 }
 
