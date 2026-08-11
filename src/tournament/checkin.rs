@@ -35,26 +35,50 @@ pub(crate) fn registration_is_reopenable(status: &str) -> bool {
     matches!(status, "checkin" | "seeding")
 }
 
-/// `(checked_in, total)` over the entrants check-in ever applied to — `active`
-/// plus `no_show`, since a no-show was `active` for the whole time check-in was
-/// running. `withdrawn` entries never entered that pool and are excluded
-/// either way, matching `panel::render`'s own active-only filter for
-/// registration.
+/// The entrants check-in applies to — `active` plus `no_show`, since a
+/// no-show was `active` for the whole time check-in was running. `withdrawn`
+/// entries never entered that pool and are excluded either way, matching
+/// `panel::render`'s own active-only filter for registration.
 ///
-/// Invited entrants are excluded from both numbers: nobody asked them to
-/// confirm, so counting them would make the panel read `2/8` for a field that is
-/// entirely present. One who presses the button anyway is still not counted —
-/// the denominator has to mean the same thing all the way through.
-pub(crate) fn checkin_counts(entries: &[TournamentEntry]) -> (i64, i64) {
-    let counted: Vec<&TournamentEntry> = entries
+/// Invited entrants are excluded: nobody asked them to confirm, so counting
+/// them — in the panel, or pinging them here — would treat a courtesy as a
+/// requirement. One who presses the button anyway is still not counted; the
+/// pool has to mean the same thing everywhere it's read.
+pub(crate) fn checkin_pool(entries: &[TournamentEntry]) -> Vec<&TournamentEntry> {
+    entries
         .iter()
         .filter(|e| matches!(e.status.as_str(), "active" | "no_show") && e.invited_by.is_none())
-        .collect();
+        .collect()
+}
+
+/// `(checked_in, total)` over `checkin_pool` — see its own doc for who that is
+/// and why an invitee is excluded from both numbers.
+pub(crate) fn checkin_counts(entries: &[TournamentEntry]) -> (i64, i64) {
+    let counted = checkin_pool(entries);
     let checked_in = counted.iter().filter(|e| e.checked_in_at.is_some()).count();
     (
         i64::try_from(checked_in).unwrap_or(0),
         i64::try_from(counted.len()).unwrap_or(0),
     )
+}
+
+/// One message per chunk of `user_ids`, each `<@id>`-mentioning up to
+/// `PING_CHUNK_SIZE` of them — comfortably under both Discord's 100-mention
+/// notify cap and the 2000-character message limit, so a large field never
+/// risks either. Empty input is `vec![]`, not a message with nobody to ping.
+const PING_CHUNK_SIZE: usize = 80;
+
+pub(crate) fn checkin_ping_messages(locale: Locale, user_ids: &[i64]) -> Vec<String> {
+    user_ids
+        .chunks(PING_CHUNK_SIZE)
+        .map(|chunk| {
+            let mentions = chunk.iter().map(|id| format!("<@{id}>")).collect::<Vec<_>>().join(" ");
+            locale.pick(
+                format!("簽到已開放，請盡快完成簽到：{mentions}"),
+                format!("Check-in is now open — please check in: {mentions}"),
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -450,6 +474,53 @@ mod tests {
             invited(4, Some(now)),
         ];
         assert_eq!(checkin_counts(&entries), (1, 2));
+    }
+
+    #[test]
+    fn checkin_pool_matches_the_counter_it_backs() {
+        let now = Utc::now();
+        let invited = |user_id| TournamentEntry {
+            invited_by: Some(99),
+            ..entry(user_id, "active", None)
+        };
+        let entries = vec![
+            entry(1, "active", Some(now)),
+            entry(2, "active", None),
+            entry(3, "no_show", None),
+            entry(4, "withdrawn", None),
+            invited(5),
+        ];
+        let pool: Vec<i64> = checkin_pool(&entries).iter().map(|e| e.user_id).collect();
+        assert_eq!(pool, vec![1, 2, 3], "withdrawn and invited are both excluded");
+    }
+
+    #[test]
+    fn a_field_with_nobody_to_ping_gets_no_message() {
+        assert_eq!(checkin_ping_messages(Locale::En, &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_field_under_the_chunk_size_pings_everyone_in_one_message() {
+        let ids: Vec<i64> = (1..=10).collect();
+        let messages = checkin_ping_messages(Locale::En, &ids);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        for id in &ids {
+            assert!(messages[0].contains(&format!("<@{id}>")), "{}", messages[0]);
+        }
+    }
+
+    #[test]
+    fn a_field_over_the_chunk_size_splits_into_multiple_messages_with_no_id_lost_or_duplicated() {
+        let ids: Vec<i64> = (1..=180).collect();
+        let messages = checkin_ping_messages(Locale::ZhTw, &ids);
+        assert_eq!(messages.len(), 3, "180 ids over an 80-sized chunk is 3 messages");
+        for id in &ids {
+            let mentioning = messages.iter().filter(|m| m.contains(&format!("<@{id}>"))).count();
+            assert_eq!(
+                mentioning, 1,
+                "id {id} must appear in exactly one message, not {mentioning}"
+            );
+        }
     }
 
     #[test]

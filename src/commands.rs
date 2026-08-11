@@ -905,7 +905,7 @@ pub async fn open_checkin(
     #[description = "Minutes until check-in closes — informational only; closing is still a separate command"]
     minutes: Option<i64>,
 ) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -934,9 +934,17 @@ pub async fn open_checkin(
         // sign-ups the gate would now refuse. Re-read: the status has moved.
         let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
         panel::refresh_now(ctx.http(), pool, &tournament).await?;
+
+        // A one-time nudge: the panel alone only reaches whoever happens to be
+        // looking. Invitees are exempt — check-in was never asked of them.
+        let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
+        let user_ids: Vec<i64> = checkin::checkin_pool(&entries).iter().map(|e| e.user_id).collect();
+        for message in checkin::checkin_ping_messages(locale, &user_ids) {
+            register_channel_id.say(ctx.http(), message).await?;
+        }
     }
 
-    ctx.say(outcome.message(&tournament.name, locale)).await?;
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
     Ok(())
 }
 
@@ -977,7 +985,7 @@ pub async fn check_in(ctx: Context<'_>) -> Result<(), Error> {
     rename = "close-checkin"
 )]
 pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -988,7 +996,7 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
     audit::log_action("close-checkin", tournament.id, &tournament.slug, ctx.author(), &outcome);
 
     if !matches!(outcome, checkin::CloseCheckinOutcome::Closed { .. }) {
-        ctx.say(outcome.message(&tournament.name, locale)).await?;
+        ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
         return Ok(());
     }
 
@@ -997,8 +1005,7 @@ pub async fn close_checkin(ctx: Context<'_>) -> Result<(), Error> {
     // edge that used to overwrite a hand-made one.
     let policy = seeding::SeedPolicy::from_source(&tournament.seed_source);
     let seeded = seed_and_post_panel(ctx, &tournament, policy, locale).await?;
-    ctx.say(format!("{}\n{seeded}", outcome.message(&tournament.name, locale)))
-        .await?;
+    ephemeral(ctx, format!("{}\n{seeded}", outcome.message(&tournament.name, locale))).await?;
     Ok(())
 }
 
@@ -1104,7 +1111,7 @@ async fn ensure_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournam
     rename = "reopen-registration"
 )]
 pub async fn reopen_registration(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -1131,7 +1138,7 @@ pub async fn reopen_registration(ctx: Context<'_>) -> Result<(), Error> {
         seed_panel::refresh_now(ctx.http(), pool, &tournament).await?;
     }
 
-    ctx.say(outcome.message(&tournament.name, locale)).await?;
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
     Ok(())
 }
 
@@ -1231,7 +1238,7 @@ pub async fn setup(
     #[description_localized("zh-TW", "邀請制：無法自行報名，只能由主辦方用 /tournament invite 加入")]
     invite_only: Option<bool>,
 ) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -1287,9 +1294,14 @@ pub async fn setup(
     // The panel displays the cap, the start time and which door is open, so it
     // goes stale the moment any of them is written.
     panel::refresh_now(ctx.http(), pool, &tournament).await?;
+    // The invite-only preview's open-seat padding depends on both the cap and
+    // whether padding happens at all, so a change to either leaves the
+    // bracket stale otherwise. Unconditional, like the panel refresh above —
+    // `reconcile` only touches messages that actually changed.
+    bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
 
     let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
-    ctx.say(setup_summary(&tournament, &presets, &entries, locale)).await?;
+    ephemeral(ctx, setup_summary(&tournament, &presets, &entries, locale)).await?;
     Ok(())
 }
 
@@ -1417,7 +1429,7 @@ pub async fn preset(
     #[description_localized("zh-TW", "適用於哪些輪次，預設是全部")]
     from_round: Option<FromRound>,
 ) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -1454,11 +1466,14 @@ pub async fn preset(
     let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
     let presets = tournament_db::list_round_presets(pool, tournament.id).await?;
     let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
-    ctx.say(format!(
-        "{}{also_default}\n\n{}",
-        check.message(locale),
-        setup_summary(&tournament, &presets, &entries, locale)
-    ))
+    ephemeral(
+        ctx,
+        format!(
+            "{}{also_default}\n\n{}",
+            check.message(locale),
+            setup_summary(&tournament, &presets, &entries, locale)
+        ),
+    )
     .await?;
     Ok(())
 }
@@ -1582,7 +1597,7 @@ pub async fn seed_set(
     entrant: String,
     #[description = "The seed to pin them to, up to the entrant cap"] seed: i64,
 ) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -1640,7 +1655,7 @@ pub async fn seed_set(
     let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
     seed_panel::refresh_now(ctx.http(), pool, &tournament).await?;
     bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
-    ctx.say(outcome.message(locale)).await?;
+    ephemeral(ctx, outcome.message(locale)).await?;
     Ok(())
 }
 
@@ -1653,7 +1668,7 @@ pub async fn seed_set(
     rename = "refresh"
 )]
 pub async fn seed_refresh(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -1666,7 +1681,7 @@ pub async fn seed_refresh(ctx: Context<'_>) -> Result<(), Error> {
     tournament_db::set_seed_source(&ctx.data().database, tournament.id, policy.as_source()).await?;
     let message = seed_and_post_panel(ctx, &tournament, policy, locale).await?;
     bracket_view::reconcile(ctx.http(), &ctx.data().database, &tournament).await?;
-    ctx.say(message).await?;
+    ephemeral(ctx, message).await?;
     Ok(())
 }
 
@@ -1940,7 +1955,7 @@ async fn reapply_channel_permissions(ctx: Context<'_>, tournament: &tournament_d
     description_localized("zh-TW", "開賽：產生賽程表並開放第一輪。")
 )]
 pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.defer().await?;
+    ctx.defer_ephemeral().await?;
     let locale = Locale::from_context(ctx);
     let Some(tournament) = resolve_tournament_by_channel(ctx).await? else {
         return Ok(());
@@ -1961,7 +1976,7 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
         set_thread::open_ready(ctx.http(), pool, &tournament).await;
     }
 
-    ctx.say(outcome.message(&tournament.name, locale)).await?;
+    ephemeral(ctx, outcome.message(&tournament.name, locale)).await?;
     Ok(())
 }
 
