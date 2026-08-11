@@ -455,6 +455,43 @@ Gate: a pin shows at its own seat in the preview immediately, with that seat exc
 padding, while an unrelated new invitee fills the seats below it; a real withdrawal gap still never gets
 reused by a latecomer; `seed_set` re-resolves only once a real seed already exists.
 
+**37. Quiet the admin channels, redraw the bracket on `setup`, and announce check-in**
+Three independent fixes from live use. First: ten admin commands replied with `ctx.say`, landing publicly in
+whichever of the five channels the admin happened to run them from — usually `#…-register` or `#…-bracket`,
+right next to the panels players actually read, burying anything worth noticing under routine housekeeping.
+Eight of them (`open-checkin`, `close-checkin`, `reopen-registration`, `setup`, `preset`, `seed set`, `seed
+refresh`, `start`) now defer and reply ephemerally instead — `ctx.defer_ephemeral()`, since a deferred
+response's visibility can't change after the "thinking…" placeholder is sent. `create` and `delete` are the
+deliberate exceptions: each is the one lasting Discord-visible record of a lifecycle event with no panel of its
+own (`delete`'s own comment already called its reply "the only surviving record of the tournament, now that its
+row is gone"), and neither runs in a panel channel by convention anyway.
+
+Second: `/tournament setup` wrote `entrant_cap` and `registration_mode` but never called
+`bracket_view::reconcile` — only the registration panel refreshed — so an invite-only preview's open-seat
+padding (which depends on exactly those two fields) went stale until something unrelated redrew it. One
+unconditional `reconcile` call fixes it, the same way the panel refresh beside it is unconditional.
+
+Third: `/tournament open-checkin` posted the check-in panel but pinged nobody, so a player who wasn't already
+watching the channel had no way to learn check-in had opened. `checkin::checkin_pool` (the filter
+`checkin_counts` already applied, now named and reusable) is who a ping is owed to — self-registered active
+entrants, invitees excluded for the same reason they're excluded from the count. `checkin_ping_messages` chunks
+the mention list at 80 per message, safely under both Discord's 100-mention notify cap and the 2000-character
+body limit, and returns nothing for an empty field.
+
+Found and explicitly deferred along the way, not fixed here: **the check-in count's own "0/1"-style reading on
+a mostly-invited field** is entangled with a real product decision (fixed seat vs. must-confirm invitees — see
+§12) rather than a pure bug; **the ASCII bracket's CJK column alignment**, confirmed correct in the width math
+but not portable across Discord clients' font substitution (see §12); and **`/set redraft`**, which turns out to
+have no implementation at all despite chunk 20 describing one — no `redraft` function exists anywhere in
+`src/`, `db::increment_redraft_count` has zero callers, and `dispatch.rs`'s handler for `Action::Redraft` (and
+`Action::SetDone`) is a bare no-op stub. Whatever chunk 20 and 22 were checked off against, it isn't what's in
+the tree today.
+Design: no design change — reuses §8.3, §8.4, §8.5 as already written.
+Gate: only the admin who ran one of the eight commands sees its reply; `setup` changing `cap` or `invite_only`
+redraws the bracket preview in the same call; opening check-in pings every self-registered active entrant
+exactly once, skips invitees, and posts nothing for an empty field; a field larger than the chunk size splits
+across multiple messages with no id lost or duplicated.
+
 ## Phase E — the draft tool
 
 **14. Draft-tool client**
@@ -572,4 +609,7 @@ an unrecognized code all fall back to `Locale::En`; every retrofitted message re
 
 Swiss, group stage, round robin and double elimination (§1 "Designed for, not built now"); team tournaments;
 the catalog endpoint, seat assignment and the completion webhook (§3.2 items 2–4); Discord login on the tool
-(§3.6); per-guild configuration beyond the hardcoded ids (§8.0); everything under §11 "Follow-ups".
+(§3.6); per-guild configuration beyond the hardcoded ids (§8.0); everything under §11 "Follow-ups"; wiring
+`Action::Redraft`/`Action::SetDone` and a `/set redraft`/`/set done` command to logic that, per chunk 37, does
+not currently exist; the fixed-seat-vs-must-confirm invitee toggle and rendering the bracket as an image instead
+of a code block (both §12).

@@ -1041,6 +1041,12 @@ constraint because dropping it would mean editing a landed migration.
 **Check-in gates the bracket**: the field is whoever checked in, not whoever registered, so no-shows never
 occupy a slot.
 
+**Opening check-in pings every self-registered active entrant once**, in `#…-register` right after the panel
+posts — the panel alone only reaches whoever happens to already be looking. Invitees are excluded, the same
+reasoning as the counter below them: check-in was never asked of them. A field larger than one message's worth
+of mentions splits across several, each within Discord's mention and length limits; an empty field gets no
+message at all.
+
 **Registration closes at check-in, not at start.** `/tournament register` is refused from `checkin` onwards and
 the panel's buttons go with it; `/tournament reopen-registration` is the way back. Withdrawal is deliberately
 broader and stays open until the event begins (§8.4) — leaving late and joining late are different. One
@@ -1176,6 +1182,11 @@ merely destructive-sounding commands, or it stops meaning anything.
 
 Discord allows only two levels of nesting, and **a command cannot be both a group and a leaf** — a player's
 `/tournament checkin` cannot coexist with `/tournament checkin open`. Hence the flat admin verbs.
+
+**An admin command's reply is ephemeral by default** — visible only to whoever ran it, not narration for the
+channel it happened to be typed in (which is usually `#…-register` or `#…-bracket`, right next to the panels
+players actually read). `create` and `delete` are the two exceptions: each is the one lasting record of a
+lifecycle event with no panel of its own, so their replies stay public.
 
 | Command | Who | Effect |
 |---|---|---|
@@ -1824,9 +1835,29 @@ Tracked separately; not part of this design.
 - **`MANAGE_GUILD` bypassing the admin list** (§8.2) — proposed for recoverability when a creator leaves the
   server, at the cost of letting any server admin act on any tournament.
 - **Read-only bracket channel** (§8.1) — proposed, though some organizers like a chat-along bracket channel.
-- **Check-in reminders** — should the bot ping registered players when check-in opens, or shortly before it
-  closes, and in the register channel or by DM? Cheap to add on the existing cron; not requested. A DM would be
-  the one player-facing message with no channel to live in (§8.9).
+- **Check-in reminders when check-in *closes*** — the bot pings once when it *opens* (§8.3), in the register
+  channel, self-registered entrants only. A reminder shortly before closing would need the existing cron; not
+  built, and not requested since the opening ping landed. A DM would still be the one player-facing message
+  with no channel to live in (§8.9).
+- **Fixed seat vs. must-confirm invitees.** An invited entrant is currently always a "fixed seat": pre-confirmed
+  the moment they're invited, exempt from the no-show sweep, excluded from the check-in count and the opening
+  ping (§8.3). That reads as a stuck panel on a mostly-invited field — checking in any of them never moves the
+  count — but the alternative (holding invitees to the same "confirm or you're dropped" standard as everyone
+  else) is a real behavior change some organizers want and others don't: sometimes a pin is a guaranteed
+  attendee, sometimes it's a placeholder that should collapse if nobody shows. Agreed shape for whichever lands:
+  a per-tournament `/tournament setup` toggle, defaulting to **must confirm** — a deliberate default change from
+  today's fixed-seat-only behavior, made explicitly rather than by drifting the meaning of `invited_by` under
+  existing tournaments.
+- **Bracket rendering breaks down for CJK names.** The ASCII-art connector grid needs every name padded to the
+  same display width to keep `┐`/`├`/`┘`/`│` in shared columns across rows (§8.6), and the width math is
+  provably correct against the Unicode East Asian Width standard (`unicode-width`, tested). It just isn't
+  portable: confirmed empirically (a calibrated ruler pasted into Discord) that one client renders CJK at ~1.95×
+  a Latin character's width rather than exactly 2×, and different clients/fonts have no reason to agree on a
+  ratio at all. A structural fix that keeps the width math but drops names from the shared grid (numbers in the
+  tree, names in a legend — the seeding panel already is one) was prototyped and rejected as too much of a
+  downgrade. The only fix that's actually portable is rendering the bracket as an image with a bundled,
+  fully-controlled font instead of a text code block — real scope (a rendering pipeline, a bundled CJK-capable
+  font, switching from a text message to a file attachment) and not started.
 - **Scheduling** — `tournament_sets.scheduled_at` exists and nothing writes or reads it. `/set schedule` was
   designed and then not built, because a stored time nobody acts on is not a schedule: it needs reminders and
   timezone handling to be worth the column.
