@@ -764,38 +764,54 @@ An entrant with **neither** rating — unranked in 1v1 on aoe4world, or anyone t
 after every rated entrant, then by name. That is the reason every rating column is nullable and the reason
 seeding must never drop an unrated player.
 
-### A manual seed is a pin, resolved against the default order
+### A manual seed is a pin; resolving it into `seed` is a close-time computation
 
 A manual seed (`/tournament invite user profile seed`, `/tournament seed set`) does not move people
-around a list — it **pins an entrant to a seat**, up to `entrant_cap`, for the rest of the event.
-`seeding::resolved_order` is what turns every pin in the field into the field's actual `seed` column: every
-pinned entrant sits on its seat, and everyone else fills what is left, in the default tiering
-(`suggested_order`). Two consequences of resolving rather than inserting:
+around a list — it **pins an entrant to a seat**, up to `entrant_cap`, for the rest of the event. The pin
+itself (`manual_seed`) is written immediately; the field's actual `seed` column is not — that only ever
+happens once, at close (`refresh_ratings`, run by `close-checkin` and by `/tournament seed refresh`), which
+is what `seeding::resolved_order` computes: every pinned entrant on its seat, everyone else filling what is
+left in the default tiering (`suggested_order`).
 
-- **A pin past the current field compacts.** Pinning seat 8 with only two entrants in the field lands them on
-  seat 2 — the last seat there is — and the reply still says "seed 8", since that is the seat asked for. As the
-  field grows to 8, the next write that recomputes the order (another pinned invite, `seed set`, or a rating
-  refresh) puts them back on seat 8. This is also what closes the gap a no-show or a withdrawal leaves, with no
-  separate compaction pass: the withdrawn entrant's own pin, if any, simply drops out of the resolution along
-  with them, ready to reclaim their seat if they are reinvited.
-- **Pinning a seat someone else is pinned to displaces them.** The newer pin always wins outright — the
-  previous holder's pin is cleared, not shifted elsewhere, and the reply names them so the organizer knows who
-  just lost their seat.
+**Resolving on every pin, rather than only at close, was tried and was wrong.** An admin pinning seat 8 with
+two entrants so far does not yet know whether six more will arrive to fill the seats in front of it — writing
+a compacted `seed` at that moment can silently place the wrong two people against each other in the preview,
+long before anyone intended a final answer. So before close, `seed` simply stays null; `manual_seed` is the
+only live signal a pin exists, and every reader that shows a number
+(`seeding::effective_seed`, `seed_panel::render`, `bracket_view`'s preview) falls back to it. Two things follow:
 
-`tournaments.seed_source` still says whether the resolution has any pins in it:
+- **A pin is visible immediately, at its own number**, not compacted down to fit the field composed so far.
+  The bracket preview and seeding panel draw it there, and correctly stop offering that seat as still open.
+  Everyone else fills the lowest number nobody has claimed, in tiering order — filling in *underneath* an
+  unreached pin rather than being pushed past it.
+- **Pinning a seat someone else is pinned to displaces them immediately**, independent of the close-time
+  computation — the newer pin always wins outright, the previous holder's pin is cleared rather than shifted
+  elsewhere, and the reply names them so the organizer knows who just lost their seat.
+
+**At close**, `resolved_order` runs once for the whole field, and this is where a pin past the field's actual
+size compacts — seat 12 with only 10 signed up moves to seat 10 — and where a no-show's or a withdrawal's gap
+closes, with no separate compaction pass: the departed entrant's own pin, if any, simply drops out of the
+resolution, ready to reclaim its seat if they are reinvited before close.
+
+**`/tournament seed set` has no lifecycle gate**, so it can run both before and after close — pinning always
+happens; the full re-resolve additionally happens if a real `seed` already exists on the field (i.e. close
+already ran once), the same guard `uninvite`'s own compaction uses. This is what lets an organizer keep
+adjusting seats live in the window between close and `/tournament start`.
+
+`tournaments.seed_source` still says whether the (eventual) resolution has any pins in it:
 
 - **`'suggested'`** — the default; no pins exist, so every seat is exactly the tiering's.
-- **`'manual'`** — set by `/tournament seed set` and by a seeded `/tournament invite`. Refreshing ratings still
-  updates every ELO and ATR snapshot, but **keeps every pin**; the reply says so and names
-  `/tournament seed refresh` as the way to take them back, which clears every pin and returns the field to
-  `'suggested'`.
+- **`'manual'`** — set the moment a pin is written by `/tournament seed set` or a seeded `/tournament invite`.
+  Refreshing ratings still updates every ELO and ATR snapshot, but **keeps every pin**; the reply says so and
+  names `/tournament seed refresh` as the way to take them back, which clears every pin and returns the field
+  to `'suggested'`.
 
-Without this, a pin set before check-in closes is destroyed by the seeding pass that closing runs, and by
-`/tournament reopen-registration`, which nulls every seed. Both would be silent. A curated field (§8.3) exists
-precisely to be arranged by hand, so the arrangement has to survive the rest of the lifecycle.
+Without any of this, a pin set before check-in closes is destroyed by the seeding pass that closing runs, and
+by `/tournament reopen-registration`, which nulls every seed. Both would be silent. A curated field (§8.3)
+exists precisely to be arranged by hand, so the arrangement has to survive the rest of the lifecycle.
 
-The field is still resolved and rewritten as a whole 1..n order rather than per row (§4 notes), so `seed set`
-still takes the *entire* field's resolution, not just the one entrant being pinned.
+The close-time resolution is still written as a whole 1..n order rather than per row (§4 notes), so a
+post-close `seed set` still takes the *entire* field's resolution, not just the one entrant being pinned.
 
 ### Reuse
 
@@ -1063,8 +1079,9 @@ successful invite is rated exactly like a self-registered entrant from the momen
   over-full field never happens" holds for both doors).
 - **A seed names a seat up to the cap, not a position in the field composed so far.** An invite-only bracket
   preview already draws every seat up to the cap, so an organizer can pin someone straight into seat 8 of an
-  event with three entrants — it lands them last for now and climbs to seat 8 as the field grows into it
-  (§8.5's pin resolution).
+  event with three entrants, and the preview shows them there immediately — everyone else fills the lower
+  seats underneath them. The actual `seed` column only catches up to that at close, which is also where a pin
+  nobody ever grew into finally compacts (§8.5's pin resolution).
 
 **Invite-only mode** (`registration_mode = 'invite_only'`, set through `/tournament setup`) closes the public
 door: `/tournament register` and the panel's Register button are refused with an explanation that says so rather
@@ -1319,10 +1336,10 @@ claim they are comparable; and credit to the ATR source.
 **No buttons.** Unlike the other two, nothing here is for a player to press — seeding is admin work done by
 command — so the panel is display-only.
 
-A live panel is what makes `seed set`'s pin-and-resolve semantics safe. Pinning an entrant to seed 3 can move
-everyone else's resolved seat, which would otherwise silently invalidate a table the organizer had just read;
-because the panel re-renders on the same command, the new resolution is visible immediately, and a 📌 marks
-which seats are pinned rather than filled by the tiering.
+A live panel is what makes `seed set`'s pin semantics safe. Pinning an entrant to seed 3 can, once close has
+already happened once, move everyone else's resolved seat — which would otherwise silently invalidate a table
+the organizer had just read; because the panel re-renders on the same command, the new state is visible
+immediately either way, and a 📌 marks which seats are pinned rather than filled by the tiering.
 
 It is truncated past two dozen entrants to stay inside Discord's message limit — a larger field is shown in full
 by the bracket itself (§8.6). Bilingual, like the other panels and for the same reason (§8.10).

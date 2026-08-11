@@ -423,6 +423,38 @@ field grows, is dropped from the resolution for a withdrawn entrant while the co
 result is always a permutation of the field; a pin and a corrected invite still write nothing on refusal; the
 panel marks pinned seats and not unpinned ones.
 
+**36. A pin resolves at close, not on every write — chunk 35's own bug, caught live**
+Chunk 35 said `resolved_order` was a close-time computation, but wired it to run on every seeded `/tournament
+invite` and every `seed set` — so an admin pinning seat 8 with three entrants got it silently compacted onto
+seat 3 immediately, before it was known whether five more would arrive to fill seats 4–7, and the bracket
+preview kept advertising seat 8 as open regardless (`pad_with_open_seats` never looked at `manual_seed`).
+Confirmed against a live tournament's logs before landing the fix.
+
+`invite`'s pinned branch now only ever writes `manual_seed` (it can't run post-close — `may_invite` gates it
+to `registration`/`checkin`). `seed_set` has no such gate, so it always pins and additionally re-resolves the
+whole field only if a real `seed` already exists on it — the same guard `uninvite`'s own compaction already
+used. `refresh_ratings` (close-checkin, `/tournament seed refresh`) is untouched: it was always the correct
+place for this. A new `seeding::effective_seed` (`seed.or(manual_seed)`) is what every reader shows before
+close exists — `display_order`'s sort, the seeding panel's number, and `bracket_view::draw_order`'s
+fabrication for anyone without either. `draw_order` needed an actual branch, not just a swapped field: once
+any real `seed` exists, a gap is a withdrawal's and must never be reused (unchanged, still tested by
+`latecomers_are_numbered_past_the_last_seed_not_over_it`); before that, no real `seed` exists anywhere yet, so
+a gap below a pin is simply not filled in, and the next unpinned entrant takes the lowest number nobody has
+claimed — which is what lets it fill in underneath a pin rather than being pushed past it.
+
+A data migration (`0013_clear_premature_seeds.sql`) clears any `seed` already sitting on a tournament still in
+`registration`/`checkin` — every seeded invite has written one immediately since chunk 32, so this was never
+actually a chunk-35-only bug, just one chunk 35 made easy to trigger by widening the range past the field size.
+
+Landed alongside an unrelated, pre-existing bug reported in the same pass: `already_selected_user`'s invite
+profile-autofill matched only `ResolvedValue::User`, but Discord's autocomplete payloads never carry a
+resolved user, only `ResolvedValue::Unresolved(Unresolved::User(id))` — so the match always missed, silently,
+since the picker was introduced (815c2280).
+Design: §8.5 (rewritten section on the same name).
+Gate: a pin shows at its own seat in the preview immediately, with that seat excluded from the open-seat
+padding, while an unrelated new invitee fills the seats below it; a real withdrawal gap still never gets
+reused by a latecomer; `seed_set` re-resolves only once a real seed already exists.
+
 ## Phase E — the draft tool
 
 **14. Draft-tool client**

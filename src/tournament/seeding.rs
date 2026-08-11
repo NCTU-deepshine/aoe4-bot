@@ -56,8 +56,17 @@ pub(crate) fn suggested_order(entries: &[TournamentEntry]) -> Vec<i64> {
     field.iter().map(|e| e.user_id).collect()
 }
 
-/// How the field is shown, wherever it is shown: seeded entrants first in seed
-/// order, everyone else after them by the default tiering.
+/// The number an entrant shows as: the closed, final `seed` once one exists,
+/// or its own pin before that — a pin is visible immediately, even though it
+/// is not written into `seed` until close (`resolved_order` runs there, not
+/// per pin, so an unreached pin isn't compacted before it's clear whether more
+/// entrants arrive to fill the gap in front of it).
+pub(crate) fn effective_seed(entry: &TournamentEntry) -> Option<i64> {
+    entry.seed.or(entry.manual_seed)
+}
+
+/// How the field is shown, wherever it is shown: seeded (or pinned) entrants
+/// first by that number, everyone else after them by the default tiering.
 ///
 /// Defined once because the seeding panel and the bracket drawing must agree —
 /// they render the same entrants, and a reader comparing them should not find
@@ -68,7 +77,7 @@ pub(crate) fn display_order(entries: &[TournamentEntry]) -> Vec<&TournamentEntry
     let rank = |user_id: i64| tiering.iter().position(|id| *id == user_id).unwrap_or(usize::MAX);
 
     let mut field = seedable(entries);
-    field.sort_by_key(|e| (e.seed.unwrap_or(i64::MAX), rank(e.user_id)));
+    field.sort_by_key(|e| (effective_seed(e).unwrap_or(i64::MAX), rank(e.user_id)));
     field
 }
 
@@ -517,6 +526,26 @@ mod tests {
         let mut sorted = order.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn effective_seed_prefers_the_real_seed_and_falls_back_to_the_pin() {
+        let closed = TournamentEntry {
+            seed: Some(2),
+            manual_seed: Some(9),
+            ..entry(1, "Closed", None, Some(1000))
+        };
+        assert_eq!(
+            effective_seed(&closed),
+            Some(2),
+            "the real, closed seed wins over a stale pin"
+        );
+
+        let pin_only = pinned(2, "PinOnly", 5, None, Some(900));
+        assert_eq!(effective_seed(&pin_only), Some(5));
+
+        let neither = entry(3, "Neither", None, Some(800));
+        assert_eq!(effective_seed(&neither), None);
     }
 
     #[test]

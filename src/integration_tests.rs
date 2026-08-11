@@ -3264,7 +3264,10 @@ mod tests {
         // that already exist is exactly what the empty-database migrator tests
         // cannot see, and the two migrations before this one both did it.
         let pool = pool_migrated_to_before(INVITED_ENTRANTS).await;
-        sqlx::query("insert into tournaments (slug, name, created_by) values ('cup', 'Cup', 1)")
+        // Status `seeding`, not the default `registration` — a later migration
+        // (0013) clears a premature seed on any tournament still open, and this
+        // test is about `invited_by` landing cleanly, not about that cleanup.
+        sqlx::query("insert into tournaments (slug, name, created_by, status) values ('cup', 'Cup', 1, 'seeding')")
             .execute(&pool)
             .await
             .unwrap();
@@ -3345,6 +3348,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+    }
+
+    /// Simulates the close-time resolution — `seeding::resolved_order` +
+    /// `set_seed_order`, the write half of what `refresh_ratings` does, without
+    /// the network calls it also makes to refresh ratings first. A pin is only
+    /// a `manual_seed` until something runs this; every seeded-invite/seed-set
+    /// test that asserts a final, compacted `seed` needs to call it first.
+    async fn resolve_seeds(pool: &SqlitePool, tournament_id: i64) {
+        let entries = entries_of(pool, tournament_id).await;
+        crate::tournament::db::set_seed_order(
+            pool,
+            tournament_id,
+            &crate::tournament::seeding::resolved_order(&entries),
+            false,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -3508,6 +3528,17 @@ mod tests {
             }
         );
 
+        // A pin is only a `manual_seed` before close — `seed` itself is a
+        // close-time computation, not something a plain invite writes early.
+        let entries = entries_of(&pool, tournament.id).await;
+        assert!(
+            entries.iter().all(|e| e.seed.is_none()),
+            "seed is a close-time value, not written by invite"
+        );
+        let placed = entries.iter().find(|e| e.user_id == 4).unwrap();
+        assert_eq!(placed.manual_seed, Some(1));
+
+        resolve_seeds(&pool, tournament.id).await;
         let entries = entries_of(&pool, tournament.id).await;
         let mut seeds: Vec<i64> = entries.iter().filter_map(|e| e.seed).collect();
         seeds.sort_unstable();
@@ -3571,26 +3602,24 @@ mod tests {
             "the reply names the seat asked for, even though only 2 seats are filled"
         );
 
+        // The pin is live (visible as `manual_seed`) immediately, but `seed`
+        // itself is a close-time computation — resolving it now, before more
+        // entrants can arrive, would compact the pin before it's clear whether
+        // anyone will ever fill the seats in front of it.
         let entries = entries_of(&pool, tournament.id).await;
-        let mut seeds: Vec<i64> = entries.iter().filter_map(|e| e.seed).collect();
-        seeds.sort_unstable();
-        assert_eq!(
-            seeds,
-            vec![1, 2],
-            "the pin compacts onto the second seat until the field grows into seat 8"
+        assert!(
+            entries.iter().all(|e| e.seed.is_none()),
+            "seed is a close-time value, not written by invite"
         );
         let placed = entries.iter().find(|e| e.user_id == 3).unwrap();
-        assert_eq!(placed.seed, Some(2));
         assert_eq!(placed.manual_seed, Some(8));
 
-        // The resolution is only recomputed on the next write that touches
-        // seeds — plain unseeded invites do not trigger one, exactly like
-        // before this change. Growing the field this far and then pinning one
-        // more entrant is what forces a fresh resolution over the whole field.
+        // Growing the field to 8 and resolving now — the field's actual size —
+        // is what lets the pin finally hold its own seat rather than compact.
         for (user_id, name) in [(4, "C"), (5, "D"), (6, "E"), (7, "F"), (8, "G"), (9, "H")] {
             invite_to(&pool, &tournament, user_id, name, None).await;
         }
-        invite_to(&pool, &tournament, 10, "I", Some(9)).await;
+        resolve_seeds(&pool, tournament.id).await;
 
         let entries = entries_of(&pool, tournament.id).await;
         let placed = entries.iter().find(|e| e.user_id == 3).unwrap();
@@ -3619,15 +3648,18 @@ mod tests {
         );
 
         let entries = entries_of(&pool, tournament.id).await;
-        let seed_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().seed;
         let manual_seed_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().manual_seed;
-        assert_eq!(seed_of(3), Some(1));
         assert_eq!(manual_seed_of(3), Some(1));
         assert_eq!(
             manual_seed_of(2),
             None,
             "the previous holder's pin is unset, not just outranked"
         );
+
+        resolve_seeds(&pool, tournament.id).await;
+        let entries = entries_of(&pool, tournament.id).await;
+        let seed_of = |user_id: i64| entries.iter().find(|e| e.user_id == user_id).unwrap().seed;
+        assert_eq!(seed_of(3), Some(1));
         let mut seeds: Vec<i64> = entries.iter().filter_map(|e| e.seed).collect();
         seeds.sort_unstable();
         assert_eq!(seeds, vec![1, 2], "the field stays contiguous");
@@ -3640,6 +3672,10 @@ mod tests {
         invite_to(&pool, &tournament, 2, "A", None).await;
         invite_to(&pool, &tournament, 3, "B", None).await;
         invite_to(&pool, &tournament, 4, "C", Some(1)).await;
+        // Close, so the field actually has real seeds for uninvite to compact —
+        // before that, `seed` is a close-time value, and `uninvite`'s own
+        // compaction is guarded on one already existing.
+        resolve_seeds(&pool, tournament.id).await;
 
         crate::tournament::invite::uninvite(&pool, &tournament, 4)
             .await

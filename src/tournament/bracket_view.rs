@@ -64,26 +64,57 @@ const RENDER_ONLY_BEST_OF: u8 = 1;
 ///
 /// `seeding::display_order` decides who stands where, so the drawing and the
 /// seeding panel cannot disagree; this only turns that into drawable entrants.
+///
+/// The two branches guard against a real risk of confusing two different kinds
+/// of gap with each other:
+/// - **Once any real `seed` exists** (close has happened), a gap in the stored
+///   seeds is a withdrawal's, and is never reused: seeds are shown as stored,
+///   and a latecomer without one continues past the highest rather than
+///   filling in behind. Renumbering by position would contradict the panel.
+/// - **Before that**, nobody has a real `seed` yet, so the only numbers in use
+///   at all are pins (`manual_seed`) — a gap below one is simply not filled
+///   in yet, not a vacated slot, and the next unpinned entrant takes the
+///   lowest one nobody has claimed.
 fn draw_order(entries: &[TournamentEntry]) -> Vec<render::Entrant> {
     let field = seeding::display_order(entries);
+    let closed = field.iter().any(|e| e.seed.is_some());
 
-    // Seeds are shown as stored — a withdrawal leaves gaps, and renumbering by
-    // position would contradict the panel. Latecomers continue past the last
-    // one rather than reusing a number that is already taken.
-    let mut unseeded = field.iter().filter_map(|e| e.seed).max().unwrap_or(0);
-    field
-        .iter()
-        .filter_map(|e| {
-            let seed = e.seed.unwrap_or_else(|| {
-                unseeded += 1;
-                unseeded
-            });
-            Some(render::Entrant {
-                seed: u32::try_from(seed).ok()?,
-                name: e.display_name.clone(),
+    if closed {
+        let mut unseeded = field.iter().filter_map(|e| e.seed).max().unwrap_or(0);
+        field
+            .iter()
+            .filter_map(|e| {
+                let seed = e.seed.unwrap_or_else(|| {
+                    unseeded += 1;
+                    unseeded
+                });
+                Some(render::Entrant {
+                    seed: u32::try_from(seed).ok()?,
+                    name: e.display_name.clone(),
+                })
             })
-        })
-        .collect()
+            .collect()
+    } else {
+        let taken: std::collections::HashSet<i64> = field.iter().filter_map(|e| e.manual_seed).collect();
+        let mut next_free = 1i64;
+        field
+            .iter()
+            .filter_map(|e| {
+                let seed = e.manual_seed.unwrap_or_else(|| {
+                    while taken.contains(&next_free) {
+                        next_free += 1;
+                    }
+                    let seed = next_free;
+                    next_free += 1;
+                    seed
+                });
+                Some(render::Entrant {
+                    seed: u32::try_from(seed).ok()?,
+                    name: e.display_name.clone(),
+                })
+            })
+            .collect()
+    }
 }
 
 /// The seats an invite-only field has not filled yet, as drawable entrants.
@@ -96,7 +127,9 @@ fn draw_order(entries: &[TournamentEntry]) -> Vec<render::Entrant> {
 /// A placeholder takes the lowest number nobody holds, which makes the drawing a
 /// list of the seeds still to be filled. Real seeds may already have gaps in them
 /// (a withdrawal leaves 1, 2, 4, 5), and this is the same rule read from the
-/// other side.
+/// other side. A pin ahead of the current field is never offered here either —
+/// `draw_order` already gives it its own number before this runs, so it shows
+/// up in `taken` like any other claimed seat.
 fn pad_with_open_seats(order: &mut Vec<render::Entrant>, target: usize) {
     let taken: Vec<u32> = order.iter().map(|e| e.seed).collect();
     let mut seat = 1;
@@ -636,6 +669,34 @@ mod tests {
         assert!(placed.contains(&(1, "Weak")), "{placed:?}");
         assert!(placed.contains(&(2, "Strong")), "{placed:?}");
         assert!(placed.contains(&(3, "Middle")), "{placed:?}");
+    }
+
+    fn pinned(mut entry: TournamentEntry, seat: i64) -> TournamentEntry {
+        entry.manual_seed = Some(seat);
+        entry
+    }
+
+    #[test]
+    fn a_pin_ahead_of_the_field_is_never_offered_as_an_open_seat() {
+        // The exact reported bug: pinning someone to seat 4 with only 3 real
+        // entrants and no close yet must show them AT seat 4 immediately —
+        // not compacted onto seat 3 while seat 4 is still advertised as open.
+        let entries = vec![
+            entry(1, "KnockKnock", Some(1765)),
+            entry(2, "Deepshine", None),
+            pinned(entry(3, "Lun", Some(1680)), 4),
+        ];
+        let rounds = preview_rounds(&entries, Some(4)).unwrap();
+        let placed: Vec<(u32, &str)> = drawn(&rounds).into_iter().map(|e| (e.seed, e.name.as_str())).collect();
+
+        assert!(placed.contains(&(4, "Lun")), "{placed:?}");
+        assert!(!placed.contains(&(4, "<seed4>")), "{placed:?}");
+        // The seats not yet reached fill from the bottom instead: KnockKnock
+        // (unpinned, highest rated) takes 1, Deepshine 2, and the one genuinely
+        // open seat is 3 — not 4, which Lun already holds.
+        assert!(placed.contains(&(1, "KnockKnock")), "{placed:?}");
+        assert!(placed.contains(&(2, "Deepshine")), "{placed:?}");
+        assert!(placed.contains(&(3, "<seed3>")), "{placed:?}");
     }
 
     #[test]

@@ -364,23 +364,20 @@ pub(crate) async fn invite(
     }
 
     let displaced = if let Some(seed) = seed {
-        // A pin on the seat, not a direct `seed` write: `resolved_order` is what
-        // turns every pin in the field into the whole 1..n order, so
-        // `unique (tournament_id, seed)` is never contended and the result is
-        // contiguous. `also_suggested: false` — this is the organizers'
-        // placement, not the tiering's proposal.
+        // A pin, not a resolved `seed` write: `invite` only ever runs pre-close
+        // (`may_invite` above), and the final 1..n order is a close-time
+        // computation (`refresh_ratings`), not something to redo on every pin —
+        // an unreached pin would otherwise be compacted before it's even known
+        // whether more entrants arrive to fill the gap in front of it.
         let displaced_by = db::set_manual_seed(pool, tournament.id, user_id, seed).await?;
-        let entries = db::list_entries_for_tournament(pool, tournament.id).await?;
-        db::set_seed_order(pool, tournament.id, &seeding::resolved_order(&entries), false).await?;
         // Without this the placement is destroyed by the seeding pass at
         // close-checkin, silently — the bug chunk 30 exists to have fixed.
         db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
-        displaced_by.and_then(|uid| {
-            entries
-                .iter()
-                .find(|e| e.user_id == uid)
-                .map(|e| e.display_name.clone())
-        })
+        if let Some(uid) = displaced_by {
+            db::get_entry(pool, tournament.id, uid).await?.map(|e| e.display_name)
+        } else {
+            None
+        }
     } else {
         None
     };

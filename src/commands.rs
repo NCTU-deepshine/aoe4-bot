@@ -19,7 +19,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use regex::Regex;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CreateChannel, GetMessages, GuildChannel, PermissionOverwrite,
-    PermissionOverwriteType, Permissions, ResolvedValue, RoleId, User, UserId,
+    PermissionOverwriteType, Permissions, ResolvedValue, RoleId, Unresolved, User, UserId,
 };
 use serenity::json::json;
 use tracing::{error, info};
@@ -200,12 +200,18 @@ async fn auto_complete_invite_profile(ctx: Context<'_>, partial: &str) -> impl I
 /// of the in-progress interaction rather than a second argument, since
 /// Discord sends every filled-in option along with an autocomplete request
 /// for a later one.
+///
+/// Discord never sends a resolved user object on an autocomplete payload —
+/// only the raw id — so `ResolvedValue::User` never actually matches here;
+/// `Unresolved::User` is the shape that does.
 fn already_selected_user(ctx: Context<'_>) -> Option<UserId> {
     let Context::Application(app) = ctx else {
         return None;
     };
     app.args.iter().find_map(|opt| match &opt.value {
-        ResolvedValue::User(user, _) if opt.name == "user" => Some(user.id),
+        _ if opt.name != "user" => None,
+        ResolvedValue::User(user, _) => Some(user.id),
+        ResolvedValue::Unresolved(Unresolved::User(id)) => Some(*id),
         _ => None,
     })
 }
@@ -1606,6 +1612,7 @@ pub async fn seed_set(
     }
 
     let displaced_by = tournament_db::set_manual_seed(pool, tournament.id, target, seed).await?;
+    tournament_db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
     let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
     let displaced = displaced_by.and_then(|uid| {
         entries
@@ -1613,12 +1620,15 @@ pub async fn seed_set(
             .find(|e| e.user_id == uid)
             .map(|e| e.display_name.clone())
     });
-    // `also_suggested: false` — a pin must not overwrite what the tiering
-    // proposed, or the panel loses the comparison for anyone left to it.
-    tournament_db::set_seed_order(pool, tournament.id, &seeding::resolved_order(&entries), false).await?;
-    // Takes the *whole* field manual, not just this entrant: seeds are
-    // written as one 1..n order, so there is no per-row notion of who was pinned.
-    tournament_db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
+    // Only re-resolves the whole field if close already ran once (a real seed
+    // is already on it) — before that, `seed` is a close-time computation
+    // (`refresh_ratings`), not something this pin should redo early; the same
+    // guard `uninvite` uses. `also_suggested: false` — a pin must not overwrite
+    // what the tiering proposed, or the panel loses the comparison for anyone
+    // left to it.
+    if entries.iter().any(|e| e.seed.is_some()) {
+        tournament_db::set_seed_order(pool, tournament.id, &seeding::resolved_order(&entries), false).await?;
+    }
 
     let outcome = seeding::SeedOutcome::Pinned {
         display_name,

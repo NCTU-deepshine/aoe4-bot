@@ -11,7 +11,7 @@
 use crate::Error;
 use crate::db::{to_channel_id, to_message_id};
 use crate::tournament::db::{self, Tournament, TournamentEntry};
-use crate::tournament::seeding::display_order;
+use crate::tournament::seeding::{display_order, effective_seed};
 use crate::tournament::throttle::EditThrottle;
 use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
 use sqlx::SqlitePool;
@@ -24,9 +24,12 @@ use tracing::error;
 const SEED_DISPLAY_CAP: usize = 24;
 
 /// Pure. Ordered by `seeding::display_order`, the same key the bracket drawing
-/// uses — `seed` is authoritative, and `suggested_seed` is shown alongside only
-/// so an organizer can see what they overrode. A 📌 marks a pinned seat, so an
-/// organizer can tell a claimed seat from one the tiering just happened to fill.
+/// uses — `seed` is authoritative once it exists, and `suggested_seed` is
+/// shown alongside only so an organizer can see what they overrode. Before
+/// close, a pin has no `seed` yet, so its own number is shown instead
+/// (`seeding::effective_seed`) — the panel would otherwise show "—" for a
+/// seat an organizer explicitly claimed. A 📌 marks a pinned seat either way,
+/// so an organizer can tell a claimed seat from one the tiering just filled.
 pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
     let field = display_order(entries);
 
@@ -42,7 +45,7 @@ pub(crate) fn render(name: &str, entries: &[TournamentEntry]) -> String {
         .iter()
         .take(SEED_DISPLAY_CAP)
         .map(|e| {
-            let seed = e.seed.map_or_else(|| "—".to_string(), |s| s.to_string());
+            let seed = effective_seed(e).map_or_else(|| "—".to_string(), |s| s.to_string());
             let pin = if e.manual_seed.is_some() { " 📌" } else { "" };
             // Two columns, never one blended number.
             let atr = e.atr.map_or_else(|| "—".to_string(), |a| format!("{a:.0}"));
@@ -252,6 +255,17 @@ mod tests {
         let unpinned_row = content.lines().find(|line| line.contains("Unpinned")).unwrap();
         assert!(pinned_row.contains('📌'), "{content}");
         assert!(!unpinned_row.contains('📌'), "{content}");
+    }
+
+    #[test]
+    fn a_pin_with_no_real_seed_yet_shows_its_own_number_rather_than_a_dash() {
+        // Before close, `seed` is still null — only `manual_seed` carries the
+        // pin. The panel would otherwise show "—" for a seat an organizer
+        // explicitly claimed, which is exactly the bug this covers.
+        let mut pinned = entry(1, "Pinned", None, None, Some(1000));
+        pinned.manual_seed = Some(4);
+        let content = render("Relic Cup", &[pinned]);
+        assert!(content.contains("`  4` Pinned 📌"), "{content}");
     }
 
     #[test]
