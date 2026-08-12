@@ -5,9 +5,10 @@
 //! that `commands::create` and `tournament::registration`'s callers use.
 
 use crate::Error;
-use crate::db::{to_channel_id, to_message_id};
+use crate::db::{to_channel_id, to_db_id, to_message_id};
 use crate::tournament::action::Action;
 use crate::tournament::db::{self, Tournament, TournamentEntry};
+use crate::tournament::panel_check::{self, PanelOutcome};
 use crate::tournament::registration::RegistrationState;
 use crate::tournament::throttle::EditThrottle;
 use chrono::{DateTime, Utc};
@@ -17,6 +18,7 @@ use serenity::all::{
 };
 use sqlx::SqlitePool;
 use std::time::{Duration, Instant};
+use tracing::error;
 
 /// "Edits must be throttled" — coalesce to at most one edit every few
 /// seconds, shared between the slash-command and button paths via one
@@ -220,6 +222,75 @@ async fn edit(
         )
         .await?;
     Ok(())
+}
+
+/// Confirms the registration panel still exists — a real probe, not an edit's
+/// success — and recreates it if it doesn't. Shared by `/tournament refresh`
+/// and boot-time reconciliation, so both get the same, precise answer to
+/// "is it actually gone" rather than misreading a 403 or a rate limit as a
+/// deletion. Never propagates: a panel this can't confirm or can't
+/// repair is left exactly as it was.
+pub(crate) async fn ensure(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> PanelOutcome {
+    let Some(register_channel_id) = tournament.register_channel_id else {
+        return PanelOutcome::NotConfigured;
+    };
+    let channel_id = to_channel_id(register_channel_id);
+
+    let present = match tournament.register_message_id {
+        None => false,
+        Some(id) => match panel_check::message_exists(&http, channel_id, to_message_id(id)).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                error!(
+                    "could not confirm the registration panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                return PanelOutcome::Failed;
+            },
+        },
+    };
+
+    if present {
+        return match refresh_now(&http, pool, tournament).await {
+            Ok(()) => PanelOutcome::Present,
+            Err(err) => {
+                error!(
+                    "confirmed but failed to refresh the registration panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                PanelOutcome::Failed
+            },
+        };
+    }
+
+    match post_initial(
+        &http,
+        channel_id,
+        tournament.id,
+        &tournament.name,
+        tournament.entrant_cap,
+        RegistrationState::of(tournament),
+    )
+    .await
+    {
+        Ok(message_id) => match db::set_register_message_id(pool, tournament.id, to_db_id(message_id)).await {
+            Ok(()) => PanelOutcome::Reposted,
+            Err(err) => {
+                error!(
+                    "failed to record the reposted registration panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                PanelOutcome::Failed
+            },
+        },
+        Err(err) => {
+            error!(
+                "failed to repost the registration panel for tournament {}: {err:?}",
+                tournament.id
+            );
+            PanelOutcome::Failed
+        },
+    }
 }
 
 #[cfg(test)]

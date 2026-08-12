@@ -40,6 +40,9 @@ pub(crate) mod invite;
 // The registration panel: rendering plus the Discord/DB glue
 // `commands::create` and `dispatch::Dispatcher` call into.
 pub(crate) mod panel;
+// Whether a stored panel message still exists — the shared probe and outcome
+// type every panel's `ensure()` uses.
+pub(crate) mod panel_check;
 #[allow(dead_code)]
 pub(crate) mod render;
 // An organizer's own record of a game, for a set played outside the draft tool
@@ -67,6 +70,9 @@ pub(crate) mod set_thread;
 // `/tournament start`: the gates, then the generated
 // bracket persisted and round one opened.
 pub(crate) mod start;
+// On boot, confirm every live tournament's panels still exist and recreate
+// whichever an organizer deleted.
+pub(crate) mod startup;
 // `/tournament delete`'s guards — pure, like `access::decide`.
 pub(crate) mod teardown;
 // The panel-edit throttle, so a burst of button presses coalesces into one

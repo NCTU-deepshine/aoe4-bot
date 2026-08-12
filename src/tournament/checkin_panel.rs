@@ -6,10 +6,11 @@
 //! `dispatch.rs` use.
 
 use crate::Error;
-use crate::db::{to_channel_id, to_message_id};
+use crate::db::{to_channel_id, to_db_id, to_message_id};
 use crate::tournament::action::Action;
-use crate::tournament::checkin::checkin_counts;
+use crate::tournament::checkin::{self, checkin_counts};
 use crate::tournament::db::{self, Tournament, TournamentEntry};
+use crate::tournament::panel_check::{self, PanelOutcome};
 use crate::tournament::throttle::EditThrottle;
 use chrono::{DateTime, Utc};
 use serenity::all::{
@@ -17,6 +18,7 @@ use serenity::all::{
 };
 use sqlx::SqlitePool;
 use std::time::Instant;
+use tracing::error;
 
 /// Pure. `open` disables the button once check-in has closed, so a stale panel
 /// stops inviting presses instead of silently failing them: components are
@@ -164,6 +166,81 @@ async fn edit(
         )
         .await?;
     Ok(())
+}
+
+/// Confirms the check-in panel still exists and recreates it if it doesn't —
+/// the check-in counterpart of `panel::ensure`, same probe, same "never
+/// propagates" contract. Gated on the phase first, per
+/// `checkin::checkin_panel_expected`'s own doc comment: a repair has to ask
+/// whether check-in is expected rather than whether an id happens to be set,
+/// or the one case needing repair (the post never having gone out) is exactly
+/// the case an id-based check would skip.
+pub(crate) async fn ensure(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> PanelOutcome {
+    if !checkin::checkin_panel_expected(&tournament.status) {
+        return PanelOutcome::NotExpected;
+    }
+    let Some(register_channel_id) = tournament.register_channel_id else {
+        return PanelOutcome::NotConfigured;
+    };
+    let channel_id = to_channel_id(register_channel_id);
+
+    let present = match tournament.checkin_message_id {
+        None => false,
+        Some(id) => match panel_check::message_exists(&http, channel_id, to_message_id(id)).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                error!(
+                    "could not confirm the check-in panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                return PanelOutcome::Failed;
+            },
+        },
+    };
+
+    if present {
+        return match refresh_now(&http, pool, tournament).await {
+            Ok(()) => PanelOutcome::Present,
+            Err(err) => {
+                error!(
+                    "confirmed but failed to refresh the check-in panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                PanelOutcome::Failed
+            },
+        };
+    }
+
+    match post_initial(
+        &http,
+        pool,
+        channel_id,
+        tournament.id,
+        &tournament.name,
+        tournament.checkin_closes_at,
+        // Past check-in this must come back closed, not inviting presses.
+        checkin::checkin_is_open(&tournament.status),
+    )
+    .await
+    {
+        Ok(message_id) => match db::set_checkin_message_id(pool, tournament.id, Some(to_db_id(message_id))).await {
+            Ok(()) => PanelOutcome::Reposted,
+            Err(err) => {
+                error!(
+                    "failed to record the reposted check-in panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                PanelOutcome::Failed
+            },
+        },
+        Err(err) => {
+            error!(
+                "failed to repost the check-in panel for tournament {}: {err:?}",
+                tournament.id
+            );
+            PanelOutcome::Failed
+        },
+    }
 }
 
 #[cfg(test)]

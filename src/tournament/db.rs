@@ -459,6 +459,26 @@ pub(crate) async fn get_live_tournament_by_announce_channel(
     .inspect_err(log_db_error)
 }
 
+/// Every tournament worth reconciling panels for at boot — `completed` and
+/// `canceled` events keep their message ids as a record, not something to
+/// repost over on every restart.
+pub(crate) async fn list_live_tournaments(pool: &SqlitePool) -> Result<Vec<Tournament>, sqlx::Error> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        r"
+        select id, slug, name, status, draft_base_url, announce_channel_id, category_id,
+               register_channel_id, register_message_id, bracket_channel_id, matches_channel_id,
+               draft_channel_id, checkin_message_id, seed_message_id, checkin_closes_at,
+               entrant_cap, scheduled_start_at, seed_source, registration_mode, created_by, created_at,
+               started_at, completed_at
+        from tournaments
+        where status in ({LIVE_STATUSES})
+        "
+    )))
+    .fetch_all(pool)
+    .await
+    .inspect_err(log_db_error)
+}
+
 // 2. tournament_stages
 
 #[derive(FromRow)]

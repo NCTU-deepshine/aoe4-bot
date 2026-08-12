@@ -86,6 +86,7 @@ async fn main() {
     let panel_throttle = Arc::new(EditThrottle::new(tournament::panel::PANEL_EDIT_MIN_INTERVAL));
 
     let pool_cloned = pool.clone();
+    let boot_pool = pool.clone();
     let panel_throttle_cloned = panel_throttle.clone();
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -105,6 +106,12 @@ async fn main() {
                 if let Err(err) = poise::builtins::register_in_guild(ctx, tournament, tournament_guild).await {
                     error!("could not register tournament commands in guild {tournament_guild}: {err:?}");
                 }
+
+                // Spawned rather than awaited, since `setup` must return `Data` promptly.
+                let boot_http = ctx.http.clone();
+                tokio::spawn(async move {
+                    tournament::startup::reconcile_all(boot_http, &boot_pool).await;
+                });
 
                 Ok(Data {
                     database: pool_cloned,

@@ -9,8 +9,9 @@
 //! the same reason those two are — one shared message, many readers.
 
 use crate::Error;
-use crate::db::{to_channel_id, to_message_id};
+use crate::db::{to_channel_id, to_db_id, to_message_id};
 use crate::tournament::db::{self, Tournament, TournamentEntry};
+use crate::tournament::panel_check::{self, PanelOutcome};
 use crate::tournament::seeding::{display_order, effective_seed};
 use crate::tournament::throttle::EditThrottle;
 use serenity::all::{CacheHttp, ChannelId, CreateMessage, EditMessage, MessageId};
@@ -130,6 +131,66 @@ pub(crate) async fn refresh_now(http: impl CacheHttp, pool: &SqlitePool, tournam
         )
         .await?;
     Ok(())
+}
+
+/// Confirms the seeding panel still exists and recreates it if it doesn't —
+/// the seeding counterpart of `panel::ensure`. No phase gate: unlike check-in,
+/// this panel exists from `create` onward, so `bracket_channel_id` alone
+/// decides whether it belongs.
+pub(crate) async fn ensure(http: impl CacheHttp, pool: &SqlitePool, tournament: &Tournament) -> PanelOutcome {
+    let Some(bracket_channel_id) = tournament.bracket_channel_id else {
+        return PanelOutcome::NotConfigured;
+    };
+    let channel_id = to_channel_id(bracket_channel_id);
+
+    let present = match tournament.seed_message_id {
+        None => false,
+        Some(id) => match panel_check::message_exists(&http, channel_id, to_message_id(id)).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                error!(
+                    "could not confirm the seeding panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                return PanelOutcome::Failed;
+            },
+        },
+    };
+
+    if present {
+        return match refresh_now(&http, pool, tournament).await {
+            Ok(()) => PanelOutcome::Present,
+            Err(err) => {
+                error!(
+                    "confirmed but failed to refresh the seeding panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                PanelOutcome::Failed
+            },
+        };
+    }
+
+    match post_initial(&http, pool, channel_id, tournament.id, &tournament.name).await {
+        Ok(message_id) => match db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await {
+            Ok(()) => PanelOutcome::Reposted,
+            // The panel is up; only the handle to it is lost, so the next
+            // call posts a second one rather than editing this.
+            Err(err) => {
+                error!(
+                    "failed to record the reposted seeding panel for tournament {}: {err:?}",
+                    tournament.id
+                );
+                PanelOutcome::Failed
+            },
+        },
+        Err(err) => {
+            error!(
+                "failed to repost the seeding panel for tournament {}: {err:?}",
+                tournament.id
+            );
+            PanelOutcome::Failed
+        },
+    }
 }
 
 #[cfg(test)]

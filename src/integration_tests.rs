@@ -783,6 +783,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listing_live_tournaments_excludes_completed_and_canceled_ones() {
+        // Chunk 23's boot reconciliation must not repost panels for an event
+        // that has already finished — `list_live_tournaments` is the filter
+        // that keeps it from trying.
+        let pool = test_pool().await;
+        let registration_id = crate::tournament::db::insert_tournament(&pool, "registration-slug", "Registration", 1)
+            .await
+            .unwrap();
+        let running_id = crate::tournament::db::insert_tournament(&pool, "running-slug", "Running", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::update_tournament_status(&pool, running_id, "running")
+            .await
+            .unwrap();
+        let completed_id = crate::tournament::db::insert_tournament(&pool, "completed-slug", "Completed", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::update_tournament_status(&pool, completed_id, "completed")
+            .await
+            .unwrap();
+        let canceled_id = crate::tournament::db::insert_tournament(&pool, "canceled-slug", "Canceled", 1)
+            .await
+            .unwrap();
+        crate::tournament::db::update_tournament_status(&pool, canceled_id, "canceled")
+            .await
+            .unwrap();
+
+        let live: Vec<i64> = crate::tournament::db::list_live_tournaments(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect();
+
+        assert!(live.contains(&registration_id));
+        assert!(live.contains(&running_id));
+        assert!(!live.contains(&completed_id));
+        assert!(!live.contains(&canceled_id));
+    }
+
+    #[tokio::test]
     async fn upsert_player_binding_leaves_an_existing_display_name_untouched() {
         let pool = test_pool().await;
         crate::tournament::db::upsert_player_binding(&pool, 1, 100, "Name")

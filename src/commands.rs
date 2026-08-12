@@ -10,6 +10,7 @@ use crate::tournament::access::{
     wrong_channel_message,
 };
 use crate::tournament::db as tournament_db;
+use crate::tournament::panel_check::PanelOutcome;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
     audit, bracket, bracket_view, checkin, checkin_panel, completion, invite as tournament_invite, panel, redraft,
@@ -1032,72 +1033,34 @@ async fn seed_and_post_panel(
 
     let message = outcome.message(&tournament.name, locale);
     match ensure_seed_panel(ctx, tournament).await {
-        SeedPanelOutcome::Updated | SeedPanelOutcome::Reposted | SeedPanelOutcome::NoChannel => Ok(message),
+        PanelOutcome::Present | PanelOutcome::Reposted | PanelOutcome::NotConfigured => Ok(message),
         // Said out loud rather than swallowed: the seeding itself succeeded, and
         // an organizer who cannot see the panel needs to know it is the panel
         // that is missing, not the seeding.
-        SeedPanelOutcome::Failed => Ok(format!(
+        PanelOutcome::Failed => Ok(format!(
             "{message}\n{}",
             locale.pick(
-                "種子名單：無法張貼，請確認機器人可在賽程頻道發言。",
-                "Seeding panel: could not post — check the bot can send messages in the bracket channel.",
+                "種子名單：無法確認或張貼，請確認機器人可在賽程頻道發言。",
+                "Seeding panel: could not confirm or post — check the bot can send messages in the bracket channel.",
             )
         )),
+        // The seeding panel has no phase gate — `ensure` never returns this for it.
+        PanelOutcome::NotExpected => unreachable!("the seeding panel has no phase gate"),
     }
 }
 
-/// What `ensure_seed_panel` did, so each caller words it its own way.
-enum SeedPanelOutcome {
-    Updated,
-    Reposted,
-    NoChannel,
-    Failed,
-}
-
 /// Leaves `#{slug}-bracket` showing a current seeding panel, whatever state it
-/// was in: edited when the stored message is still there, re-posted when it is
-/// not.
+/// was in — a thin wrapper over `seed_panel::ensure` kept here because
+/// `seed_and_post_panel` needs the same "never propagates" fallback that
+/// `refresh_seed_panel` does, and this is where both already look for it.
 ///
 /// **Never propagates.** A panel that has gone missing — a stale
 /// `seed_message_id`, or one an organizer deleted — used to turn `close-checkin`
 /// into an error that posted nothing, *after* the status had already moved to
 /// `seeding` and the no-shows had been marked. Recovering from that is the whole
 /// reason the fallback exists rather than a bare edit.
-async fn ensure_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> SeedPanelOutcome {
-    let pool = &ctx.data().database;
-    // Always set by `create()`; the panel has nowhere to go without it.
-    let Some(bracket_channel_id) = tournament.bracket_channel_id else {
-        return SeedPanelOutcome::NoChannel;
-    };
-
-    if tournament.seed_message_id.is_some() && seed_panel::refresh_now(ctx.http(), pool, tournament).await.is_ok() {
-        return SeedPanelOutcome::Updated;
-    }
-
-    let channel_id = to_channel_id(bracket_channel_id);
-    match seed_panel::post_initial(ctx.http(), pool, channel_id, tournament.id, &tournament.name).await {
-        Ok(message_id) => {
-            match tournament_db::set_seed_message_id(pool, tournament.id, Some(to_db_id(message_id))).await {
-                Ok(()) => SeedPanelOutcome::Reposted,
-                // The panel is up; only the handle to it is lost, so the next
-                // call posts a second one rather than editing this.
-                Err(err) => {
-                    error!(
-                        "failed to record the seeding panel for tournament {}: {err:?}",
-                        tournament.id
-                    );
-                    SeedPanelOutcome::Failed
-                },
-            }
-        },
-        Err(err) => {
-            error!(
-                "failed to post the seeding panel for tournament {}: {err:?}",
-                tournament.id
-            );
-            SeedPanelOutcome::Failed
-        },
-    }
+async fn ensure_seed_panel(ctx: Context<'_>, tournament: &tournament_db::Tournament) -> PanelOutcome {
+    seed_panel::ensure(ctx.http(), &ctx.data().database, tournament).await
 }
 
 // The one backward lifecycle edge, for a check-in
@@ -1778,132 +1741,74 @@ pub async fn refresh_panels(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// The registration panel: edited if it is there, posted if it is not.
+/// The registration panel: `panel::ensure`'s outcome, worded for this reply.
 async fn refresh_register_panel(
     ctx: Context<'_>,
     tournament: &tournament_db::Tournament,
     locale: Locale,
 ) -> Result<String, Error> {
     let pool = &ctx.data().database;
-    let Some(register_channel_id) = tournament.register_channel_id else {
-        return Ok(locale
-            .pick(
-                "報名面板：這場賽事沒有報名頻道。",
-                "Registration panel: no register channel.",
-            )
-            .to_string());
-    };
-
-    if tournament.register_message_id.is_some() && panel::refresh_now(ctx.http(), pool, tournament).await.is_ok() {
-        return Ok(locale
-            .pick("報名面板：已更新。", "Registration panel: updated.")
-            .to_string());
+    Ok(match panel::ensure(ctx.http(), pool, tournament).await {
+        PanelOutcome::Present => locale.pick("報名面板：正常。", "Registration panel: fine."),
+        PanelOutcome::Reposted => locale.pick("報名面板：已重新張貼。", "Registration panel: reposted."),
+        PanelOutcome::NotConfigured => locale.pick(
+            "報名面板：這場賽事沒有報名頻道。",
+            "Registration panel: no register channel.",
+        ),
+        PanelOutcome::Failed => locale.pick(
+            "報名面板：無法確認或張貼。",
+            "Registration panel: could not confirm or post.",
+        ),
+        // The registration panel has no phase gate — `ensure` never returns this for it.
+        PanelOutcome::NotExpected => unreachable!("the registration panel has no phase gate"),
     }
-
-    let channel_id = to_channel_id(register_channel_id);
-    match panel::post_initial(
-        ctx.http(),
-        channel_id,
-        tournament.id,
-        &tournament.name,
-        tournament.entrant_cap,
-        registration::RegistrationState::of(tournament),
-    )
-    .await
-    {
-        Ok(message_id) => {
-            tournament_db::set_register_message_id(pool, tournament.id, to_db_id(message_id)).await?;
-            Ok(locale
-                .pick("報名面板：已重新張貼。", "Registration panel: reposted.")
-                .to_string())
-        },
-        Err(err) => {
-            error!(
-                "failed to repost the registration panel for tournament {}: {err:?}",
-                tournament.id
-            );
-            Ok(locale
-                .pick("報名面板：無法張貼。", "Registration panel: could not post.")
-                .to_string())
-        },
-    }
+    .to_string())
 }
 
-/// The check-in panel, which only belongs in the channel once check-in has opened.
+/// The check-in panel: `checkin_panel::ensure`'s outcome, worded for this reply.
 async fn refresh_checkin_panel(
     ctx: Context<'_>,
     tournament: &tournament_db::Tournament,
     locale: Locale,
 ) -> Result<String, Error> {
     let pool = &ctx.data().database;
-    if !checkin::checkin_panel_expected(&tournament.status) {
-        return Ok(locale
-            .pick(
-                "簽到面板：尚未開始簽到。",
-                "Check-in panel: check-in has not opened yet.",
-            )
-            .to_string());
+    Ok(match checkin_panel::ensure(ctx.http(), pool, tournament).await {
+        PanelOutcome::Present => locale.pick("簽到面板：正常。", "Check-in panel: fine."),
+        PanelOutcome::Reposted => locale.pick("簽到面板：已重新張貼。", "Check-in panel: reposted."),
+        PanelOutcome::NotConfigured => locale.pick(
+            "簽到面板：這場賽事沒有報名頻道。",
+            "Check-in panel: no register channel.",
+        ),
+        PanelOutcome::NotExpected => locale.pick(
+            "簽到面板：尚未開始簽到。",
+            "Check-in panel: check-in has not opened yet.",
+        ),
+        PanelOutcome::Failed => locale.pick(
+            "簽到面板：無法確認或張貼。",
+            "Check-in panel: could not confirm or post.",
+        ),
     }
-    let Some(register_channel_id) = tournament.register_channel_id else {
-        return Ok(locale
-            .pick(
-                "簽到面板：這場賽事沒有報名頻道。",
-                "Check-in panel: no register channel.",
-            )
-            .to_string());
-    };
-
-    if tournament.checkin_message_id.is_some() && checkin_panel::refresh_now(ctx.http(), pool, tournament).await.is_ok()
-    {
-        return Ok(locale
-            .pick("簽到面板：已更新。", "Check-in panel: updated.")
-            .to_string());
-    }
-
-    let channel_id = to_channel_id(register_channel_id);
-    match checkin_panel::post_initial(
-        ctx.http(),
-        pool,
-        channel_id,
-        tournament.id,
-        &tournament.name,
-        tournament.checkin_closes_at,
-        // Past check-in this must come back closed, not inviting presses.
-        checkin::checkin_is_open(&tournament.status),
-    )
-    .await
-    {
-        Ok(message_id) => {
-            tournament_db::set_checkin_message_id(pool, tournament.id, Some(to_db_id(message_id))).await?;
-            Ok(locale
-                .pick("簽到面板：已重新張貼。", "Check-in panel: reposted.")
-                .to_string())
-        },
-        Err(err) => {
-            error!(
-                "failed to repost the check-in panel for tournament {}: {err:?}",
-                tournament.id
-            );
-            Ok(locale
-                .pick("簽到面板：無法張貼。", "Check-in panel: could not post.")
-                .to_string())
-        },
-    }
+    .to_string())
 }
 
-/// The seeding panel, which belongs in the channel for the whole event.
+/// The seeding panel: `seed_panel::ensure`'s outcome, worded for this reply.
 async fn refresh_seed_panel(
     ctx: Context<'_>,
     tournament: &tournament_db::Tournament,
     locale: Locale,
 ) -> Result<String, Error> {
     Ok(match ensure_seed_panel(ctx, tournament).await {
-        SeedPanelOutcome::Updated => locale.pick("種子名單：已更新。", "Seeding panel: updated."),
-        SeedPanelOutcome::Reposted => locale.pick("種子名單：已重新張貼。", "Seeding panel: reposted."),
-        SeedPanelOutcome::NoChannel => {
+        PanelOutcome::Present => locale.pick("種子名單：正常。", "Seeding panel: fine."),
+        PanelOutcome::Reposted => locale.pick("種子名單：已重新張貼。", "Seeding panel: reposted."),
+        PanelOutcome::NotConfigured => {
             locale.pick("種子名單：這場賽事沒有賽程頻道。", "Seeding panel: no bracket channel.")
         },
-        SeedPanelOutcome::Failed => locale.pick("種子名單：無法張貼。", "Seeding panel: could not post."),
+        PanelOutcome::Failed => locale.pick(
+            "種子名單：無法確認或張貼。",
+            "Seeding panel: could not confirm or post.",
+        ),
+        // The seeding panel has no phase gate — `ensure` never returns this for it.
+        PanelOutcome::NotExpected => unreachable!("the seeding panel has no phase gate"),
     }
     .to_string())
 }

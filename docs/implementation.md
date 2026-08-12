@@ -37,7 +37,8 @@ decides the order is one concrete event: **an invite-only 8-player single elimin
 end.** Everything that event needs is M1. Everything that only makes running it nicer is M2. Everything that
 replaces work a human can already do is M3.
 
-Landed so far: chunks 1–12, 14, 16–19, 24–33. Dropped: 13, 15. **M1 is complete**; what remains is M2 and M3.
+Landed so far: chunks 1–12, 14, 16–19, 23–33, 35–38. Dropped: 13, 15. **M1 is complete**; what remains of
+M2 is `/tournament lock` (34, optional), and all of M3.
 
 **Where that event stands today.** Every piece of it is built. An organizer creates the tournament, marks it
 invite-only, invites eight members by name, closes check-in with nobody having pressed anything, starts, and the
@@ -90,12 +91,11 @@ organizers' own, which chunk 30 has already made survive the rating pass and the
 
 ### M2 — running one comfortably
 
-Ordered by how sharply each failure bites during a live event.
+Ordered by how sharply each failure bites during a live event. **20** and **23** are done — `/set redraft`
+shipped as chunk 38, and boot-time panel reconciliation as chunk 23 itself, below.
 
-- **20** — `/set redraft`. A draft room that went wrong currently has no recovery at all, with two players waiting.
 - **34** — `/tournament lock`, so an invited field skips a check-in nobody needed. Convenience over M1's path, not
   a replacement for it; still optional, and still droppable on the wart §8.3 records.
-- **23** — boot-time panel reconciliation, for a restart mid-event.
 
 ### M3 — replace hand entry with import
 
@@ -619,11 +619,36 @@ Write the import against saved fixtures so this chunk can be built and tested be
 live fetch is blocked.
 
 **23. Boot-time panel reconciliation**
-Confirm each stored panel message still exists on startup and recreate it if an organizer deleted it.
-If chunk 33 has landed, derive the registration panel's state from its three-state resolution rather than
-hardcoding the open one — that is the bug chunk 33 fixes in `panel::post_initial`, and a reconciler that reposts
-from scratch is the obvious place to reintroduce it.
+Confirm each stored panel message still exists on startup and recreate it if an organizer deleted it. Chunk 33
+had already landed by the time this was built, so `panel::post_initial` already derives the registration panel's
+state rather than hardcoding it — nothing to reintroduce here.
+
+Scoped to the four tournament-level panels (registration, check-in, seed, bracket) via a new
+`db::list_live_tournaments`; per-set panels and the `#…-draft` announcement are explicitly out, since reposting
+into an *existing* thread needs new `set_thread` machinery rather than reuse, not the wiring this chunk is.
+Channel-permission reapplication is also out — nothing deletes a permission overwrite on restart, and it needs
+a `ctx.guild_id()`/`ctx.cache()` this boot path doesn't have.
+
+The existence check is a real probe (`panel_check::message_exists`, fetching the message directly), not
+"try to edit and treat any error as gone" — the pattern `/tournament refresh` used until now, which misreads a
+403 or a rate limit as a deletion. Only a confirmed 404 (`panel_check::is_confirmed_missing`) counts as gone,
+which matters far more here than it did for a human-run command: this runs unattended, across every live
+tournament, on every restart. `/tournament refresh` now shares the same `ensure()` functions
+(`panel::ensure`, `checkin_panel::ensure`, `seed_panel::ensure`) as the boot path, so it inherits the more
+precise check rather than living next to a duplicate of it — and `bracket_view::reconcile`'s edit-error handling
+was fixed alongside, since it used to propagate `?` on a failed edit instead of falling through to repost,
+which would have left the bracket, one of the four panels this chunk covers, unable to self-heal from the exact
+scenario ("an organizer deleted it") the chunk exists for.
+
+Triggered once from the poise `setup` closure in `main.rs`, spawned rather than awaited so it doesn't hold up
+command registration — `setup` runs exactly once, unlike `ready`, which would re-fire on every gateway
+reconnect and need a guard against running twice.
 Design: §8.5.
+Gate: a deleted registration/check-in/seed panel is recreated in the correct state (open/invite-only/closed,
+matching the tournament's actual phase) with the real current roster, not an empty one; a check-in panel is
+never posted for a tournament still in `registration`; a deleted bracket message is reposted rather than
+aborting the redraw; `completed`/`canceled` tournaments are never touched; and a panel that is still there is
+left alone (or, for `/tournament refresh`, refreshed) rather than reposted as a duplicate.
 
 ## Phase F — localization
 

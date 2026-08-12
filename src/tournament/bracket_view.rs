@@ -13,6 +13,7 @@
 use crate::Error;
 use crate::db::{to_channel_id, to_db_id, to_message_id};
 use crate::tournament::db::{self, Tournament, TournamentEntry, TournamentRound, TournamentSet};
+use crate::tournament::panel_check;
 use crate::tournament::registration::RegistrationState;
 use crate::tournament::seeding;
 use crate::tournament::{bracket, render};
@@ -368,33 +369,45 @@ pub(crate) async fn reconcile(
     let existing = db::list_bracket_messages(pool, tournament.id).await?;
     for (index, chunk) in chunks.iter().enumerate() {
         let ordinal = i64::try_from(index).unwrap();
-        match existing.iter().find(|m| m.ordinal == ordinal) {
+
+        // A stored id that no longer resolves is treated as never having been
+        // posted rather than a reason to abort the whole redraw.
+        let needs_post = match existing.iter().find(|m| m.ordinal == ordinal) {
             Some(message) => {
                 let message_id = to_message_id(message.message_id);
-                channel_id
+                match channel_id
                     .edit_message(&http, message_id, EditMessage::new().content(chunk))
-                    .await?;
-                edited += 1;
-            },
-            None => {
-                let message = channel_id
-                    .send_message(&http, CreateMessage::new().content(chunk))
-                    .await?;
-                // Only the message carrying the heading — jumping to it via the
-                // pin and scrolling down reaches every chunk after it. Runs on
-                // whichever message a fresh post lands on, including a repost
-                // after an admin deletes it, so this self-heals.
-                if ordinal == 0
-                    && let Err(err) = message.pin(&http).await
+                    .await
                 {
-                    tracing::error!(
-                        "failed to pin the bracket message for tournament {}: {err:?}",
-                        tournament.id
-                    );
+                    Ok(_) => {
+                        edited += 1;
+                        false
+                    },
+                    Err(err) if panel_check::is_confirmed_missing(&err) => true,
+                    Err(err) => return Err(err.into()),
                 }
-                db::upsert_bracket_message(pool, tournament.id, ordinal, to_db_id(message.id)).await?;
-                posted += 1;
             },
+            None => true,
+        };
+
+        if needs_post {
+            let message = channel_id
+                .send_message(&http, CreateMessage::new().content(chunk))
+                .await?;
+            // Only the message carrying the heading — jumping to it via the
+            // pin and scrolling down reaches every chunk after it. Runs on
+            // whichever message a fresh post lands on, including a repost
+            // after an admin deletes it, so this self-heals.
+            if ordinal == 0
+                && let Err(err) = message.pin(&http).await
+            {
+                tracing::error!(
+                    "failed to pin the bracket message for tournament {}: {err:?}",
+                    tournament.id
+                );
+            }
+            db::upsert_bracket_message(pool, tournament.id, ordinal, to_db_id(message.id)).await?;
+            posted += 1;
         }
     }
 
