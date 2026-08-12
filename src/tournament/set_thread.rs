@@ -90,8 +90,13 @@ pub(crate) fn render_panel(
                  **Draft room could not be created — an admin needs to look at it.**{called}\n"
             ),
             // No call-admin button here: this panel names the admins itself, so
-            // their mentions are already in front of whoever needs them.
-            Vec::new(),
+            // their mentions are already in front of whoever needs them. Regenerate
+            // is the one useful button — a failed mint is exactly what it retries.
+            vec![CreateActionRow::Buttons(vec![
+                CreateButton::new(Action::Redraft.custom_id(set.id))
+                    .label("🔄 重新產生 Draft / Regenerate draft")
+                    .style(ButtonStyle::Secondary),
+            ])],
         );
     };
 
@@ -107,8 +112,8 @@ pub(crate) fn render_panel(
          **<@{}> 選 Player 2**；對手遊戲 ID：{}\n\
          **<@{}> takes seat Player 1** and hosts the lobby in game — opponent: {}\n\
          **<@{}> takes seat Player 2** — opponent: {}\n\
-         Draft 有任何問題，請找管理員重新產生。\n\
-         If anything is wrong with the draft, ask an admin to regenerate it.\n",
+         Draft 有任何問題，可以按下方按鈕重新產生。\n\
+         If anything is wrong with the draft, use the button below to regenerate it.\n",
         room.match_url,
         one.user_id,
         opponent(two, "（名稱未驗證）"),
@@ -123,11 +128,13 @@ pub(crate) fn render_panel(
     // The call-admin button is what a player has instead of knowing who to ask:
     // nothing on this panel names an organizer.
     //
-    // "Regenerate draft" and "Set complete" belong on this panel too, but nothing
-    // handles them yet — a button that silently does nothing is worse than one
-    // that is not there yet.
+    // "Set complete" belongs on this panel too, but nothing handles it yet — a
+    // button that silently does nothing is worse than one that is not there yet.
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new_link(&room.watch_url).label("觀戰 / Watch draft"),
+        CreateButton::new(Action::Redraft.custom_id(set.id))
+            .label("🔄 重新產生 Draft / Regenerate draft")
+            .style(ButtonStyle::Secondary),
         CreateButton::new(Action::CallAdmin.custom_id(set.id))
             .label("呼叫管理員 / Call an organizer")
             .style(ButtonStyle::Secondary),
@@ -190,6 +197,57 @@ pub(crate) fn render_announcement(
     ])];
 
     (body, components)
+}
+
+/// What a redraft leaves behind on the pinned set panel, once the room it
+/// pointed at is abandoned: the header, so the thread still reads as this
+/// match, and a note that the link above no longer goes anywhere. Sent with no
+/// components — an empty button list is what actually kills the dead
+/// `/match/` link, which a struck label alone would not.
+pub(crate) fn render_superseded_panel(set: &SetHeading, one: &Player, two: &Player) -> String {
+    let header = format!(
+        "**{} · Match {} — Bo{}**   <@{}>  <@{}>\n`{}` {}  vs  `{}` {}\n",
+        set.round_name,
+        set.position,
+        set.best_of,
+        one.user_id,
+        two.user_id,
+        one.seed,
+        escape(&one.name),
+        two.seed,
+        escape(&two.name)
+    );
+    format!(
+        "{header}\n~~Draft 房間~~ 已被重新產生，此連結已失效。\n\
+         ~~Draft room~~ has been regenerated — this link is dead.\n"
+    )
+}
+
+/// The `#…-draft` counterpart of `render_superseded_panel`: struck for the same
+/// reason, with the same empty-components treatment.
+pub(crate) fn render_superseded_announcement(set: &SetHeading, one: &Player, two: &Player) -> String {
+    format!(
+        "**{} · Match {} — Bo{}**\n`{}` {}  vs  `{}` {}\n\
+         ~~觀戰連結~~ 該場對戰已重新產生 Draft。\n\
+         ~~Watch link~~ — this set's draft was regenerated.\n",
+        bracket::round_name_bilingual(&set.round_name),
+        set.position,
+        set.best_of,
+        one.seed,
+        escape(&one.name),
+        two.seed,
+        escape(&two.name),
+    )
+}
+
+/// The visible trail a redraft leaves in the thread, naming who triggered it —
+/// per §4, the readable record is this notice plus `redraft_count`, not a
+/// history table.
+pub(crate) fn render_redraft_notice(actor_user_id: i64, count: i64) -> String {
+    format!(
+        "🔄 <@{actor_user_id}> 重新產生了這場對戰的 Draft（第 {count} 次）。\n\
+         <@{actor_user_id}> regenerated this set's draft (redraft #{count})."
+    )
 }
 
 /// Which match this is. Grouped so the panel takes what identifies the set in
@@ -289,6 +347,10 @@ pub(crate) async fn open(
     // Best-effort: a panel that failed to pin is still the panel.
     if let Err(err) = message.pin(&http).await {
         error!("failed to pin the set panel for set {}: {err:?}", set.id);
+    }
+    // The handle a redraft needs to strike this panel before replacing it.
+    if let Err(err) = db::set_panel_message(pool, set.id, crate::db::to_db_id(message.id)).await {
+        error!("failed to record the panel for set {}: {err:?}", set.id);
     }
 
     // Last, and best-effort: if the bot is being rate limited, the players' own
@@ -425,8 +487,9 @@ pub(crate) async fn close(
 /// spectator post into a failed set. One post per set comes for free: `open` is a
 /// no-op once the set has a thread, so the room — and therefore this — happens
 /// once. `draft_announce_message_id` is a handle for editing or replacing that
-/// post later, not a guard against a second call.
-async fn announce(
+/// post later, not a guard against a second call. `pub(crate)` because a redraft
+/// announces its fresh room through this same path.
+pub(crate) async fn announce(
     http: &impl CacheHttp,
     pool: &SqlitePool,
     tournament: &Tournament,
@@ -513,15 +576,28 @@ async fn add_members(http: &impl CacheHttp, thread_id: serenity::all::ChannelId,
 /// Deliberately does not fail the caller: a set with a thread and no room is
 /// recoverable by an admin, and a set with neither is not.
 async fn create_room(pool: &SqlitePool, tournament: &Tournament, round: &TournamentRound, set_id: i64) -> Option<Room> {
+    let (draft_id, room) = mint_room(tournament, round, set_id).await?;
+    if let Err(err) = db::set_draft_pointer(pool, set_id, &draft_id).await {
+        error!("failed to store the draft pointer for set {set_id}: {err:?}");
+        return None;
+    }
+    Some(room)
+}
+
+/// Asks the draft tool for a fresh room, or reports why it could not — the half
+/// of `create_room` that talks to the tool, with no DB write of its own.
+///
+/// `pub(crate)` and split out so a redraft can mint the replacement room before
+/// touching anything: `set_draft_pointer` nulls the announcement handle, so a
+/// redraft must not repoint until it has both a new room to announce and the old
+/// one's links struck (§8.7's ordering).
+pub(crate) async fn mint_room(tournament: &Tournament, round: &TournamentRound, set_id: i64) -> Option<(String, Room)> {
     let preset_id = round.draft_preset_id.as_ref()?;
     match drafttool::create_match(preset_id).await {
         Ok(created) => {
-            if let Err(err) = db::set_draft_pointer(pool, set_id, &created.id).await {
-                error!("failed to store the draft pointer for set {set_id}: {err:?}");
-                return None;
-            }
-            info!("opened draft {} for set {set_id}", created.id);
-            Some(Room::for_draft(tournament, &created.id))
+            info!("minted draft {} for set {set_id}", created.id);
+            let room = Room::for_draft(tournament, &created.id);
+            Some((created.id, room))
         },
         Err(err) => {
             // `PresetRejected`'s issues are the only account of which rule the
@@ -709,14 +785,17 @@ mod tests {
     fn only_the_working_panel_needs_a_call_admin_button() {
         // The button exists because nothing on a working panel says who to ask.
         // The failure panel names the admins outright, so a second route to the
-        // same people is clutter.
+        // same people is clutter — but both panels offer regenerate, since a
+        // failed mint is exactly what it retries.
         let set = heading(77, "Round 1", 1, 3);
         let (_, with_room) = render_panel(&set, &player(7, 1, "A"), &player(9, 8, "B"), Some(&room()), &[42]);
         let (_, without) = render_panel(&set, &player(7, 1, "A"), &player(9, 8, "B"), None, &[42]);
 
         assert!(labels(&with_room).contains("calladmin:77"), "{}", labels(&with_room));
         assert!(labels(&with_room).contains("Watch draft"), "{}", labels(&with_room));
-        assert!(without.is_empty(), "{}", labels(&without));
+        assert!(labels(&with_room).contains("redraft:77"), "{}", labels(&with_room));
+        assert!(!labels(&without).contains("calladmin"), "{}", labels(&without));
+        assert!(labels(&without).contains("redraft:77"), "{}", labels(&without));
     }
 
     #[test]
@@ -734,8 +813,10 @@ mod tests {
         assert!(content.contains("<@42>"), "{content}");
         assert!(content.contains("<@43>"), "{content}");
         assert!(content.contains("<@7>"), "the players are still named: {content}");
-        // The mentions are the route to an organizer here, so no button.
-        assert!(components.is_empty(), "{components:?}");
+        // The mentions are the route to an organizer here, so no second
+        // call-admin button — but regenerate is still offered, as the retry.
+        assert!(!labels(&components).contains("calladmin"), "{components:?}");
+        assert!(labels(&components).contains("redraft:1"), "{components:?}");
     }
 
     #[test]
@@ -952,5 +1033,34 @@ mod tests {
             Settlement::Played,
         );
         assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
+    }
+
+    // What a redraft leaves in place of the abandoned room.
+
+    #[test]
+    fn a_superseded_panel_names_the_match_and_carries_no_live_link() {
+        let content = render_superseded_panel(&heading(1, "Round 1", 1, 3), &player(7, 1, "A"), &player(9, 8, "B"));
+        assert!(content.contains("Round 1 · Match 1 — Bo3"), "{content}");
+        assert!(content.contains("regenerated"), "{content}");
+        assert!(content.contains("重新產生"), "{content}");
+        assert!(!content.contains("/match/"), "{content}");
+    }
+
+    #[test]
+    fn a_superseded_announcement_names_the_match_and_carries_no_live_link() {
+        let content =
+            render_superseded_announcement(&heading(1, "Final", 1, 5), &player(7, 1, "A"), &player(9, 2, "B"));
+        assert!(content.contains("決賽 / Final · Match 1 — Bo5"), "{content}");
+        assert!(content.contains("regenerated"), "{content}");
+        assert!(!content.contains("/watch/"), "{content}");
+    }
+
+    #[test]
+    fn the_redraft_notice_names_the_actor_in_both_languages() {
+        let content = render_redraft_notice(7, 2);
+        assert!(content.contains("<@7>"), "{content}");
+        assert!(content.contains("regenerated"), "{content}");
+        assert!(content.contains("重新產生"), "{content}");
+        assert!(content.contains('2'), "{content}");
     }
 }

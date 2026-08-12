@@ -2,11 +2,10 @@
 //! `EventHandler::interaction_create` branch over `"<action>:<entity_id>"`
 //! custom_ids.
 //!
-//! Register, Withdraw and Checkin are wired up; Redraft/SetDone
-//! stay stubs until their own chunks (20, 22). The button path resolves its
-//! tournament by the id encoded in the custom_id (`db::get_tournament`), unlike
-//! the slash commands in `commands.rs`, which resolve it from the invoking
-//! channel.
+//! Register, Withdraw, Checkin and Redraft are wired up; SetDone stays a stub
+//! until its own chunk (22). The button path resolves its tournament by the id
+//! encoded in the custom_id (`db::get_tournament`), unlike the slash commands in
+//! `commands.rs`, which resolve it from the invoking channel.
 
 use crate::db::to_db_id;
 use crate::guilds::{Feature, Guilds};
@@ -14,7 +13,9 @@ use crate::locale::Locale;
 use crate::tournament::action::{self, Action};
 use crate::tournament::checkin::CheckinOutcome;
 use crate::tournament::throttle::EditThrottle;
-use crate::tournament::{audit, bracket_view, checkin, checkin_panel, db, panel, registration, seed_panel};
+use crate::tournament::{
+    access, audit, bracket_view, checkin, checkin_panel, db, panel, redraft, registration, seed_panel,
+};
 use serenity::all::{
     ComponentInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
     Interaction,
@@ -78,9 +79,10 @@ impl EventHandler for Dispatcher {
             Action::Register => self.handle_register(&ctx, &component, entity_id).await,
             Action::Withdraw => self.handle_withdraw(&ctx, &component, entity_id).await,
             Action::Checkin => self.handle_checkin(&ctx, &component, entity_id).await,
+            Action::Redraft => self.handle_redraft(&ctx, &component, entity_id).await,
             Action::CallAdmin => self.handle_call_admin(&ctx, &component, entity_id).await,
-            // Neither has a handler yet.
-            Action::Redraft | Action::SetDone => {},
+            // No handler yet — its own chunk (22).
+            Action::SetDone => {},
         }
     }
 }
@@ -183,6 +185,66 @@ impl Dispatcher {
         if let Err(err) = component.channel_id.say(&ctx.http, content).await {
             error!("failed to post the call-admin ping for set {set_id}: {err:?}");
         }
+    }
+
+    /// The `🔄 Regenerate draft` button, resolved by set for the same reason
+    /// `handle_call_admin` is: the button lives on the set's own panel.
+    async fn handle_redraft(&self, ctx: &Context, component: &ComponentInteraction, set_id: i64) {
+        let Ok(Some(set)) = db::get_set(&self.pool, set_id).await else {
+            error!("redraft button for unknown set {set_id}");
+            return;
+        };
+        let Ok(Some(tournament)) = db::get_tournament(&self.pool, set.tournament_id).await else {
+            error!("redraft button for set {set_id} with no tournament");
+            return;
+        };
+
+        let actor_user_id = to_db_id(component.user.id);
+        let is_admin = self.is_admin(ctx, component, &tournament, actor_user_id).await;
+
+        let outcome = match redraft::run(&ctx.http, &self.pool, &tournament, &set, actor_user_id, is_admin).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                error!("redraft button failed for set {set_id}: {err:?}");
+                return;
+            },
+        };
+        audit::log_action(
+            "redraft button",
+            tournament.id,
+            &tournament.slug,
+            &component.user,
+            &outcome,
+        );
+        let locale = Locale::from_discord_locale(&component.locale);
+
+        // Deferred (Action::Redraft.requires_defer() == true), so the reply
+        // edits the initial deferred response rather than creating a new one.
+        let response = EditInteractionResponse::new().content(outcome.message(locale));
+        if let Err(err) = component.edit_response(&ctx.http, response).await {
+            error!("failed to edit the redraft response for set {set_id}: {err:?}");
+        }
+    }
+
+    /// Whether the presser holds admin-tier access to `tournament` —
+    /// `handle_redraft`'s equivalent of `access::access_for`, which needs a
+    /// poise `Context` this `EventHandler` never has; built instead from the
+    /// interaction's own `guild_id`/`member` plus a DB admin-list lookup.
+    async fn is_admin(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        tournament: &db::Tournament,
+        user_id: i64,
+    ) -> bool {
+        let is_admin = db::is_admin(&self.pool, tournament.id, user_id).await.unwrap_or(false);
+        let has_manage_guild = match (component.guild_id, component.member.as_ref()) {
+            (Some(guild_id), Some(member)) => access::manage_guild_for(&ctx.http, guild_id, member)
+                .await
+                .unwrap_or(false),
+            _ => false,
+        };
+        access::decide(user_id, tournament.created_by, is_admin, has_manage_guild).may_manage_tournament()
     }
 
     async fn handle_withdraw(&self, ctx: &Context, component: &ComponentInteraction, tournament_id: i64) {

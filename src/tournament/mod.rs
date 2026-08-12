@@ -47,6 +47,9 @@ pub(crate) mod render;
 pub(crate) mod report;
 // `/tournament register|rebind|withdraw`'s business logic.
 pub(crate) mod registration;
+// `/set redraft`: abandons a set's current draft room for a fresh one from the
+// same preset — the remedy for a mis-seated draft or one that stalled.
+pub(crate) mod redraft;
 // `/tournament create`'s slug argument.
 pub(crate) mod slug;
 // What must be configured before a tournament can start, and

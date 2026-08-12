@@ -10,6 +10,7 @@ use crate::locale::Locale;
 use crate::reply::ephemeral;
 use crate::tournament::db;
 use crate::{Context, Error};
+use serenity::all::{CacheHttp, GuildId, Member};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Access {
@@ -101,6 +102,18 @@ pub(crate) async fn tournament_manage_only(ctx: Context<'_>) -> Result<bool, Err
     may_manage(ctx, &tournament).await
 }
 
+/// The caller's `Access` to a tournament they have already resolved. Split out
+/// of `may_manage` because `/set redraft` needs the decision without the
+/// refusal reply that comes with it — a plain player is allowed there, so a
+/// `false` has to come back silently.
+pub(crate) async fn access_for(ctx: Context<'_>, tournament: &db::Tournament) -> Result<Access, Error> {
+    let pool = &ctx.data().database;
+    let user_id = to_db_id(ctx.author().id);
+    let is_admin = db::is_admin(pool, tournament.id, user_id).await?;
+    let has_manage_guild = author_has_manage_guild(ctx).await?;
+    Ok(decide(user_id, tournament.created_by, is_admin, has_manage_guild))
+}
+
 /// The same tier as `tournament_manage_only`, asked of a tournament the caller
 /// has already resolved.
 ///
@@ -110,12 +123,7 @@ pub(crate) async fn tournament_manage_only(ctx: Context<'_>) -> Result<bool, Err
 /// the five stored channel ids, so resolving by channel there refuses everything.
 /// Replies with the refusal itself, so a caller only has to honour the `bool`.
 pub(crate) async fn may_manage(ctx: Context<'_>, tournament: &db::Tournament) -> Result<bool, Error> {
-    let pool = &ctx.data().database;
-    let user_id = to_db_id(ctx.author().id);
-    let is_admin = db::is_admin(pool, tournament.id, user_id).await?;
-    let has_manage_guild = author_has_manage_guild(ctx).await?;
-
-    if decide(user_id, tournament.created_by, is_admin, has_manage_guild).may_manage_tournament() {
+    if access_for(ctx, tournament).await?.may_manage_tournament() {
         return Ok(true);
     }
     ephemeral(
@@ -147,8 +155,16 @@ async fn author_has_manage_guild(ctx: Context<'_>) -> Result<bool, Error> {
     let Some(member) = ctx.author_member().await else {
         return Ok(false);
     };
-    let partial_guild = guild_id.to_partial_guild(ctx.http()).await?;
-    Ok(partial_guild.member_permissions(&member).manage_guild())
+    manage_guild_for(ctx.http(), guild_id, &member).await
+}
+
+/// The Discord half of `author_has_manage_guild`, taking a guild and member
+/// directly rather than a poise `Context` — `dispatch::Dispatcher`'s button
+/// path has no poise context to read them from, only the raw `serenity::Context`
+/// and the interaction's own `guild_id`/`member`.
+pub(crate) async fn manage_guild_for(http: impl CacheHttp, guild_id: GuildId, member: &Member) -> Result<bool, Error> {
+    let partial_guild = guild_id.to_partial_guild(http).await?;
+    Ok(partial_guild.member_permissions(member).manage_guild())
 }
 
 /// `/tournament create`. Deliberately an OR, not a replacement of the

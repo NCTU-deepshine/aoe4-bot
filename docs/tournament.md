@@ -1550,7 +1550,9 @@ The same message is edited with the final score when the set completes, so the c
 - **Redraft ordering, for chunk 20.** `set_draft_pointer` clears the handle, so the old post is unreachable
   afterwards. The order has to be: read the old handle → edit that post to strike the dead link → repoint →
   announce the new room. Otherwise `#…-draft` accumulates a live-looking link to an orphaned room per redraft,
-  which is precisely that channel's failure mode.
+  which is precisely that channel's failure mode. **The same ordering applies to the pinned set panel** — it
+  carries the live `/match/` link, which claims a seat, so it is struck the same way and for the same reason,
+  via `panel_message_id` (§8.8).
 - **Chunk 22's edit touches the header line only**, so the message keeps its shape when the score lands.
 
 #### `/set redraft`
@@ -1567,9 +1569,10 @@ Guards, in order of how likely each is to matter:
    `/set report`.
 2. **`source = 'draft_import'` games for that set are voided; `manual` rows survive.** A redraft after a game has
    been played discards the imported record of it, which is the point — the new draft is the record now.
-3. **Rate-limited by `redraft_count`.** Beyond a small threshold it becomes admin-only: each redraft leaves an
+3. **Rate-limited by `redraft_count`.** Beyond `FREE_REDRAFTS` (2) it becomes admin-only: each redraft leaves an
    undeletable room on someone else's server, and a button either player can press is a button that can be
-   pressed in frustration.
+   pressed in frustration. Two covers the realistic cases — wrong seats, then a fumble — without letting
+   frustration strand a pile of orphaned rooms; past it, only an admin's redraft goes through.
 
 ### 8.8 Schema additions
 
@@ -1596,7 +1599,9 @@ Columns added to §4's tables:
   `draft_channel_id`, `matches_channel_id`, `checkin_message_id`, `checkin_closes_at`. Both panels live in the
   register channel, so one channel id covers them.
 - `tournament_entries`: `checked_in_at timestamp`.
-- `tournament_sets`: `thread_id bigint`, `draft_announce_message_id bigint`, `redraft_count integer`.
+- `tournament_sets`: `thread_id bigint`, `draft_announce_message_id bigint`, `redraft_count integer`,
+  `panel_message_id bigint` (`0014_set_panel_message.sql` — the pinned set panel's handle, so a redraft can strike
+  its live `/match/` link before replacing it, the same way it strikes the `#…-draft` announcement).
 
 ### 8.9 New infrastructure this introduces
 
@@ -1752,7 +1757,9 @@ than panicking (buttons from an older deploy will be pressed).
   per draft **by construction** rather than by test — a room is minted once per set — and what is asserted in
   the database is the handle: `draft_announce_message_id` round-trips, and a redraft clears it;
 - **redraft** overwrites the pointer, increments `redraft_count`, voids that set's `draft_import` games while
-  preserving `manual` ones, clears the announcement handle, and is refused on a `completed` set;
+  preserving `manual` ones, clears the announcement handle, strikes the old announcement and panel before
+  repointing, is refused on a `completed` set, and — past `FREE_REDRAFTS` — refuses a player while still
+  allowing an admin;
 - a set reaching a majority of its games completes, eliminates the loser, and places the winner in the correct
   slot of the next set;
 - a draft's reported `score` disagreeing with the imported games is flagged rather than silently resolved;
@@ -1803,8 +1810,6 @@ Tracked separately; not part of this design.
   meanwhile.
 - **Is a bot account acceptable to the tool's author?** Every draft we create is hosted by it and shows up in the
   tool's own history under that account. Worth disclosing rather than looking like an unusually busy player.
-- **How many redrafts before `/set redraft` becomes admin-only?** Each one strands an undeletable room on
-  someone else's server, and a button either player can press will occasionally be pressed in frustration.
 - **May an admin remove a *self-registered* entrant?** `/tournament uninvite` (§8.3) deliberately does not answer
   this: it is scoped to entries an admin created, so it is the inverse of `/tournament invite` and nothing more.
   The cap design assumed no kick was needed because everyone in the field put themselves there — an assumption

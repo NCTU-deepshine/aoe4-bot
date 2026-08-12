@@ -1335,6 +1335,9 @@ pub(crate) struct TournamentSet {
     pub draft_announce_message_id: Option<i64>,
     pub redraft_count: i64,
     pub thread_id: Option<i64>,
+    /// The pinned set panel, so a redraft can strike the abandoned room's
+    /// live seat-claim link before replacing it — see `0014_set_panel_message.sql`.
+    pub panel_message_id: Option<i64>,
     pub winner_advances_to_set_id: Option<i64>,
     pub winner_advances_to_slot: Option<i64>,
     pub loser_advances_to_set_id: Option<i64>,
@@ -1346,9 +1349,9 @@ pub(crate) struct TournamentSet {
 const TOURNAMENT_SET_COLUMNS: &str = r"
     id, tournament_id, round_id, position, slot1_user_id, slot2_user_id, slot1_wins,
     slot2_wins, winner_user_id, status, draft_external_id, draft_synced_at,
-    draft_announce_message_id, redraft_count, thread_id, winner_advances_to_set_id,
-    winner_advances_to_slot, loser_advances_to_set_id, loser_advances_to_slot,
-    scheduled_at, completed_at
+    draft_announce_message_id, redraft_count, thread_id, panel_message_id,
+    winner_advances_to_set_id, winner_advances_to_slot, loser_advances_to_set_id,
+    loser_advances_to_slot, scheduled_at, completed_at
 ";
 
 pub(crate) async fn insert_set(
@@ -1713,6 +1716,20 @@ pub(crate) async fn set_draft_synced_at(
 
 pub(crate) async fn set_draft_announce_message(pool: &SqlitePool, id: i64, message_id: i64) -> Result<(), sqlx::Error> {
     sqlx::query(r"update tournament_sets set draft_announce_message_id = ?1 where id = ?2")
+        .bind(message_id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// The pinned set panel's message id, recorded on open and re-recorded after a
+/// redraft posts a fresh panel. Deliberately not cleared by `set_draft_pointer`:
+/// a redraft strikes and replaces this message explicitly rather than losing
+/// track of it.
+pub(crate) async fn set_panel_message(pool: &SqlitePool, id: i64, message_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(r"update tournament_sets set panel_message_id = ?1 where id = ?2")
         .bind(message_id)
         .bind(id)
         .execute(pool)

@@ -2630,6 +2630,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_panel_handle_survives_a_redrafts_pointer_change() {
+        // Unlike the announcement handle, the panel is struck and replaced
+        // explicitly by `redraft::run`, not implicitly by `set_draft_pointer` —
+        // so the pointer change alone must leave it untouched.
+        let pool = test_pool().await;
+        let set_id = setup_set(&pool).await;
+
+        crate::tournament::db::set_draft_pointer(&pool, set_id, "65f1a0")
+            .await
+            .unwrap();
+        crate::tournament::db::set_panel_message(&pool, set_id, 4242)
+            .await
+            .unwrap();
+
+        crate::tournament::db::set_draft_pointer(&pool, set_id, "65f1b1")
+            .await
+            .unwrap();
+        let set = crate::tournament::db::get_set(&pool, set_id).await.unwrap().unwrap();
+        assert_eq!(
+            set.panel_message_id,
+            Some(4242),
+            "a redraft strikes and replaces the panel itself; the pointer write must not clear it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redraft_is_refused_on_a_completed_set_but_goes_through_for_a_player_or_an_admin() {
+        // The guard order and the two allowed callers, exercised against real
+        // rows rather than the fixtures `redraft::tests` builds by hand.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        let round = crate::tournament::db::get_round(&pool, set.round_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let has_preset = round.draft_preset_id.is_some();
+
+        let (slot1, slot2) = (set.slot1_user_id.unwrap(), set.slot2_user_id.unwrap());
+        assert_eq!(crate::tournament::redraft::refuse(&set, has_preset, true, false), None);
+        assert_eq!(
+            crate::tournament::redraft::refuse(&set, has_preset, false, false),
+            Some(crate::tournament::redraft::RedraftOutcome::NotYours),
+            "neither slot's occupant nor an admin"
+        );
+
+        crate::tournament::db::complete_set_and_advance(
+            &pool,
+            crate::tournament::db::SetResult {
+                set_id: set.id,
+                tournament_id: tournament.id,
+                slot1_wins: 2,
+                slot2_wins: 0,
+                winner_user_id: slot1,
+                loser_user_id: slot2,
+                status: "completed",
+            },
+        )
+        .await
+        .unwrap();
+        let completed = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(
+            crate::tournament::redraft::refuse(&completed, has_preset, true, false),
+            Some(crate::tournament::redraft::RedraftOutcome::AlreadyComplete)
+        );
+    }
+
+    #[tokio::test]
     async fn a_set_fed_by_two_byes_is_playable_immediately() {
         let pool = test_pool().await;
         // 5 in an 8-bracket: seeds 1, 2 and 3 are unopposed, and round two's

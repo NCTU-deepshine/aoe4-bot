@@ -40,17 +40,18 @@ impl Action {
         }
     }
 
-    /// `Register` (aoe4world lookup) and `SetDone` (draft-tool fetch) make an
+    /// `Register` (aoe4world lookup), `SetDone` (draft-tool fetch) and `Redraft`
+    /// (`POST /api/matches`, possibly behind a re-auth handshake) each make an
     /// outbound HTTP call that can outlast Discord's 3s ack window; the rest are
     /// a local DB write and can answer immediately.
     pub(crate) fn requires_defer(self) -> bool {
-        matches!(self, Action::Register | Action::SetDone)
+        matches!(self, Action::Register | Action::SetDone | Action::Redraft)
     }
 
     /// The `custom_id` a button carries. Built by `panel::render`'s Register and
-    /// Withdraw buttons — later panel chunks (10, 20, 22) will build
-    /// theirs through this too, so every button round-trips through the same
-    /// `parse_custom_id` this module tests directly.
+    /// Withdraw buttons, and by `set_thread::render_panel`'s Redraft button — later
+    /// panel chunks (22) will build theirs through this too, so every button
+    /// round-trips through the same `parse_custom_id` this module tests directly.
     pub(crate) fn custom_id(self, entity_id: i64) -> String {
         format!("{}:{entity_id}", self.tag())
     }
@@ -109,12 +110,12 @@ mod tests {
     }
 
     #[test]
-    fn only_register_and_setdone_require_a_defer() {
+    fn only_the_actions_making_an_outbound_http_call_require_a_defer() {
         assert!(Action::Register.requires_defer());
         assert!(Action::SetDone.requires_defer());
+        assert!(Action::Redraft.requires_defer());
         assert!(!Action::Withdraw.requires_defer());
         assert!(!Action::Checkin.requires_defer());
-        assert!(!Action::Redraft.requires_defer());
         assert!(!Action::CallAdmin.requires_defer());
     }
 }

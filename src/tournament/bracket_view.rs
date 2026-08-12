@@ -761,6 +761,7 @@ mod tests {
             draft_announce_message_id: None,
             redraft_count: 0,
             thread_id: None,
+            panel_message_id: None,
             winner_advances_to_set_id: None,
             winner_advances_to_slot: None,
             loser_advances_to_set_id: None,

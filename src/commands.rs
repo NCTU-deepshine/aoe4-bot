@@ -6,13 +6,15 @@ use crate::ranked::try_create_ranked_without_account;
 use crate::refresh::do_refresh;
 use crate::reply::ephemeral;
 use crate::tournament::access::{
-    create_tournament_only, may_manage, tournament_admin_only, tournament_manage_only, wrong_channel_message,
+    self, Access, create_tournament_only, may_manage, tournament_admin_only, tournament_manage_only,
+    wrong_channel_message,
 };
 use crate::tournament::db as tournament_db;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
-    audit, bracket, bracket_view, checkin, checkin_panel, completion, invite as tournament_invite, panel, registration,
-    report, seed_panel, seeding, set_thread, setup as tournament_setup, start as tournament_start, teardown,
+    audit, bracket, bracket_view, checkin, checkin_panel, completion, invite as tournament_invite, panel, redraft,
+    registration, report, seed_panel, seeding, set_thread, setup as tournament_setup, start as tournament_start,
+    teardown,
 };
 use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
@@ -2077,20 +2079,22 @@ async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db
     guild_only,
     check = "tournament_only",
     rename = "set",
-    subcommands("set_report", "set_award"),
+    subcommands("set_report", "set_award", "set_redraft"),
     subcommand_required
 )]
 pub async fn set_root(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// The set this command was typed in, with the caller's authority checked.
+/// The set and tournament for the thread this command was typed in, with no
+/// authority check of its own — the shared base of `resolve_set_by_thread`
+/// (the admin-only commands) and `resolve_set_for_participant` (`/set redraft`,
+/// open to either player too). Answers on every failure itself, so `None`
+/// means "already handled, just return".
 ///
-/// Mirrors `resolve_tournament_by_channel`'s contract — it answers on every
-/// failure itself, so `None` means "already handled, just return" — but keys off
-/// the thread rather than the channel, since that is what identifies a set and is
-/// why the ordinary manage check cannot be used as a poise `check` here.
-async fn resolve_set_by_thread(
+/// Mirrors `resolve_tournament_by_channel`'s contract, but keys off the thread
+/// rather than the channel, since that is what identifies a set.
+async fn resolve_set(
     ctx: Context<'_>,
 ) -> Result<Option<(tournament_db::Tournament, tournament_db::TournamentSet)>, Error> {
     let locale = Locale::from_context(ctx);
@@ -2111,10 +2115,35 @@ async fn resolve_set_by_thread(
         ephemeral(ctx, wrong_channel_message(locale)).await?;
         return Ok(None);
     };
+    Ok(Some((tournament, set)))
+}
+
+/// The set this command was typed in, with the caller's authority checked
+/// against the manage-only tier — the gate for `/set report` and `/set award`,
+/// neither of which a plain player may run.
+async fn resolve_set_by_thread(
+    ctx: Context<'_>,
+) -> Result<Option<(tournament_db::Tournament, tournament_db::TournamentSet)>, Error> {
+    let Some((tournament, set)) = resolve_set(ctx).await? else {
+        return Ok(None);
+    };
     if !may_manage(ctx, &tournament).await? {
         return Ok(None);
     }
     Ok(Some((tournament, set)))
+}
+
+/// The same resolution, for `/set redraft`: either of the two players is
+/// allowed, not just an admin, so the caller's `Access` comes back instead of
+/// the manage-only gate rejecting them.
+async fn resolve_set_for_participant(
+    ctx: Context<'_>,
+) -> Result<Option<(tournament_db::Tournament, tournament_db::TournamentSet, Access)>, Error> {
+    let Some((tournament, set)) = resolve_set(ctx).await? else {
+        return Ok(None);
+    };
+    let caller_access = access::access_for(ctx, &tournament).await?;
+    Ok(Some((tournament, set, caller_access)))
 }
 
 /// The two players in the set this command was typed in, as autocomplete choices.
@@ -2251,6 +2280,39 @@ pub async fn set_award(
 
     // Ephemeral for the same reason `/set report` is: an awarded set has already
     // had its result posted in the thread, which is then archived and locked.
+    ephemeral(ctx, outcome.message(locale)).await?;
+    Ok(())
+}
+
+/// 🔄 Abandons this set's current draft for a fresh one from the same preset.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    rename = "redraft",
+    description_localized("zh-TW", "🔄 放棄這場對戰目前的 Draft，並用相同的預設集重新產生一個。")
+)]
+pub async fn set_redraft(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
+    let Some((tournament, set, caller_access)) = resolve_set_for_participant(ctx).await? else {
+        return Ok(());
+    };
+
+    let actor_user_id = to_db_id(ctx.author().id);
+    let outcome = redraft::run(
+        ctx.http(),
+        &ctx.data().database,
+        &tournament,
+        &set,
+        actor_user_id,
+        caller_access.may_manage_tournament(),
+    )
+    .await?;
+    audit::log_action("set redraft", tournament.id, &tournament.slug, ctx.author(), &outcome);
+
+    // Ephemeral like its siblings: the visible record is the notice
+    // `redraft::run` posts in the thread, which is the point.
     ephemeral(ctx, outcome.message(locale)).await?;
     Ok(())
 }

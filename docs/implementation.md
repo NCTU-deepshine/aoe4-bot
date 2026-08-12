@@ -492,6 +492,43 @@ redraws the bracket preview in the same call; opening check-in pings every self-
 exactly once, skips invitees, and posts nothing for an empty field; a field larger than the chunk size splits
 across multiple messages with no id lost or duplicated.
 
+**38. `/set redraft`, for real this time**
+Chunk 37 found that chunk 20 had never actually landed. This is that implementation: `redraft::refuse` and
+`redraft::run` (new `src/tournament/redraft.rs`, on the `report.rs` pattern — a pure, order-tested guard plus an
+effectful half), a `/set redraft` subcommand, and the `Action::Redraft` button dispatch, both calling into it.
+
+Two things §8.7 specified but the schema had no room for. First, `FREE_REDRAFTS = 2` answers §12's open
+question: a player may redraft a set twice on their own; past that, only an admin's redraft goes through —
+`redraft_count` was already the column the guard needed, just unread. Second, the pinned set panel carries the
+same live-link hazard the `#…-draft` announcement does — its body is the `/match/` seat-claim url, and the tool
+has no `DELETE` — so it needed the same striking treatment, which needed a handle it never had:
+`0014_set_panel_message.sql` adds `tournament_sets.panel_message_id`, written by `set_thread::open` and
+re-written each redraft. `set_draft_pointer` deliberately does not clear it — unlike the announcement handle, a
+redraft strikes and replaces the panel explicitly, in the same step that mints the new room, so there is no
+window where the old handle would dangle.
+
+The ordering constraint (`docs/tournament.md:1550`) is what shapes `redraft::run`: mint the replacement room
+first — a failed mint must leave the existing draft untouched — then strike the old announcement and panel
+(both still readable at this point), then `set_draft_pointer` (which nulls the announcement handle),
+`increment_redraft_count`, `void_games_for_set`, and only then post the notice, the fresh panel, and the new
+announcement. `set_thread::create_room` split into `mint_room` (talks to the tool, no DB write) plus the
+existing `create_room` (mint, then point) so a redraft could call the former without racing the database ahead
+of a room that might not exist.
+
+`access::may_manage` bundled deciding admin-tier access with replying to a refusal, which is wrong for a
+command a plain player is also allowed to run. Split into `access::access_for` (the decision alone) and
+`access::manage_guild_for` (its Discord-permissions half, taking a `guild_id`/`member` pair directly) so
+`dispatch::Dispatcher` — which has no poise `Context` to read them from — can reach the same admin-or-not
+answer the slash command does.
+
+`Action::Redraft.requires_defer()` was `false`, left over from before the button had a handler; corrected to
+`true`, since a redraft's `POST /api/matches` (possibly behind a re-auth handshake) is exactly the kind of call
+`requires_defer`'s doc comment says needs one.
+Design: §8.7, §8.8 (new column), §12 (answered).
+Gate: §10's redraft bullet — overwrites the pointer, increments `redraft_count`, voids `draft_import` games
+while preserving `manual` ones, strikes the old announcement and panel before repointing, refuses a `completed`
+set before any other guard, and refuses a player past `FREE_REDRAFTS` while an admin always goes through.
+
 ## Phase E — the draft tool
 
 **14. Draft-tool client**
@@ -610,6 +647,6 @@ an unrecognized code all fall back to `Locale::En`; every retrofitted message re
 Swiss, group stage, round robin and double elimination (§1 "Designed for, not built now"); team tournaments;
 the catalog endpoint, seat assignment and the completion webhook (§3.2 items 2–4); Discord login on the tool
 (§3.6); per-guild configuration beyond the hardcoded ids (§8.0); everything under §11 "Follow-ups"; wiring
-`Action::Redraft`/`Action::SetDone` and a `/set redraft`/`/set done` command to logic that, per chunk 37, does
-not currently exist; the fixed-seat-vs-must-confirm invitee toggle and rendering the bracket as an image instead
-of a code block (both §12).
+`Action::SetDone` and a `/set done` command to result import (chunk 22, still ahead — `Action::Redraft` and
+`/set redraft` are chunk 38's, and are done); the fixed-seat-vs-must-confirm invitee toggle and rendering the
+bracket as an image instead of a code block (both §12).
