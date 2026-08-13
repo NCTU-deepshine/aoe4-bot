@@ -2462,6 +2462,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_completed_set_attempts_to_edit_its_panel_and_announcement() {
+        // The DB half is what a test can actually verify; the edits themselves
+        // fail against fake_http's bogus token and log rather than propagate,
+        // exactly like the existing thread-archive call already does. The
+        // point of this test is that `close`'s two new edit attempts execute
+        // at all — a set with no panel or announcement wired up would skip
+        // them silently, which is every other test in this suite.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        crate::tournament::db::set_tournament_channels(
+            &pool,
+            tournament.id,
+            crate::tournament::db::TournamentChannels {
+                category_id: None,
+                announce_channel_id: 900,
+                register_channel_id: 901,
+                bracket_channel_id: 902,
+                matches_channel_id: 903,
+                draft_channel_id: 904,
+            },
+        )
+        .await
+        .unwrap();
+        let tournament = reload(&pool, tournament.id).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        crate::tournament::db::set_thread(&pool, ids[0], 1000).await.unwrap();
+        crate::tournament::db::set_panel_message(&pool, ids[0], 1001)
+            .await
+            .unwrap();
+        crate::tournament::db::set_draft_announce_message(&pool, ids[0], 1002)
+            .await
+            .unwrap();
+        let set = set_pointer(&pool, ids[0], "draft-1").await;
+
+        let games = vec![
+            draft_game(1, Some("prairie"), Some(1)),
+            draft_game(2, Some("dry-arabia"), Some(1)),
+        ];
+        let state = draft_state("running", false, 3, (2, 0), games);
+        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                crate::tournament::import::SyncOutcome::Progress {
+                    outcome: crate::tournament::completion::CompleteOutcome::Completed { .. },
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let reloaded = crate::tournament::db::get_set(&pool, set.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.status, "completed",
+            "the DB write is unaffected by the Discord calls failing"
+        );
+    }
+
+    #[tokio::test]
     async fn reimport_overwrites_draft_import_rows_and_preserves_manual_ones() {
         let pool = test_pool().await;
         let tournament = setup_running_bracket(&pool).await;

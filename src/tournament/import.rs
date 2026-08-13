@@ -6,11 +6,11 @@
 //! settle a decided set through `completion::finish` rather than duplicating
 //! that logic, so a set decided by import behaves exactly like one decided
 //! by hand. A head start is assumed to always be zero and is not modeled —
-//! see the note on `drafttool::DraftState`. Callable but uncalled: `/set
-//! done` and the background poll each add a caller, in their own chunks.
+//! see the note on `drafttool::DraftState`.
 
 use crate::Error;
 use crate::drafttool::{self, DraftGame, DraftSeat, DraftState, SlotValues};
+use crate::locale::Locale;
 use crate::tournament::completion::{self, CompleteOutcome, Tally};
 use crate::tournament::db::{self, NewGame, Tournament, TournamentSet};
 use serenity::all::CacheHttp;
@@ -104,6 +104,57 @@ pub(crate) enum SyncOutcome {
         outcome: CompleteOutcome,
         score_mismatch: bool,
     },
+}
+
+impl SyncOutcome {
+    pub(crate) fn message(&self, locale: Locale) -> String {
+        match self {
+            SyncOutcome::AlreadyComplete => locale.pick(
+                "這場對戰已經結束了。".to_string(),
+                "That set is already finished.".to_string(),
+            ),
+            SyncOutcome::NoPointer => locale.pick(
+                "這場對戰還沒有開始 Draft。".to_string(),
+                "No draft has been opened for this set yet.".to_string(),
+            ),
+            SyncOutcome::Superseded => locale.pick(
+                "Draft 剛好被重新產生，請再試一次。".to_string(),
+                "That draft was just replaced — try again.".to_string(),
+            ),
+            SyncOutcome::Unreachable => locale.pick(
+                "現在連不到 Draft 工具，稍後再試一次。".to_string(),
+                "Couldn't reach the draft tool just now — try again in a bit.".to_string(),
+            ),
+            // The three-way split §3.2 item 1 exists for: none of these read
+            // the same as "not yet" would.
+            SyncOutcome::NotSeated => locale.pick(
+                "還沒有人在 Draft 房間裡就座。".to_string(),
+                "Nobody has taken a seat in the draft yet.".to_string(),
+            ),
+            SyncOutcome::AwaitingSeat => locale.pick(
+                "還在等另一位選手就座。".to_string(),
+                "Waiting on the other player to take their seat.".to_string(),
+            ),
+            SyncOutcome::Paused => locale.pick("Draft 目前暫停中。".to_string(), "The draft is paused.".to_string()),
+            SyncOutcome::Progress {
+                outcome,
+                score_mismatch,
+            } => {
+                let message = outcome.message(locale);
+                if *score_mismatch {
+                    format!(
+                        "{message}\n{}",
+                        locale.pick(
+                            "⚠️ Draft 回報的比分和匯入的對局不一致，請管理員檢查這場對戰。",
+                            "⚠️ The draft's reported score didn't match what was imported — an admin should check this set."
+                        )
+                    )
+                } else {
+                    message
+                }
+            },
+        }
+    }
 }
 
 /// Syncs `set` against its current draft: fetches, then hands off to `apply`.
@@ -301,5 +352,78 @@ mod tests {
             slot2_wins: 0,
         };
         assert!(score_mismatch(&slot_values(2, 0), &tally));
+    }
+
+    #[test]
+    fn every_outcome_renders_in_both_locales() {
+        let outcomes = [
+            SyncOutcome::AlreadyComplete,
+            SyncOutcome::NoPointer,
+            SyncOutcome::Superseded,
+            SyncOutcome::Unreachable,
+            SyncOutcome::NotSeated,
+            SyncOutcome::AwaitingSeat,
+            SyncOutcome::Paused,
+        ];
+        for outcome in outcomes {
+            let zh = outcome.message(Locale::ZhTw);
+            let en = outcome.message(Locale::En);
+            assert_ne!(zh, en, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn not_seated_reads_differently_from_awaiting_a_seat() {
+        assert_ne!(
+            SyncOutcome::NotSeated.message(Locale::En),
+            SyncOutcome::AwaitingSeat.message(Locale::En)
+        );
+    }
+
+    #[test]
+    fn a_progress_outcome_defers_to_completions_own_message() {
+        let still_playing = SyncOutcome::Progress {
+            outcome: CompleteOutcome::StillPlaying {
+                tally: Tally {
+                    slot1_wins: 1,
+                    slot2_wins: 0,
+                },
+                needed: 2,
+            },
+            score_mismatch: false,
+        };
+        let direct = CompleteOutcome::StillPlaying {
+            tally: Tally {
+                slot1_wins: 1,
+                slot2_wins: 0,
+            },
+            needed: 2,
+        }
+        .message(Locale::En);
+        assert_eq!(still_playing.message(Locale::En), direct);
+    }
+
+    #[test]
+    fn a_score_mismatch_adds_a_note_without_losing_the_underlying_message() {
+        let outcome = CompleteOutcome::StillPlaying {
+            tally: Tally {
+                slot1_wins: 1,
+                slot2_wins: 0,
+            },
+            needed: 2,
+        };
+        let clean = SyncOutcome::Progress {
+            outcome: outcome.clone(),
+            score_mismatch: false,
+        }
+        .message(Locale::En);
+        let flagged = SyncOutcome::Progress {
+            outcome,
+            score_mismatch: true,
+        }
+        .message(Locale::En);
+        assert!(flagged.starts_with(&clean));
+        assert!(flagged.contains("admin should check"));
+        assert_ne!(clean, flagged);
     }
 }

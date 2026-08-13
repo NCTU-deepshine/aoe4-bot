@@ -1,9 +1,8 @@
 //! Parsing and building `custom_id`s for the button panels:
 //! `"<action>:<entity_id>"`, e.g. `register:42`. Pure and
 //! Discord-free, so every case is unit-tested directly; `dispatch::Dispatcher`
-//! parses every custom_id, and `panel::render` is the first to build
-//! one — later panel chunks (10, 20, 22) will build theirs through
-//! `Action::custom_id` too, so every button round-trips through the same code
+//! parses every custom_id, and every panel builds its own buttons through
+//! `Action::custom_id`, so every button round-trips through the same code
 //! path `parse_custom_id` reads.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,10 +47,9 @@ impl Action {
         matches!(self, Action::Register | Action::SetDone | Action::Redraft)
     }
 
-    /// The `custom_id` a button carries. Built by `panel::render`'s Register and
-    /// Withdraw buttons, and by `set_thread::render_panel`'s Redraft button — later
-    /// panel chunks (22) will build theirs through this too, so every button
-    /// round-trips through the same `parse_custom_id` this module tests directly.
+    /// The `custom_id` a button carries. Built by every panel that has one — every
+    /// button round-trips through the same `parse_custom_id` this module tests
+    /// directly.
     pub(crate) fn custom_id(self, entity_id: i64) -> String {
         format!("{}:{entity_id}", self.tag())
     }

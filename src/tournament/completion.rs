@@ -302,7 +302,7 @@ async fn settle(
 
     let winner = set_thread::player(pool, tournament.id, winner_user_id).await?;
     let loser = set_thread::player(pool, tournament.id, loser_user_id).await?;
-    set_thread::close(http, pool, set, &winner, &loser, &tally, settlement).await;
+    set_thread::close(http, pool, tournament, set, &winner, &loser, &tally, settlement).await;
 
     // The bracket is redrawn from the rows just written: `played_match` derives a
     // winner from `winner_user_id` and never reads `status`, so this needs no

@@ -11,7 +11,7 @@
 //! else is the Discord/DB glue `commands.rs` drives.
 
 use crate::Error;
-use crate::db::{to_channel_id, to_user_id};
+use crate::db::{to_channel_id, to_message_id, to_user_id};
 use crate::drafttool::{self, DraftError};
 use crate::ranked::escape;
 use crate::tournament::action::Action;
@@ -21,7 +21,7 @@ use crate::tournament::db::{self, Tournament, TournamentRound, TournamentSet};
 use crate::tournament::render;
 use serenity::all::{
     ButtonStyle, CacheHttp, ChannelType, CreateActionRow, CreateAllowedMentions, CreateButton, CreateMessage,
-    CreateThread, EditThread,
+    CreateThread, EditMessage, EditThread,
 };
 use sqlx::SqlitePool;
 use tracing::{error, info};
@@ -126,10 +126,9 @@ pub(crate) fn render_panel(
     );
 
     // The call-admin button is what a player has instead of knowing who to ask:
-    // nothing on this panel names an organizer.
-    //
-    // "Set complete" belongs on this panel too, but nothing handles it yet — a
-    // button that silently does nothing is worse than one that is not there yet.
+    // nothing on this panel names an organizer. Set complete is safe to press
+    // early — it syncs and reports "still in progress" rather than acting on
+    // an undecided draft — so it carries no confirmation of its own.
     let components = vec![CreateActionRow::Buttons(vec![
         CreateButton::new_link(&room.watch_url).label("觀戰 / Watch draft"),
         CreateButton::new(Action::Redraft.custom_id(set.id))
@@ -138,6 +137,9 @@ pub(crate) fn render_panel(
         CreateButton::new(Action::CallAdmin.custom_id(set.id))
             .label("呼叫管理員 / Call an organizer")
             .style(ButtonStyle::Secondary),
+        CreateButton::new(Action::SetDone.custom_id(set.id))
+            .label("✅ 回報完成 / Set complete")
+            .style(ButtonStyle::Success),
     ])];
 
     (body, components)
@@ -233,6 +235,69 @@ pub(crate) fn render_superseded_announcement(set: &SetHeading, one: &Player, two
         bracket::round_name_bilingual(&set.round_name),
         set.position,
         set.best_of,
+        one.seed,
+        escape(&one.name),
+        two.seed,
+        escape(&two.name),
+    )
+}
+
+/// What the pinned panel becomes once the set is decided: the same header,
+/// the result in place of the seat instruction, and no components — nothing
+/// on it stays actionable once a winner is set. `close` edits the live panel
+/// to this on every settlement path, not only an imported one.
+pub(crate) fn render_completed_panel(
+    set: &SetHeading,
+    winner: &Player,
+    loser: &Player,
+    tally: &Tally,
+    settlement: Settlement,
+) -> String {
+    let header = format!(
+        "**{} · Match {} — Bo{}**   <@{}>  <@{}>\n`{}` {}  vs  `{}` {}\n",
+        set.round_name,
+        set.position,
+        set.best_of,
+        winner.user_id,
+        loser.user_id,
+        winner.seed,
+        escape(&winner.name),
+        loser.seed,
+        escape(&loser.name)
+    );
+    let score = format!("{}-{}", tally.slot1_wins, tally.slot2_wins);
+    let result = match settlement {
+        Settlement::Played => format!(
+            "🏁 **{}** 以 {score} 擊敗 **{}**，已晉級。\n\
+             🏁 **{}** beat **{}** {score} and advances.",
+            escape(&winner.name),
+            escape(&loser.name),
+            escape(&winner.name),
+            escape(&loser.name)
+        ),
+        Settlement::Walkover => format!(
+            "🏁 已將此對戰判給 **{}**（{score}）——**{}** 未完賽。\n\
+             🏁 Awarded to **{}** ({score}) — **{}** didn't play it out.",
+            escape(&winner.name),
+            escape(&loser.name),
+            escape(&winner.name),
+            escape(&loser.name)
+        ),
+    };
+    format!("{header}\n{result}\n")
+}
+
+/// The `#…-draft` counterpart, edited alongside the panel. Touches the header
+/// line only — `one`/`two` stay slot-ordered, the same as the original post,
+/// so the second line keeps its shape and only the score is new.
+pub(crate) fn render_announcement_result(set: &SetHeading, one: &Player, two: &Player, tally: &Tally) -> String {
+    format!(
+        "**{} · Match {} — Bo{} · {}-{}**\n`{}` {}  vs  `{}` {}\n",
+        bracket::round_name_bilingual(&set.round_name),
+        set.position,
+        set.best_of,
+        tally.slot1_wins,
+        tally.slot2_wins,
         one.seed,
         escape(&one.name),
         two.seed,
@@ -433,9 +498,11 @@ pub(crate) fn render_result(
 /// Every step is best-effort. The completion transaction has already committed by
 /// the time this runs, so a thread that refuses to archive is a cosmetic problem,
 /// and failing the caller over it would report a set as unfinished when it is not.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn close(
     http: &impl CacheHttp,
     pool: &SqlitePool,
+    tournament: &Tournament,
     set: &TournamentSet,
     winner: &Player,
     loser: &Player,
@@ -471,6 +538,39 @@ pub(crate) async fn close(
         .await
     {
         error!("failed to post the result in set {}'s thread: {err:?}", set.id);
+    }
+
+    // Before the lock, same reasoning: an edit into a locked thread is the one
+    // Discord call in this function that a closed thread would actually break.
+    if let Some(panel_id) = set.panel_message_id {
+        let content = render_completed_panel(&heading, winner, loser, tally, settlement);
+        if let Err(err) = thread_id
+            .edit_message(
+                http,
+                to_message_id(panel_id),
+                EditMessage::new().content(content).components(vec![]),
+            )
+            .await
+        {
+            error!("failed to strike the panel for set {}: {err:?}", set.id);
+        }
+    }
+
+    // Slot-ordered, not winner/loser: the announcement's second line must keep
+    // the order it was first posted in, and only its header line changes.
+    if let (Some(channel_id), Some(announce_id)) = (tournament.draft_channel_id, set.draft_announce_message_id) {
+        let (one, two) = if Some(winner.user_id) == set.slot1_user_id {
+            (winner, loser)
+        } else {
+            (loser, winner)
+        };
+        let content = render_announcement_result(&heading, one, two, tally);
+        if let Err(err) = to_channel_id(channel_id)
+            .edit_message(http, to_message_id(announce_id), EditMessage::new().content(content))
+            .await
+        {
+            error!("failed to edit the announcement for set {}: {err:?}", set.id);
+        }
     }
 
     if let Err(err) = thread_id
@@ -794,8 +894,14 @@ mod tests {
         assert!(labels(&with_room).contains("calladmin:77"), "{}", labels(&with_room));
         assert!(labels(&with_room).contains("Watch draft"), "{}", labels(&with_room));
         assert!(labels(&with_room).contains("redraft:77"), "{}", labels(&with_room));
+        assert!(labels(&with_room).contains("setdone:77"), "{}", labels(&with_room));
         assert!(!labels(&without).contains("calladmin"), "{}", labels(&without));
         assert!(labels(&without).contains("redraft:77"), "{}", labels(&without));
+        assert!(
+            !labels(&without).contains("setdone"),
+            "no set-complete button without a room: {}",
+            labels(&without)
+        );
     }
 
     #[test]
@@ -1033,6 +1139,83 @@ mod tests {
             Settlement::Played,
         );
         assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
+    }
+
+    // What `close` edits the panel and the announcement to, once a set is decided.
+
+    #[test]
+    fn a_completed_panel_shows_the_score_and_carries_no_buttons() {
+        let content = render_completed_panel(
+            &heading(1, "Round 1", 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &tally(2, 1),
+            Settlement::Played,
+        );
+        assert!(content.contains("2-1"), "{content}");
+        assert!(
+            content.contains("MarineLorD") && content.contains("Beasty"),
+            "{content}"
+        );
+        assert!(content.contains("beat"), "{content}");
+        assert!(content.contains("擊敗"), "{content}");
+    }
+
+    #[test]
+    fn a_completed_panel_names_an_award_rather_than_a_win() {
+        let content = render_completed_panel(
+            &heading(1, "Round 1", 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &tally(1, 0),
+            Settlement::Walkover,
+        );
+        assert!(!content.contains("beat"), "{content}");
+        assert!(content.contains("Awarded to"), "{content}");
+        assert!(content.contains("判給"), "{content}");
+    }
+
+    #[test]
+    fn a_completed_panels_name_is_escaped() {
+        let content = render_completed_panel(
+            &heading(1, "Round 1", 1, 3),
+            &player(7, 1, "*Bea*sty_"),
+            &player(9, 8, "B"),
+            &tally(2, 0),
+            Settlement::Played,
+        );
+        assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
+    }
+
+    #[test]
+    fn the_completed_announcement_touches_the_header_line_only() {
+        // `one`/`two` stay slot-ordered — the second line keeps the exact shape
+        // it was first posted with, whichever side happened to win.
+        let (original, _) = render_announcement(
+            &heading(1, "Quarterfinal", 2, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &room(),
+        );
+        let second_line = original.lines().nth(1).unwrap();
+
+        let result = render_announcement_result(
+            &heading(1, "Quarterfinal", 2, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &tally(2, 1),
+        );
+        assert_eq!(
+            result.lines().nth(1).unwrap(),
+            second_line,
+            "the second line must not change"
+        );
+        assert!(result.contains("2-1"), "{result}");
+        assert_ne!(
+            result.lines().next().unwrap(),
+            original.lines().next().unwrap(),
+            "only the header changes"
+        );
     }
 
     // What a redraft leaves in place of the abandoned room.

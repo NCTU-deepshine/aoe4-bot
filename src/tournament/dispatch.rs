@@ -2,10 +2,9 @@
 //! `EventHandler::interaction_create` branch over `"<action>:<entity_id>"`
 //! custom_ids.
 //!
-//! Register, Withdraw, Checkin and Redraft are wired up; SetDone stays a stub
-//! until its own chunk (22). The button path resolves its tournament by the id
-//! encoded in the custom_id (`db::get_tournament`), unlike the slash commands in
-//! `commands.rs`, which resolve it from the invoking channel.
+//! Every action is wired up. The button path resolves its tournament by the
+//! id encoded in the custom_id (`db::get_tournament`), unlike the slash
+//! commands in `commands.rs`, which resolve it from the invoking channel.
 
 use crate::db::to_db_id;
 use crate::guilds::{Feature, Guilds};
@@ -14,7 +13,7 @@ use crate::tournament::action::{self, Action};
 use crate::tournament::checkin::CheckinOutcome;
 use crate::tournament::throttle::EditThrottle;
 use crate::tournament::{
-    access, audit, bracket_view, checkin, checkin_panel, db, panel, redraft, registration, seed_panel,
+    access, audit, bracket_view, checkin, checkin_panel, db, import, panel, redraft, registration, seed_panel,
 };
 use serenity::all::{
     ComponentInteraction, CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
@@ -81,8 +80,7 @@ impl EventHandler for Dispatcher {
             Action::Checkin => self.handle_checkin(&ctx, &component, entity_id).await,
             Action::Redraft => self.handle_redraft(&ctx, &component, entity_id).await,
             Action::CallAdmin => self.handle_call_admin(&ctx, &component, entity_id).await,
-            // No handler yet — its own chunk (22).
-            Action::SetDone => {},
+            Action::SetDone => self.handle_set_done(&ctx, &component, entity_id).await,
         }
     }
 }
@@ -223,6 +221,44 @@ impl Dispatcher {
         let response = EditInteractionResponse::new().content(outcome.message(locale));
         if let Err(err) = component.edit_response(&ctx.http, response).await {
             error!("failed to edit the redraft response for set {set_id}: {err:?}");
+        }
+    }
+
+    /// The `✅ Set complete` button. No admin check: thread membership is
+    /// already both players plus every admin (§8.7), which is the design's
+    /// own "either player, or admin" rule for this one — the same reasoning
+    /// `/set done` (`commands.rs`) skips it for.
+    async fn handle_set_done(&self, ctx: &Context, component: &ComponentInteraction, set_id: i64) {
+        let Ok(Some(set)) = db::get_set(&self.pool, set_id).await else {
+            error!("set-done button for unknown set {set_id}");
+            return;
+        };
+        let Ok(Some(tournament)) = db::get_tournament(&self.pool, set.tournament_id).await else {
+            error!("set-done button for set {set_id} with no tournament");
+            return;
+        };
+
+        let outcome = match import::sync(&ctx.http, &self.pool, &tournament, &set).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                error!("set-done button failed for set {set_id}: {err:?}");
+                return;
+            },
+        };
+        audit::log_action(
+            "set done button",
+            tournament.id,
+            &tournament.slug,
+            &component.user,
+            &outcome,
+        );
+        let locale = Locale::from_discord_locale(&component.locale);
+
+        // Deferred (Action::SetDone.requires_defer() == true), so the reply
+        // edits the initial deferred response rather than creating a new one.
+        let response = EditInteractionResponse::new().content(outcome.message(locale));
+        if let Err(err) = component.edit_response(&ctx.http, response).await {
+            error!("failed to edit the set-done response for set {set_id}: {err:?}");
         }
     }
 

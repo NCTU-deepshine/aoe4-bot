@@ -13,9 +13,9 @@ use crate::tournament::db as tournament_db;
 use crate::tournament::panel_check::PanelOutcome;
 use crate::tournament::slug::{slugify, validate_slug};
 use crate::tournament::{
-    audit, bracket, bracket_view, checkin, checkin_panel, completion, invite as tournament_invite, panel, redraft,
-    registration, report, seed_panel, seeding, set_thread, setup as tournament_setup, start as tournament_start,
-    teardown,
+    audit, bracket, bracket_view, checkin, checkin_panel, completion, import, invite as tournament_invite, panel,
+    redraft, registration, report, seed_panel, seeding, set_thread, setup as tournament_setup,
+    start as tournament_start, teardown,
 };
 use crate::{Context, Data, Error};
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
@@ -1984,7 +1984,7 @@ async fn delete_tournament_channels(ctx: Context<'_>, tournament: &tournament_db
     guild_only,
     check = "tournament_only",
     rename = "set",
-    subcommands("set_report", "set_award", "set_redraft"),
+    subcommands("set_report", "set_award", "set_redraft", "set_done"),
     subcommand_required
 )]
 pub async fn set_root(_: Context<'_>) -> Result<(), Error> {
@@ -2038,9 +2038,10 @@ async fn resolve_set_by_thread(
     Ok(Some((tournament, set)))
 }
 
-/// The same resolution, for `/set redraft`: either of the two players is
-/// allowed, not just an admin, so the caller's `Access` comes back instead of
-/// the manage-only gate rejecting them.
+/// The same resolution, for `/set redraft` and `/set done`: either of the two
+/// players is allowed, not just an admin, so the caller's `Access` comes back
+/// instead of the manage-only gate rejecting them. `/set done` needs nothing
+/// further from it — thread membership already is "either player, or admin".
 async fn resolve_set_for_participant(
     ctx: Context<'_>,
 ) -> Result<Option<(tournament_db::Tournament, tournament_db::TournamentSet, Access)>, Error> {
@@ -2218,6 +2219,33 @@ pub async fn set_redraft(ctx: Context<'_>) -> Result<(), Error> {
 
     // Ephemeral like its siblings: the visible record is the notice
     // `redraft::run` posts in the thread, which is the point.
+    ephemeral(ctx, outcome.message(locale)).await?;
+    Ok(())
+}
+
+/// ✅ Syncs this set's draft and, if it has decided, settles it.
+///
+/// Resolved the same way as `/set redraft` and open to the same people, but
+/// with no refusal beyond that: thread membership already is both players
+/// plus every admin (§8.7), which is the design's own "either player, or
+/// admin" rule for this command. Safe to press early — an undecided draft
+/// answers "still in progress" and changes nothing.
+#[poise::command(
+    slash_command,
+    guild_only,
+    check = "tournament_only",
+    rename = "done",
+    description_localized("zh-TW", "✅ 同步這場對戰的 Draft，如果已經分出勝負就結束它。")
+)]
+pub async fn set_done(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+    let locale = Locale::from_context(ctx);
+    let Some((tournament, set, _)) = resolve_set_for_participant(ctx).await? else {
+        return Ok(());
+    };
+
+    let outcome = import::sync(ctx.http(), &ctx.data().database, &tournament, &set).await?;
+    audit::log_action("set done", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(locale)).await?;
     Ok(())
 }
