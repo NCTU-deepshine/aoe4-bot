@@ -59,7 +59,7 @@ group, against a tournament that already demonstrably works** rather than before
 are additive on top of a proven core; the reverse is not true.
 
 - **18** — set completion and advancement. The one chunk without which there is no tournament, only a first round.
-- **19** — `/set report`, the manual result path. Until chunk 22 exists this is the *only* way a result gets in.
+- **19** — `/set report`, the manual result path. Until chunk 39 exists this is the *only* way a result gets in.
 - **31** — `aoe4_id` optional. Nothing user-visible; the table rebuild that lets an unbound entrant exist.
 - **32** — `/tournament invite` and `/tournament uninvite`, and the no-show sweep skipping invited entries. That
   exemption is what lets an all-invited field pass through `close-checkin` without anyone pressing a button,
@@ -99,9 +99,13 @@ shipped as chunk 38, and boot-time panel reconciliation as chunk 23 itself, belo
 
 ### M3 — replace hand entry with import
 
-- **21** — the read endpoint, in **another repository**.
-- **22** — result import, `/set done`, and the poll. Most of it can be built against saved fixtures before 21
-  lands; only the live fetch is blocked.
+- **21** — the read endpoint, in **another repository**. Shipped as
+  [PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2) against a fork; not merged to `main` yet.
+- **22** — the sync engine: the payload type, slot mapping, and the guarded upsert into `tournament_games`,
+  reusing `completion.rs` to settle a decided set. Callable but uncalled — nothing is registered until the
+  chunks below expose it.
+- **39** — `/set done`, its thread button, and the panel/announcement edits chunk 22 leaves unbuilt.
+- **40** — the background poll, on its own schedule, plus the existing cron job's `.unwrap()`.
 
 ## Phase A — foundations
 
@@ -602,21 +606,31 @@ Design: §8.7 (`/set redraft`), §4.
 Gate: §10 — refused on a completed set, voids that set's `draft_import` games while preserving `manual` ones,
 re-points the announcement.
 
-**21. [Other repository] the read endpoint**
-`GET /api/v1/drafts/:id` in `aoe4_banpick` — nine fields, a thin wrapper over `deriveState()`. Not a commit in
-this repo, and the only external gate in this plan. Whether we run it on a branch of our own or offer it upstream
-is still open (§12).
+**21. [Other repository] the read endpoint — done**
+`GET /api/matches/:id/state` in `aoe4_banpick`, a thin wrapper over `deriveState()` — see §3.2 item 1 for the
+shipped field list. Not a commit in this repo. Shipped as [PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2)
+against a fork, not on `main` yet.
 Design: §3.2 item 1.
 
-**22. Result import and `/set done`**
-The payload type, slot mapping, the upsert into `tournament_games`, `/set done` and its thread button, and the
-background poll on its own schedule — the existing cron is twice daily, far too coarse, and its `.unwrap()`
-panics the job.
+**22. Result import — the sync engine**
+The payload type, slot mapping, and the guarded upsert into `tournament_games`, settling a decided set through
+`completion::finish` — reused rather than duplicated, so a set decided by import behaves exactly like one decided
+by `/set report`. Callable but uncalled — `/set done` and the poll are chunks 39 and 40.
+**A head start is not modeled**: the bot assumes it is always zero (§7's addendum records why), so a set a
+nonzero head start would have clinched early stays `StillPlaying` until an organizer runs `/set award` by hand.
 Design: §7, §8.7.
 Gate: §10's import list — swapped slots both ways, re-import overwrites `draft_import` and preserves `manual`,
-`status = "running"` with a clinching score treated as complete, `setdone` on an unfinished draft changes nothing.
-Write the import against saved fixtures so this chunk can be built and tested before chunk 21 exists; only the
-live fetch is blocked.
+`status = "running"` with a clinching score treated as complete.
+
+**39. `/set done` and its thread button**
+The two entry points chunk 22's engine still lacks: the command, the `setdone:<set_id>` button
+(`Action::SetDone`'s dispatch stub), and the panel/announcement edits that follow a successful import.
+Design: §8.7.
+
+**40. The background poll**
+On its own schedule — the existing cron is twice daily, far too coarse — plus the existing job's `.unwrap()`,
+which panics it on failure and should be handled instead.
+Design: §7.
 
 **23. Boot-time panel reconciliation**
 Confirm each stored panel message still exists on startup and recreate it if an organizer deleted it. Chunk 33
@@ -672,6 +686,6 @@ an unrecognized code all fall back to `Locale::En`; every retrofitted message re
 Swiss, group stage, round robin and double elimination (§1 "Designed for, not built now"); team tournaments;
 the catalog endpoint, seat assignment and the completion webhook (§3.2 items 2–4); Discord login on the tool
 (§3.6); per-guild configuration beyond the hardcoded ids (§8.0); everything under §11 "Follow-ups"; wiring
-`Action::SetDone` and a `/set done` command to result import (chunk 22, still ahead — `Action::Redraft` and
+`Action::SetDone` and a `/set done` command to result import (chunk 39, still ahead — `Action::Redraft` and
 `/set redraft` are chunk 38's, and are done); the fixed-seat-vs-must-confirm invitee toggle and rendering the
 bracket as an image instead of a code block (both §12).

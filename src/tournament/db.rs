@@ -1972,7 +1972,7 @@ pub(crate) async fn set_scheduled_at(
 
 // 7. tournament_games
 
-#[derive(FromRow)]
+#[derive(FromRow, Clone)]
 pub(crate) struct TournamentGame {
     pub id: i64,
     pub set_id: i64,
@@ -2075,6 +2075,41 @@ pub(crate) async fn record_manual_game(pool: &SqlitePool, game: ManualGame) -> R
     .bind(game.winner_user_id)
     .bind(game.reported_by)
     .bind(Utc::now())
+    .execute(pool)
+    .await
+    .inspect_err(log_db_error)?;
+    Ok(())
+}
+
+/// Writes one game from a synced draft. The guarded sibling of
+/// `record_manual_game`: the same upsert shape, but the `where` clause on the
+/// conflict update is the entire mechanism that makes re-import safe — a row
+/// an organizer already corrected (`source = 'manual'`) simply does not match
+/// it, so the insert is skipped rather than overwriting their correction.
+pub(crate) async fn upsert_draft_import_game(pool: &SqlitePool, new: NewGame) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r"
+        insert into tournament_games (
+            set_id, game_number, map, slot1_civ, slot2_civ, winner_user_id, status, source
+        )
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'draft_import')
+        on conflict (set_id, game_number) do update
+        set
+            map = excluded.map,
+            slot1_civ = excluded.slot1_civ,
+            slot2_civ = excluded.slot2_civ,
+            winner_user_id = excluded.winner_user_id,
+            status = excluded.status
+        where tournament_games.source = 'draft_import'
+        ",
+    )
+    .bind(new.set_id)
+    .bind(new.game_number)
+    .bind(new.map)
+    .bind(new.slot1_civ)
+    .bind(new.slot2_civ)
+    .bind(new.winner_user_id)
+    .bind(new.status)
     .execute(pool)
     .await
     .inspect_err(log_db_error)?;

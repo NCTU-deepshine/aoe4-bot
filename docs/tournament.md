@@ -220,8 +220,10 @@ are proposals.
 
 #### Item 1 — spectator draft read (required)
 
-`GET /api/v1/drafts/:id` — unauthenticated (the watch link is already public), read-only, supporting
-`ETag`/`If-None-Match` so the bot can poll cheaply.
+`GET /api/matches/:id/state` — unauthenticated (the watch link is already public), read-only, supporting
+`ETag`/`If-None-Match` so the bot can poll cheaply. Shipped against a fork
+([PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2)) rather than at the path originally proposed
+here; the payload below reflects what actually landed, not the first draft of it.
 
 This is a thin wrapper over what the tool already computes: `deriveState()` plus the `Match` document is
 essentially this payload (`lib/draft/engine.ts`, `lib/socket/matchHandlers.ts` builds almost exactly
@@ -238,17 +240,26 @@ useful later.
   "finished": false,                  // derived, never a stored status — see §3.1
   "updatedAt": "2026-08-03T10:15:00Z",
   "seats": [ { "slot": 1, "claimed": true }, { "slot": 2, "claimed": false } ],
+  "bestOf": 3,
+  "target": 2,                        // majority of bestOf, from the tool's own arithmetic
+  "playAll": false,                   // when true, the series runs to bestOf games rather than stopping once decided
+  "headStart": { "1": 0, "2": 0 },    // a preset may hand either side a head start — see the note below
   "games": [
     { "number": 1, "map": "prairie",
       "civBySlot": { "1": "english", "2": "rus" }, "winnerSlot": 1 }
   ],
-  "score": { "1": 1, "2": 0 }
+  "score": { "1": 1, "2": 0 }         // games actually WON — excludes headStart
 }
 ```
 
 - **`games`** is `tournament_games` (§4), field for field. This is the payload's reason to exist.
 - **`score`** is the tool's own count, which is what makes §7's cross-check meaningful — comparing our tally
-  against theirs. Deriving it from `games` ourselves would just compare our tally against itself.
+  against theirs. Deriving it from `games` ourselves would just compare our tally against itself. It is wins
+  only: the tool's own internal score is head-start-inclusive, which would silently disagree with anyone
+  counting `games[]` themselves, so `headStart` is returned alongside it instead of folded in.
+- **`bestOf`/`target`/`playAll`/`headStart`** are what would let `finished` be trusted on its own — see §7's note
+  on why the bot does not do that yet. Only `bestOf` is read today (§4 notes, `completion::majority` derives the
+  same `target` from it); `target`, `playAll` and `headStart` are on the wire and currently unread.
 - **`finished` must be explicit**, because the stored `status` never says so (§3.1).
 - **`status`** is what lets `/set done` answer "still in the lobby" or "paused" instead of a blank "not yet".
 - **`seats[].claimed`** is what makes `/set done`'s "not yet" specific: "nobody has taken a seat" and "waiting
@@ -833,6 +844,14 @@ higher seed, by instruction — §8.7, §4 notes), and upsert `games` into `tour
 > reads `status = "running"`. Treat a set as complete when item 1 says `finished`, or when one side has won more
 > than half the games — never on status alone. A payload with `status = "running"` and a score of 2–0 in a Bo3
 > **is** a finished draft.
+>
+> **Head starts are not modeled yet — the bot assumes `headStart` is always zero.** `score` is wins only, but
+> `finished` is derived from the tool's own *head-start-inclusive* total against `target`, so a nonzero
+> `headStart` can in principle make `finished: true` while the wins-only `score` is nowhere near a majority of
+> `games` — `completion::finish`'s majority-of-games check would not see this and the set stays `StillPlaying`,
+> recoverable by hand with `/set award`. Discovered building this chunk, against a real fixture with a head start
+> configured; deliberately deferred rather than built, since nothing in `drafttool::PresetOptions` checks for one
+> at assignment either (§11) — modeling the read side without the write side just moves the gap.
 
 **Two triggers, one code path:**
 

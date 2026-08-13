@@ -2297,6 +2297,291 @@ mod tests {
         assert!(field.iter().any(|e| e.user_id == 4 && e.status == "eliminated"));
     }
 
+    // Result import.
+    //
+    // `import::apply` calls `completion::finish` exactly like the manual
+    // paths do, which needs a Discord `CacheHttp` — but never fails through
+    // that: every Discord call downstream is best-effort and logs its own
+    // error rather than propagating one (`set_thread::close`,
+    // `bracket_view::reconcile`), so a fake token is enough to exercise the
+    // whole path and verify the database it leaves behind.
+
+    fn fake_http() -> serenity::all::Http {
+        serenity::all::Http::new("faketoken")
+    }
+
+    fn draft_seat(claimed: bool) -> crate::drafttool::DraftSeat {
+        crate::drafttool::DraftSeat { claimed }
+    }
+
+    fn draft_game(number: i64, map: Option<&str>, winner_slot: Option<i64>) -> crate::drafttool::DraftGame {
+        crate::drafttool::DraftGame {
+            number,
+            map: map.map(str::to_string),
+            civ_by_slot: crate::drafttool::CivBySlot {
+                slot1: None,
+                slot2: None,
+            },
+            winner_slot,
+        }
+    }
+
+    fn draft_state(
+        status: &str,
+        finished: bool,
+        best_of: i64,
+        score: (i64, i64),
+        games: Vec<crate::drafttool::DraftGame>,
+    ) -> crate::drafttool::DraftState {
+        crate::drafttool::DraftState {
+            status: status.to_string(),
+            finished,
+            seats: vec![draft_seat(true), draft_seat(true)],
+            best_of,
+            score: crate::drafttool::SlotValues {
+                slot1: score.0,
+                slot2: score.1,
+            },
+            games,
+        }
+    }
+
+    /// Points `set_id` at `external_id` and reads the set back, so the
+    /// snapshot passed to `apply` agrees with what a fresh read would show —
+    /// exactly what `sync` would hand it in production.
+    async fn set_pointer(pool: &SqlitePool, set_id: i64, external_id: &str) -> crate::tournament::db::TournamentSet {
+        crate::tournament::db::set_draft_pointer(pool, set_id, external_id)
+            .await
+            .unwrap();
+        crate::tournament::db::get_set(pool, set_id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_game_is_mapped_to_the_higher_seed_and_a_lone_win_does_not_decide_a_bo3() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = set_pointer(&pool, ids[0], "draft-1").await;
+        assert_eq!(set.slot1_user_id, Some(1), "seed 1 is the higher seed in this bracket");
+
+        let state = draft_state(
+            "running",
+            false,
+            3,
+            (1, 0),
+            vec![draft_game(1, Some("prairie"), Some(1))],
+        );
+        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
+            .await
+            .unwrap();
+
+        let games = crate::tournament::db::list_games_for_set(&pool, set.id).await.unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].winner_user_id, Some(1), "slot 1 -> the higher seed's user id");
+        assert_eq!(games[0].source, "draft_import");
+        assert!(
+            matches!(
+                outcome,
+                crate::tournament::import::SyncOutcome::Progress {
+                    outcome: crate::tournament::completion::CompleteOutcome::StillPlaying { .. },
+                    score_mismatch: false,
+                }
+            ),
+            "{outcome:?}"
+        );
+        let reloaded = crate::tournament::db::get_set(&pool, set.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, "ready", "1-0 in a Bo3 is not a result");
+    }
+
+    #[tokio::test]
+    async fn a_clinching_score_completes_the_set_even_though_status_still_reads_running() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = set_pointer(&pool, ids[0], "draft-1").await;
+
+        let games = vec![
+            draft_game(1, Some("prairie"), Some(1)),
+            draft_game(2, Some("dry-arabia"), Some(1)),
+        ];
+        let state = draft_state("running", false, 3, (2, 0), games);
+        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
+            .await
+            .unwrap();
+
+        let crate::tournament::import::SyncOutcome::Progress {
+            outcome: crate::tournament::completion::CompleteOutcome::Completed { .. },
+            score_mismatch: false,
+        } = outcome
+        else {
+            panic!("expected a completed set, got {outcome:?}");
+        };
+        let reloaded = crate::tournament::db::get_set(&pool, set.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, "completed");
+        assert_eq!(reloaded.winner_user_id, Some(1));
+        assert_eq!(status_of(&pool, tournament.id, 4).await, "eliminated");
+    }
+
+    #[tokio::test]
+    async fn a_finished_report_with_no_majority_reached_stays_open() {
+        // What a nonzero head start would look like if the bot modeled one:
+        // `finished: true` with only one win recorded in a Bo3, which needs
+        // two. Since head start is assumed zero and not acted on, this stays
+        // `StillPlaying` rather than settling — the known gap the doc records.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = set_pointer(&pool, ids[0], "draft-1").await;
+
+        let state = draft_state(
+            "running",
+            true,
+            3,
+            (1, 0),
+            vec![draft_game(1, Some("prairie"), Some(1))],
+        );
+        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                outcome,
+                crate::tournament::import::SyncOutcome::Progress {
+                    outcome: crate::tournament::completion::CompleteOutcome::StillPlaying { .. },
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let reloaded = crate::tournament::db::get_set(&pool, set.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.status, "ready",
+            "the set is left exactly as undecided as it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn reimport_overwrites_draft_import_rows_and_preserves_manual_ones() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = set_pointer(&pool, ids[0], "draft-1").await;
+
+        // An organizer's own correction of game 1, naming the lower seed.
+        crate::tournament::db::record_manual_game(
+            &pool,
+            crate::tournament::db::ManualGame {
+                set_id: set.id,
+                game_number: 1,
+                winner_user_id: 4,
+                reported_by: 99,
+                map: None,
+                slot1_civ: None,
+                slot2_civ: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The draft's own record of the same game disagrees with it.
+        let state = draft_state(
+            "running",
+            false,
+            3,
+            (1, 0),
+            vec![draft_game(1, Some("prairie"), Some(1))],
+        );
+        crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
+            .await
+            .unwrap();
+
+        let game = crate::tournament::db::get_game(&pool, set.id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(game.source, "manual", "the organizer's correction survives the sync");
+        assert_eq!(game.winner_user_id, Some(4));
+    }
+
+    #[tokio::test]
+    async fn sync_on_an_already_complete_set_reports_so_without_touching_it() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        report_games(&pool, ids[0], &[1, 1]).await;
+        decide_and_complete(&pool, tournament.id, ids[0]).await.unwrap();
+        let completed = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+
+        // No pointer, no network call — `sync` bails before either.
+        let outcome = crate::tournament::import::sync(fake_http(), &pool, &tournament, &completed)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tournament::import::SyncOutcome::AlreadyComplete
+        ));
+    }
+
+    #[tokio::test]
+    async fn sync_on_a_set_with_no_draft_pointer_reports_so() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
+        assert_eq!(set.draft_external_id, None, "a fresh set has no room yet");
+
+        let outcome = crate::tournament::import::sync(fake_http(), &pool, &tournament, &set)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, crate::tournament::import::SyncOutcome::NoPointer));
+    }
+
+    #[tokio::test]
+    async fn a_redraft_landing_before_the_write_supersedes_the_stale_fetch() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = set_pointer(&pool, ids[0], "draft-1").await;
+        // A redraft repoints the set while our fetch of "draft-1" is in flight.
+        crate::tournament::db::set_draft_pointer(&pool, set.id, "draft-2")
+            .await
+            .unwrap();
+
+        let state = draft_state(
+            "running",
+            false,
+            3,
+            (1, 0),
+            vec![draft_game(1, Some("prairie"), Some(1))],
+        );
+        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, crate::tournament::import::SyncOutcome::Superseded));
+        let games = crate::tournament::db::list_games_for_set(&pool, set.id).await.unwrap();
+        assert!(games.is_empty(), "a superseded fetch writes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_lobby_with_no_seat_claimed_writes_nothing() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        let set = set_pointer(&pool, ids[0], "draft-1").await;
+
+        let mut state = draft_state("lobby", false, 3, (0, 0), vec![draft_game(1, Some("prairie"), Some(1))]);
+        state.seats = vec![draft_seat(false), draft_seat(false)];
+        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, crate::tournament::import::SyncOutcome::NotSeated));
+        let games = crate::tournament::db::list_games_for_set(&pool, set.id).await.unwrap();
+        assert!(games.is_empty(), "nothing is imported before both seats are taken");
+    }
+
     // Manual result reporting.
     //
     // The command bodies need a Discord context, so these drive `report`'s own

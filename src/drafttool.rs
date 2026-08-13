@@ -87,6 +87,101 @@ pub(crate) async fn fetch_preset(preset_id: &str) -> Option<Preset> {
         .ok()
 }
 
+/// A draft's derived state, as `GET /api/matches/:id/state` returns it
+/// ([PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2)). Read-only and
+/// unauthenticated, at the same trust level as the watch link.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DraftState {
+    pub status: String, // "lobby" | "running" | "paused" | "finished", verbatim
+    pub finished: bool,
+    pub seats: Vec<DraftSeat>,
+    pub best_of: i64,
+    // `target` is on the wire but not modeled: `completion::majority(best_of)`
+    // computes the same number from `best_of` alone, so a second copy of it
+    // read off the network has no consumer.
+    //
+    // `playAll` is on the wire but not modeled: it only delays `finished` until
+    // every game is played, and by then `import::apply`'s own majority check
+    // has already decided the set — nothing here would ever read it.
+    //
+    // `headStart` is also on the wire but not modeled yet: the bot assumes it
+    // is always zero, in which case `finished` and a wins-only majority agree
+    // exactly. A preset that configures a nonzero one is a known gap — the
+    // affected set just stays `StillPlaying` past the point the tool
+    // considers it decided, recoverable by hand with `/set award`.
+    pub score: SlotValues,
+    pub games: Vec<DraftGame>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct DraftSeat {
+    // `slot` is on the wire but not modeled: `seat_state` only ever counts how
+    // many seats are claimed, never which one.
+    pub claimed: bool,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DraftGame {
+    pub number: i64,
+    pub map: Option<String>,
+    pub civ_by_slot: CivBySlot,
+    pub winner_slot: Option<i64>,
+}
+
+/// `score` (and `headStart`, on the wire but not modeled) are both
+/// `{"1": n, "2": n}` — a struct with renamed fields rather than a `HashMap`,
+/// so a caller writes `.slot1`/`.slot2` instead of an unindexable string key.
+#[derive(Deserialize, Debug, Clone, Copy)]
+pub(crate) struct SlotValues {
+    #[serde(rename = "1")]
+    pub slot1: i64,
+    #[serde(rename = "2")]
+    pub slot2: i64,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct CivBySlot {
+    #[serde(rename = "1")]
+    pub slot1: Option<String>,
+    #[serde(rename = "2")]
+    pub slot2: Option<String>,
+}
+
+/// Fetches a draft's current state. Like `fetch_preset`, a missing draft and a
+/// transport failure both collapse to `None` — the caller reads "could not
+/// read the draft right now" as one case rather than two.
+pub(crate) async fn fetch_draft_state(external_id: &str) -> Option<DraftState> {
+    fetch_draft_state_at(client(), &base_url(), external_id).await
+}
+
+/// Split out from `fetch_draft_state` so a test can point it at a stub server
+/// instead of racing other tests over the process-global `DRAFT_BASE_URL`.
+async fn fetch_draft_state_at(client: &Client, base: &str, external_id: &str) -> Option<DraftState> {
+    let url = format!("{base}/api/matches/{external_id}/state");
+    let url = Url::parse(&url)
+        .inspect_err(|err| error!("draft state url {url} is invalid: {err}"))
+        .ok()?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .inspect_err(|err| error!("draft state request failed: {err}"))
+        .ok()?;
+
+    if !response.status().is_success() {
+        return None;
+    }
+
+    response
+        .json::<DraftState>()
+        .await
+        .inspect_err(|err| error!("draft state decode failed: {err}"))
+        .ok()
+}
+
 /// What went wrong talking to the draft tool, split by what a caller has to do
 /// about it rather than by where it happened.
 #[derive(Debug)]
@@ -293,7 +388,7 @@ fn transport(err: reqwest::Error) -> DraftError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Credentials, DraftError, Preset, create_match_at, credentials_from};
+    use super::{Credentials, DraftError, DraftState, Preset, create_match_at, credentials_from, fetch_draft_state_at};
     use reqwest::Client;
     use serde_json::json;
     use wiremock::matchers::{header_exists, method, path};
@@ -304,6 +399,92 @@ mod tests {
     fn preset() -> Preset {
         serde_json::from_str(include_str!("tournament/testdata/draft_preset.json"))
             .expect("the saved preset payload should parse")
+    }
+
+    /// Captured from the running fork mid-session, not hand-written: game 1
+    /// decided, game 2 started but not revealed, game 3 untouched — every
+    /// shape `games[]` can take, in one payload.
+    fn state() -> DraftState {
+        serde_json::from_str(include_str!("tournament/testdata/draft_state.json"))
+            .expect("the saved draft-state payload should parse")
+    }
+
+    #[test]
+    fn decodes_every_game_shape_the_saved_payload_carries() {
+        let state = state();
+        assert_eq!(state.status, "running");
+        assert!(!state.finished, "one game in a Bo3 does not decide it");
+        assert_eq!(state.best_of, 3);
+        assert_eq!((state.score.slot1, state.score.slot2), (1, 0));
+        assert_eq!(state.games.len(), 3);
+
+        let decided = &state.games[0];
+        assert_eq!(decided.number, 1);
+        assert_eq!(decided.map.as_deref(), Some("prairie"));
+        assert_eq!(decided.civ_by_slot.slot1.as_deref(), Some("english"));
+        assert_eq!(decided.winner_slot, Some(1));
+
+        let started = &state.games[1];
+        assert_eq!(started.map.as_deref(), Some("dry-arabia"));
+        assert_eq!(
+            started.civ_by_slot.slot1, None,
+            "an unrevealed civ must not deserialize to a value"
+        );
+        assert_eq!(started.winner_slot, None);
+
+        let untouched = &state.games[2];
+        assert_eq!(untouched.map, None);
+        assert_eq!(untouched.winner_slot, None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_draft_is_none_rather_than_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/matches/000000000000000000000000/state"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let result = fetch_draft_state_at(&Client::new(), &server.uri(), "000000000000000000000000").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_also_none() {
+        // No mock mounted at all: every request the client sends refuses to
+        // connect, since the server never started listening on this path.
+        let unreachable = "http://127.0.0.1:1";
+        let result = fetch_draft_state_at(&Client::new(), unreachable, "000000000000000000000000").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_successful_fetch_hits_the_right_path_and_decodes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/matches/abc123/state"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(include_str!("tournament/testdata/draft_state.json")),
+            )
+            .mount(&server)
+            .await;
+
+        let state = fetch_draft_state_at(&Client::new(), &server.uri(), "abc123")
+            .await
+            .expect("the mounted response should decode");
+        assert_eq!(state.games.len(), 3);
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live draft tool API against a real draft id"]
+    async fn the_live_endpoint_still_answers_with_a_draft_state() {
+        // A live id has to be supplied by hand — unlike a preset, a draft isn't
+        // a stable fixture anything keeps around.
+        let state = super::fetch_draft_state("REPLACE-WITH-A-REAL-DRAFT-ID")
+            .await
+            .expect("expected a real draft");
+        assert!(state.best_of % 2 == 1, "bestOf should be odd");
     }
 
     #[test]

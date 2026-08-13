@@ -1,0 +1,35 @@
+{
+  "id": "6a7dc897c387283655f971a5",
+  "status": "running",
+  "finished": false,
+  "updatedAt": "2026-08-13T13:37:27.417Z",
+  "seats": [
+    { "slot": 1, "claimed": true },
+    { "slot": 2, "claimed": true }
+  ],
+  "bestOf": 3,
+  "target": 2,
+  "playAll": false,
+  "headStart": { "1": 0, "2": 0 },
+  "score": { "1": 1, "2": 0 },
+  "games": [
+    {
+      "number": 1,
+      "map": "prairie",
+      "civBySlot": { "1": "english", "2": "rus" },
+      "winnerSlot": 1
+    },
+    {
+      "number": 2,
+      "map": "dry-arabia",
+      "civBySlot": { "1": null, "2": null },
+      "winnerSlot": null
+    },
+    {
+      "number": 3,
+      "map": null,
+      "civBySlot": { "1": null, "2": null },
+      "winnerSlot": null
+    }
+  ]
+}

@@ -37,6 +37,11 @@ pub(crate) mod dispatch;
 // `/tournament invite|uninvite`: the organizers' own door into the field, for an
 // entrant who has no aoe4world profile and never signed themselves up.
 pub(crate) mod invite;
+// Syncing a set against its draft: fetch, map onto our slots, upsert its
+// games, settle through `completion`. Callable but uncalled — `/set done` and
+// the background poll each add a caller.
+#[allow(dead_code)]
+pub(crate) mod import;
 // The registration panel: rendering plus the Discord/DB glue
 // `commands::create` and `dispatch::Dispatcher` call into.
 pub(crate) mod panel;

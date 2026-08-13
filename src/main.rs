@@ -18,6 +18,8 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 mod aoe4world;
 mod commands;
 mod db;
+// The draft-state read is callable but uncalled until chunks 39/40 land.
+#[allow(dead_code)]
 mod drafttool;
 mod emperor;
 mod errors;
