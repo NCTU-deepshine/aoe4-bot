@@ -103,26 +103,22 @@ pub(crate) fn render_panel(
     // The room link, not the watch link: a seat is claimed from `/match/`, and
     // `/watch/` deliberately cannot claim one.
     //
-    // Each player is told their opponent's *in-game* name, which is the aoe4world
-    // display name — a Discord mention is no help when you are looking for
-    // somebody in the game's lobby browser.
+    // Each player is addressed by their own *in-game* name, not a second mention:
+    // the header already pinged them, and a Discord mention is no help when you
+    // are looking for somebody in the game's lobby browser.
     let body = format!(
         "{header}\nDraft 房間 / Draft room: {}\n\
-         **<@{}> 選 Player 1**，並在遊戲中開房；對手遊戲 ID：{}\n\
-         **<@{}> 選 Player 2**；對手遊戲 ID：{}\n\
-         **<@{}> takes seat Player 1** and hosts the lobby in game — opponent: {}\n\
-         **<@{}> takes seat Player 2** — opponent: {}\n\
+         **{} 選 Player 1**，並在遊戲中開房\n\
+         **{} 選 Player 2**\n\
+         **{} takes seat Player 1** and hosts the lobby in game\n\
+         **{} takes seat Player 2**\n\
          Draft 有任何問題，可以按下方按鈕重新產生。\n\
          If anything is wrong with the draft, use the button below to regenerate it.\n",
         room.match_url,
-        one.user_id,
-        opponent(two, "（名稱未驗證）"),
-        two.user_id,
-        opponent(one, "（名稱未驗證）"),
-        one.user_id,
-        opponent(two, " (name unverified)"),
-        two.user_id,
-        opponent(one, " (name unverified)"),
+        game_name(one, "（名稱未驗證）"),
+        game_name(two, "（名稱未驗證）"),
+        game_name(one, " (name unverified)"),
+        game_name(two, " (name unverified)"),
     );
 
     // The call-admin button is what a player has instead of knowing who to ask:
@@ -145,13 +141,13 @@ pub(crate) fn render_panel(
     (body, components)
 }
 
-/// The opponent's in-game name, as the seat instruction hands it over.
+/// A player's in-game name, as the seat instruction addresses them by it.
 ///
 /// An invited entrant's name is whatever the organizer typed, and this line is
 /// the one place it is read as an instruction — search the lobby browser for
 /// this — so an unverified one says so rather than failing silently in game.
 /// Inside a code span, hence `sanitize`: a backtick cannot be escaped there.
-fn opponent(player: &Player, unverified_note: &str) -> String {
+fn game_name(player: &Player, unverified_note: &str) -> String {
     let name = render::sanitize(&player.name);
     if player.verified {
         format!("`{name}`")
@@ -308,10 +304,19 @@ pub(crate) fn render_announcement_result(set: &SetHeading, one: &Player, two: &P
 /// The visible trail a redraft leaves in the thread, naming who triggered it —
 /// per §4, the readable record is this notice plus `redraft_count`, not a
 /// history table.
-pub(crate) fn render_redraft_notice(actor_user_id: i64, count: i64) -> String {
+///
+/// Mentioned once, in the Chinese line; the English line names them by in-game
+/// name instead, same as the seat instruction. `actor` is `None` for an admin
+/// who is neither player — there is no in-game name to fall back to, so the
+/// English line keeps the mention too.
+pub(crate) fn render_redraft_notice(actor_user_id: i64, actor: Option<&Player>, count: i64) -> String {
+    let actor_name = match actor {
+        Some(player) if player.verified => game_name(player, ""),
+        _ => format!("<@{actor_user_id}>"),
+    };
     format!(
         "🔄 <@{actor_user_id}> 重新產生了這場對戰的 Draft（第 {count} 次）。\n\
-         <@{actor_user_id}> regenerated this set's draft (redraft #{count})."
+         {actor_name} regenerated this set's draft (redraft #{count})."
     )
 }
 
@@ -777,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_pings_both_players_and_says_which_seat_each_takes() {
+    fn the_panel_pings_each_player_once_and_says_which_seat_each_takes() {
         let (content, _) = render_panel(
             &heading(1, "Round 1", 1, 3),
             &player(7, 1, "MarineLorD"),
@@ -785,11 +790,12 @@ mod tests {
             Some(&room()),
             &[],
         );
-        // Mentions, not names: the point of posting in the thread is the ping.
-        assert!(content.contains("<@7>"), "{content}");
-        assert!(content.contains("<@9>"), "{content}");
-        assert!(content.contains("<@7> takes seat Player 1"), "{content}");
-        assert!(content.contains("<@9> takes seat Player 2"), "{content}");
+        // One ping each, in the header — the seat lines address them by
+        // in-game name instead of mentioning them again.
+        assert_eq!(content.matches("<@7>").count(), 1, "{content}");
+        assert_eq!(content.matches("<@9>").count(), 1, "{content}");
+        assert!(content.contains("`MarineLorD` takes seat Player 1"), "{content}");
+        assert!(content.contains("`Beasty` takes seat Player 2"), "{content}");
     }
 
     #[test]
@@ -801,7 +807,7 @@ mod tests {
             Some(&room()),
             &[],
         );
-        assert!(content.contains("opponent: `Beasty`"), "{content}");
+        assert!(content.contains("`Beasty` takes seat Player 2"), "{content}");
         assert!(!content.to_lowercase().contains("unverified"), "{content}");
     }
 
@@ -817,10 +823,14 @@ mod tests {
             Some(&room()),
             &[],
         );
-        assert!(content.contains("opponent: `Beasty` (name unverified)"), "{content}");
-        assert!(content.contains("`Beasty`（名稱未驗證）"), "{content}");
+        assert!(
+            content.contains("`Beasty` (name unverified) takes seat Player 2"),
+            "{content}"
+        );
+        assert!(content.contains("`Beasty`（名稱未驗證） 選 Player 2"), "{content}");
         // Only the unverified side is marked.
-        assert!(content.contains("opponent: `MarineLorD`\n"), "{content}");
+        assert!(content.contains("`MarineLorD` takes seat Player 1"), "{content}");
+        assert!(!content.contains("MarineLorD (name unverified)"), "{content}");
     }
 
     #[test]
@@ -854,9 +864,9 @@ mod tests {
     }
 
     #[test]
-    fn player_one_is_told_to_host_the_lobby_and_each_gets_the_others_game_name() {
+    fn player_one_is_told_to_host_the_lobby_and_each_is_addressed_by_their_own_game_name() {
         // A Discord mention is no use in the game's lobby browser, so each
-        // player is given the other's aoe4world name to search for.
+        // seat line addresses that player by their own aoe4world name.
         let (content, _) = render_panel(
             &heading(1, "Round 1", 1, 3),
             &player(7, 1, "MarineLorD"),
@@ -865,13 +875,10 @@ mod tests {
             &[],
         );
         assert!(
-            content.contains("<@7> takes seat Player 1** and hosts the lobby in game — opponent: `Beasty`"),
+            content.contains("`MarineLorD` takes seat Player 1** and hosts the lobby in game"),
             "{content}"
         );
-        assert!(
-            content.contains("<@9> takes seat Player 2** — opponent: `MarineLorD`"),
-            "{content}"
-        );
+        assert!(content.contains("`Beasty` takes seat Player 2**"), "{content}");
         assert!(content.contains("開房"), "the Chinese half says it too: {content}");
     }
 
@@ -1053,7 +1060,7 @@ mod tests {
 
     #[test]
     fn a_backtick_in_a_name_cannot_break_the_panels_code_span() {
-        // The opponent's game id sits inside inline code, where a markdown escape
+        // The seat line's game name sits inside inline code, where a markdown escape
         // does nothing — a raw backtick would close the span and mangle the rest of
         // the line, so it is replaced instead.
         let (content, _) = render_panel(
@@ -1063,7 +1070,7 @@ mod tests {
             Some(&room()),
             &[],
         );
-        assert!(content.contains("opponent: `a'b`"), "{content}");
+        assert!(content.contains("`a'b` takes seat Player 1"), "{content}");
         assert!(!content.contains("a`b"), "no raw backtick survives: {content}");
     }
 
@@ -1239,11 +1246,20 @@ mod tests {
     }
 
     #[test]
-    fn the_redraft_notice_names_the_actor_in_both_languages() {
-        let content = render_redraft_notice(7, 2);
-        assert!(content.contains("<@7>"), "{content}");
-        assert!(content.contains("regenerated"), "{content}");
+    fn the_redraft_notice_mentions_the_player_actor_once_and_names_them_by_game_name_in_english() {
+        let actor = player(7, 1, "MarineLorD");
+        let content = render_redraft_notice(7, Some(&actor), 2);
+        assert_eq!(content.matches("<@7>").count(), 1, "{content}");
         assert!(content.contains("重新產生"), "{content}");
+        assert!(content.contains("`MarineLorD` regenerated"), "{content}");
         assert!(content.contains('2'), "{content}");
+    }
+
+    #[test]
+    fn the_redraft_notice_falls_back_to_a_mention_for_an_admin_actor() {
+        // An admin who is neither player has no in-game name to address them by.
+        let content = render_redraft_notice(42, None, 1);
+        assert_eq!(content.matches("<@42>").count(), 2, "{content}");
+        assert!(content.contains("regenerated"), "{content}");
     }
 }

@@ -562,6 +562,13 @@ the seat instruction with both players mentioned.
 Design: §8.7.
 Gate: thread names stay within 100 characters for worst-case names, using chunk 5's width helper.
 
+**A follow-on cut the seat instruction's mention count from three per player to one.** Each player was
+mentioned in the header and again in both language halves of their seat line — a ping Discord only delivers
+once, however many times the id repeats, and the wrong identifier for the instruction anyway: a Discord
+mention means nothing in the game's own lobby browser. The header keeps the one ping; the seat lines and the
+redraft notice now address a player by their aoe4world in-game name instead, falling back to a mention only
+when there is no verified name to fall back to (an admin actor on the redraft notice).
+
 **17. Draft channel announcement**
 One post per set into `#…-draft` the moment the room is created, in the same call — the round, both seeds and
 names, and the `/watch/` link in a link button, with no mentions and an empty `allowed_mentions` so a display

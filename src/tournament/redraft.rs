@@ -144,6 +144,15 @@ pub(crate) async fn run(
     // Both slots are `Some` — `refuse` already returned `NotPlayable` otherwise.
     let one = set_thread::player(pool, tournament.id, set.slot1_user_id.unwrap_or_default()).await?;
     let two = set_thread::player(pool, tournament.id, set.slot2_user_id.unwrap_or_default()).await?;
+    // `None` for an admin who is neither player — the notice falls back to a
+    // mention for them, since there is no in-game name to address them by.
+    let actor = if one.user_id == actor_user_id {
+        Some(&one)
+    } else if two.user_id == actor_user_id {
+        Some(&two)
+    } else {
+        None
+    };
     let heading = SetHeading {
         id: set.id,
         round_name: round.name.clone(),
@@ -195,7 +204,7 @@ pub(crate) async fn run(
             .send_message(
                 &http,
                 CreateMessage::new()
-                    .content(set_thread::render_redraft_notice(actor_user_id, count))
+                    .content(set_thread::render_redraft_notice(actor_user_id, actor, count))
                     .allowed_mentions(CreateAllowedMentions::new()),
             )
             .await

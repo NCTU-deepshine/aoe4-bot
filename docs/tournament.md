@@ -1499,16 +1499,21 @@ When a set reaches `ready`:
 > post genuinely is the first public exposure.
 
 ```
-⚔️ **Round 1 · Match 1 — Bo3**   @MarineLorD  @Beasty
-1·MarineLorD  vs  8·Beasty
+**Round 1 · Match 1 — Bo3**   @MarineLorD  @Beasty
+`1` MarineLorD  vs  `8` Beasty
 
 Draft room: <link>
-**@MarineLorD takes seat Player 1** · **@Beasty takes seat Player 2**
-Seats are first-come — if you end up in the wrong one, press 🔄 Regenerate draft.
+**MarineLorD 選 Player 1**，並在遊戲中開房
+**Beasty 選 Player 2**
+**MarineLorD takes seat Player 1** and hosts the lobby in game
+**Beasty takes seat Player 2**
 
 [ 🔗 Watch draft ]  [ 🔄 Regenerate draft ]  [ ✅ Set complete ]
 ```
 
+- **Each player is mentioned once, in the header.** The seat lines address them by their aoe4world
+  in-game name instead of mentioning them again — that is the name the draft tool and the game's
+  own lobby browser show, where a Discord mention means nothing.
 - `🔗 Watch draft` is a **link button** (`CreateButton::new_link(url)`) — no `custom_id`, no interaction, and it
   renders as a real button rather than a bare URL. **It is the only one of the three chunk 16 ships**: the other
   two need chunks 20 and 22, their `custom_id`s would route to nothing, and a button that silently does nothing
