@@ -11,6 +11,7 @@ use crate::Error;
 use crate::locale::Locale;
 use crate::tournament::bracket::Slot;
 use crate::tournament::db::{self, Tournament, TournamentGame, TournamentSet};
+use crate::tournament::throttle::EditThrottle;
 use crate::tournament::{bracket_view, set_thread};
 use serenity::all::CacheHttp;
 use sqlx::SqlitePool;
@@ -184,6 +185,7 @@ impl CompleteOutcome {
 pub(crate) async fn finish(
     http: impl CacheHttp,
     pool: &SqlitePool,
+    throttle: &EditThrottle,
     tournament: &Tournament,
     set: &TournamentSet,
 ) -> Result<CompleteOutcome, Error> {
@@ -213,6 +215,7 @@ pub(crate) async fn finish(
     settle(
         &http,
         pool,
+        throttle,
         tournament,
         set,
         winner_user_id,
@@ -233,6 +236,7 @@ pub(crate) async fn finish(
 pub(crate) async fn award(
     http: impl CacheHttp,
     pool: &SqlitePool,
+    throttle: &EditThrottle,
     tournament: &Tournament,
     set: &TournamentSet,
     winner_user_id: i64,
@@ -255,6 +259,7 @@ pub(crate) async fn award(
     settle(
         &http,
         pool,
+        throttle,
         tournament,
         set,
         winner_user_id,
@@ -275,6 +280,7 @@ pub(crate) async fn award(
 async fn settle(
     http: &impl CacheHttp,
     pool: &SqlitePool,
+    throttle: &EditThrottle,
     tournament: &Tournament,
     set: &TournamentSet,
     winner_user_id: i64,
@@ -307,7 +313,7 @@ async fn settle(
     // The bracket is redrawn from the rows just written: `played_match` derives a
     // winner from `winner_user_id` and never reads `status`, so this needs no
     // rendering of its own for either kind of settlement.
-    if let Err(err) = bracket_view::reconcile(http, pool, tournament).await {
+    if let Err(err) = bracket_view::reconcile(http, pool, throttle, tournament).await {
         tracing::error!("failed to redraw the bracket after set {} settled: {err:?}", set.id);
     }
     set_thread::open_ready(http, pool, tournament).await;

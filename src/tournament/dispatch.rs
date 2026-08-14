@@ -238,7 +238,7 @@ impl Dispatcher {
             return;
         };
 
-        let outcome = match import::sync(&ctx.http, &self.pool, &tournament, &set).await {
+        let outcome = match import::sync(&ctx.http, &self.pool, &self.panel_throttle, &tournament, &set).await {
             Ok(outcome) => outcome,
             Err(err) => {
                 error!("set-done button failed for set {set_id}: {err:?}");
@@ -405,7 +405,7 @@ impl Dispatcher {
     /// The draw follows the field, and the preview exists from the first two
     /// entrants, so a sign-up or withdrawal redraws it.
     async fn reconcile_bracket(&self, ctx: &Context, tournament: &db::Tournament) {
-        if let Err(err) = bracket_view::reconcile(&ctx.http, &self.pool, tournament).await {
+        if let Err(err) = bracket_view::reconcile(&ctx.http, &self.pool, &self.panel_throttle, tournament).await {
             error!("failed to redraw the bracket for tournament {}: {err:?}", tournament.id);
         }
     }

@@ -13,6 +13,7 @@ use crate::drafttool::{self, DraftGame, DraftSeat, DraftState, SlotValues};
 use crate::locale::Locale;
 use crate::tournament::completion::{self, CompleteOutcome, Tally};
 use crate::tournament::db::{self, NewGame, Tournament, TournamentSet};
+use crate::tournament::throttle::EditThrottle;
 use serenity::all::CacheHttp;
 use sqlx::SqlitePool;
 use tracing::warn;
@@ -161,6 +162,7 @@ impl SyncOutcome {
 pub(crate) async fn sync(
     http: impl CacheHttp,
     pool: &SqlitePool,
+    throttle: &EditThrottle,
     tournament: &Tournament,
     set: &TournamentSet,
 ) -> Result<SyncOutcome, Error> {
@@ -173,7 +175,7 @@ pub(crate) async fn sync(
     let Some(state) = drafttool::fetch_draft_state(&external_id).await else {
         return Ok(SyncOutcome::Unreachable);
     };
-    apply(http, pool, tournament, set, &external_id, state).await
+    apply(http, pool, throttle, tournament, set, &external_id, state).await
 }
 
 /// The DB-writing half, taking an already-fetched `DraftState` so a test
@@ -181,6 +183,7 @@ pub(crate) async fn sync(
 pub(crate) async fn apply(
     http: impl CacheHttp,
     pool: &SqlitePool,
+    throttle: &EditThrottle,
     tournament: &Tournament,
     set: &TournamentSet,
     external_id: &str,
@@ -220,7 +223,7 @@ pub(crate) async fn apply(
 
     let full_tally = completion::tally(&games, slot1_user_id, slot2_user_id);
     let outcome = if completion::decide(&full_tally, state.best_of).is_some() {
-        completion::finish(http, pool, tournament, set).await?
+        completion::finish(http, pool, throttle, tournament, set).await?
     } else {
         // A head start could make `finished` true here — the bot assumes it is
         // always zero and does not act on it, but this is cheap to notice.

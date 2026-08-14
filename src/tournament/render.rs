@@ -69,7 +69,7 @@ pub(crate) fn render(rounds: &[Round], width: usize) -> Vec<String> {
         return Vec::new();
     }
 
-    let body = fenced(&grid(rounds, width), champion(rounds));
+    let body = fenced(&grid(rounds, width), &champion_line(rounds));
     if body.len() <= MESSAGE_LIMIT || rounds.len() == 1 {
         // A single round that still does not fit cannot be split any further. Better
         // an over-long body that Discord rejects loudly than a silent truncation.
@@ -153,13 +153,19 @@ fn champion(rounds: &[Round]) -> Option<String> {
     Some(final_match.entrant(final_match.winner?)?.name.clone())
 }
 
-fn fenced(lines: &[String], champion: Option<String>) -> String {
-    let mut body = format!("```\n{}\n```", lines.join("\n"));
-    if let Some(champion) = champion {
-        // Outside the fence, so this one is escaped as markdown.
-        body.push_str(&format!("\n🏆 **{}**", crate::ranked::escape(&champion)));
+/// The trophy line appended once a champion exists, empty otherwise. Outside
+/// the fence, so it goes through the markdown escaper rather than the
+/// fence-safety pass — and `pub(crate)` so `bracket_view`'s image path can
+/// reuse it as plain message content alongside the drawing.
+pub(crate) fn champion_line(rounds: &[Round]) -> String {
+    match champion(rounds) {
+        Some(name) => format!("\n🏆 **{}**", crate::ranked::escape(&name)),
+        None => String::new(),
     }
-    body
+}
+
+fn fenced(lines: &[String], champion_line: &str) -> String {
+    format!("```\n{}\n```{champion_line}", lines.join("\n"))
 }
 
 /// The bracket itself, one string per line, trailing spaces trimmed.
@@ -172,7 +178,10 @@ fn fenced(lines: &[String], champion: Option<String>) -> String {
 /// Leaves sit on even rows, which puts each match's own row at the midpoint between its
 /// two participants. That is what keeps a connector's `┐`, `│`, `├` and `┘` in one
 /// column.
-fn grid(rounds: &[Round], width: usize) -> Vec<String> {
+///
+/// `pub(crate)` so `bracket_svg` can place an SVG document over the same
+/// character matrix rather than re-deriving this layout.
+pub(crate) fn grid(rounds: &[Round], width: usize) -> Vec<String> {
     let leaves = rounds[0].matches.len() * 2;
     let mut lines = vec![Line::default(); leaves * 2 - 1];
 

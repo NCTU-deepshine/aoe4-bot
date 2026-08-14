@@ -8,6 +8,12 @@ pub(crate) mod bracket;
 // The bracket as Discord sees it: a preview from the first two
 // entrants, becoming the real thing in place once the event starts.
 pub(crate) mod bracket_view;
+// Rendering `render::grid`'s character matrix as an SVG document, for
+// `bracket_raster` to rasterize into an image (`docs/bracket-image.md`).
+pub(crate) mod bracket_svg;
+// Turning `bracket_svg`'s SVG into a PNG with the bundled fonts, so a bracket
+// posts as an image instead of a code block once it fits one message.
+pub(crate) mod bracket_raster;
 // `/tournament admin add|remove|list` — the codebase's first access control.
 pub(crate) mod access;
 // The interaction dispatcher's custom_id parsing: consumed

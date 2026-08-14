@@ -714,7 +714,7 @@ pub async fn register(
         }
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
         seed_panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
-        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
     }
     Ok(())
 }
@@ -794,7 +794,7 @@ pub async fn withdraw(ctx: Context<'_>) -> Result<(), Error> {
     if outcome.changed_state() {
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
         seed_panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
-        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
     }
     Ok(())
 }
@@ -849,7 +849,7 @@ pub async fn invite(
         // seed was placed, and the seed panel lists the roster.
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
         seed_panel::refresh_now(ctx.http(), pool, &tournament).await?;
-        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
     }
     Ok(())
 }
@@ -885,7 +885,7 @@ pub async fn uninvite(
     if outcome.changed_state() {
         panel::refresh(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
         seed_panel::refresh_now(ctx.http(), pool, &tournament).await?;
-        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+        bracket_view::reconcile(ctx.http(), pool, &ctx.data().panel_throttle, &tournament).await?;
     }
     Ok(())
 }
@@ -1263,7 +1263,7 @@ pub async fn setup(
     // whether padding happens at all, so a change to either leaves the
     // bracket stale otherwise. Unconditional, like the panel refresh above —
     // `reconcile` only touches messages that actually changed.
-    bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+    bracket_view::reconcile_now(ctx.http(), pool, &tournament).await?;
 
     let entries = tournament_db::list_entries_for_tournament(pool, tournament.id).await?;
     ephemeral(ctx, setup_summary(&tournament, &presets, &entries, locale)).await?;
@@ -1619,7 +1619,7 @@ pub async fn seed_set(
 
     let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
     seed_panel::refresh_now(ctx.http(), pool, &tournament).await?;
-    bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+    bracket_view::reconcile_now(ctx.http(), pool, &tournament).await?;
     ephemeral(ctx, outcome.message(locale)).await?;
     Ok(())
 }
@@ -1645,7 +1645,7 @@ pub async fn seed_refresh(ctx: Context<'_>) -> Result<(), Error> {
     let policy = seeding::SeedPolicy::Suggest;
     tournament_db::set_seed_source(&ctx.data().database, tournament.id, policy.as_source()).await?;
     let message = seed_and_post_panel(ctx, &tournament, policy, locale).await?;
-    bracket_view::reconcile(ctx.http(), &ctx.data().database, &tournament).await?;
+    bracket_view::reconcile_now(ctx.http(), &ctx.data().database, &tournament).await?;
     ephemeral(ctx, message).await?;
     Ok(())
 }
@@ -1711,7 +1711,7 @@ pub async fn refresh_panels(ctx: Context<'_>) -> Result<(), Error> {
     lines.push(refresh_checkin_panel(ctx, &tournament, locale).await?);
     lines.push(refresh_seed_panel(ctx, &tournament, locale).await?);
 
-    lines.push(match bracket_view::reconcile(ctx.http(), pool, &tournament).await {
+    lines.push(match bracket_view::reconcile_now(ctx.http(), pool, &tournament).await {
         Ok(bracket_view::ReconcileOutcome::NoChannel) => locale
             .pick(
                 "賽程表：這場賽事沒有賽程頻道。",
@@ -1876,7 +1876,7 @@ pub async fn start(ctx: Context<'_>) -> Result<(), Error> {
         // The preview messages become the real bracket in place — re-read so the
         // status is `running` and the provisional label comes off.
         let tournament = tournament_db::get_tournament(pool, tournament.id).await?.unwrap();
-        bracket_view::reconcile(ctx.http(), pool, &tournament).await?;
+        bracket_view::reconcile_now(ctx.http(), pool, &tournament).await?;
         panel::refresh_now(ctx.http(), pool, &tournament).await?;
         // The same opener a completed set runs, so round one and every round
         // after it are opened by one piece of code.
@@ -2141,7 +2141,7 @@ pub async fn set_report(
 
     // Re-read: the row just written is what decides whether the set is over.
     let set = tournament_db::get_set(pool, set.id).await?.unwrap_or(set);
-    let finished = completion::finish(ctx.http(), pool, &tournament, &set).await?;
+    let finished = completion::finish(ctx.http(), pool, &ctx.data().panel_throttle, &tournament, &set).await?;
     audit::log_action("set complete", tournament.id, &tournament.slug, ctx.author(), &finished);
 
     let reply = format!("{}\n{}", outcome.message(locale), finished.message(locale));
@@ -2181,7 +2181,15 @@ pub async fn set_award(
     // Typed rather than picked, or picked from a set that has since changed:
     // either way `award` reports it as not in the set.
     let winner_user_id = winner.parse::<i64>().unwrap_or(0);
-    let outcome = completion::award(ctx.http(), &ctx.data().database, &tournament, &set, winner_user_id).await?;
+    let outcome = completion::award(
+        ctx.http(),
+        &ctx.data().database,
+        &ctx.data().panel_throttle,
+        &tournament,
+        &set,
+        winner_user_id,
+    )
+    .await?;
     audit::log_action("set award", tournament.id, &tournament.slug, ctx.author(), &outcome);
 
     // Ephemeral for the same reason `/set report` is: an awarded set has already
@@ -2244,7 +2252,14 @@ pub async fn set_done(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
 
-    let outcome = import::sync(ctx.http(), &ctx.data().database, &tournament, &set).await?;
+    let outcome = import::sync(
+        ctx.http(),
+        &ctx.data().database,
+        &ctx.data().panel_throttle,
+        &tournament,
+        &set,
+    )
+    .await?;
     audit::log_action("set done", tournament.id, &tournament.slug, ctx.author(), &outcome);
     ephemeral(ctx, outcome.message(locale)).await?;
     Ok(())

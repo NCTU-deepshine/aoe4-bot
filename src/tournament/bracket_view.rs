@@ -16,9 +16,11 @@ use crate::tournament::db::{self, Tournament, TournamentEntry, TournamentRound, 
 use crate::tournament::panel_check;
 use crate::tournament::registration::RegistrationState;
 use crate::tournament::seeding;
-use crate::tournament::{bracket, render};
-use serenity::all::{CacheHttp, CreateMessage, EditMessage};
+use crate::tournament::throttle::EditThrottle;
+use crate::tournament::{bracket, bracket_raster, bracket_svg, render};
+use serenity::all::{CacheHttp, CreateAttachment, CreateMessage, EditAttachments, EditMessage, MessageId};
 use sqlx::SqlitePool;
+use std::time::Instant;
 
 /// A bracket needs two sides; below that there is nothing to draw.
 const MIN_ENTRANTS: usize = 2;
@@ -275,10 +277,12 @@ pub(crate) enum Drawing {
     Real,
 }
 
-/// Wraps the drawing with a heading, and says plainly that it is not the draw
-/// yet while the tournament has not started. Bilingual: one shared message with
-/// many readers.
-fn decorate(name: &str, chunks: Vec<String>, drawing: Drawing) -> Vec<String> {
+/// Says plainly that this is not the draw yet while the tournament has not
+/// started. Bilingual: one shared message with many readers. Its own
+/// function — rather than inlined in `decorate` — so the image path can reuse
+/// it as plain message content alongside the drawing, which has nowhere to
+/// put markdown of its own.
+fn heading(name: &str, drawing: Drawing) -> String {
     // `<seed4>` in a bracket still needs the heading to say what it means.
     let open_seats = if drawing == Drawing::PreviewWithOpenSeats {
         "尚未邀請的空位標示為 `<seedN>`。\n\
@@ -286,7 +290,7 @@ fn decorate(name: &str, chunks: Vec<String>, drawing: Drawing) -> Vec<String> {
     } else {
         ""
     };
-    let heading = if drawing == Drawing::Real {
+    if drawing == Drawing::Real {
         format!("**{name} — 賽程表 / bracket**\n")
     } else {
         format!(
@@ -295,8 +299,12 @@ fn decorate(name: &str, chunks: Vec<String>, drawing: Drawing) -> Vec<String> {
              Provisional, based on who has registered so far; it will change until the event starts.\n\
              {open_seats}"
         )
-    };
+    }
+}
 
+/// Wraps the drawing with its heading.
+fn decorate(name: &str, chunks: Vec<String>, drawing: Drawing) -> Vec<String> {
+    let heading = heading(name, drawing);
     chunks
         .into_iter()
         .enumerate()
@@ -324,18 +332,59 @@ async fn persisted_rounds(
     Ok(Some(played_rounds(&rounds, &sets, entries)))
 }
 
+/// Whether this message's edit should be skipped this pass. `None` (the
+/// `reconcile_now` bypass) never throttles.
+fn throttled(throttle: Option<&EditThrottle>, message_id: MessageId) -> bool {
+    throttle.is_some_and(|t| !t.try_begin_edit(message_id, Instant::now()))
+}
+
+/// Renders `rounds` to a PNG, off the async executor — rasterizing is
+/// CPU-bound and must not block the gateway (`docs/bracket-image.md`).
+async fn bracket_image(rounds: &[render::Round]) -> Result<Vec<u8>, Error> {
+    let svg = bracket_svg::svg(&render::grid(rounds, render::DEFAULT_WIDTH));
+    Ok(tokio::task::spawn_blocking(move || bracket_raster::rasterize(&svg)).await??)
+}
+
 /// Draws the current bracket into `#{slug}-bracket`, reusing the messages that
-/// are already there.
+/// are already there. Coalesces edits under load, the same split `panel::refresh`
+/// uses — [`reconcile_now`] is the unconditional counterpart, for a repair path
+/// or an admin command that must not have its redraw silently dropped.
 ///
+/// Only an edit is throttled. A post or a delete is a structural repair — the
+/// channel is missing a message or holding a stale one — and dropping it would
+/// leave the drawing wrong rather than merely late, which is the one place this
+/// differs from `panel::refresh`, where every call is an edit.
+pub(crate) async fn reconcile(
+    http: impl CacheHttp,
+    pool: &SqlitePool,
+    throttle: &EditThrottle,
+    tournament: &Tournament,
+) -> Result<ReconcileOutcome, Error> {
+    reconcile_inner(http, pool, tournament, Some(throttle)).await
+}
+
+/// The unconditional redraw — bypasses the throttle, since this fires once per
+/// admin command or boot-time repair rather than once per button press. Used by
+/// `startup::reconcile_all` and the explicit `/tournament refresh` family, which
+/// must not have their redraw coalesced away.
+pub(crate) async fn reconcile_now(
+    http: impl CacheHttp,
+    pool: &SqlitePool,
+    tournament: &Tournament,
+) -> Result<ReconcileOutcome, Error> {
+    reconcile_inner(http, pool, tournament, None).await
+}
+
 /// The message count is **not stable**: it follows the bracket size, which jumps
 /// at powers of two, so a field growing from 8 to 9 turns one message into
 /// three. Each chunk is therefore edited if a message already holds that
 /// ordinal, posted if not, and any surplus tail deleted — otherwise the bottom
 /// of a bigger bracket lingers under a smaller one.
-pub(crate) async fn reconcile(
+async fn reconcile_inner(
     http: impl CacheHttp,
     pool: &SqlitePool,
     tournament: &Tournament,
+    throttle: Option<&EditThrottle>,
 ) -> Result<ReconcileOutcome, Error> {
     let Some(bracket_channel_id) = tournament.bracket_channel_id else {
         return Ok(ReconcileOutcome::NoChannel);
@@ -365,35 +414,83 @@ pub(crate) async fn reconcile(
         drawing,
     );
 
+    // Only a bracket that already fits one Discord message gets the image
+    // treatment (`docs/bracket-image.md` §2) — a larger one keeps the text
+    // renderer, which already knows how to split across several messages.
+    // A render failure falls back to the text chunk already sitting in
+    // `chunks[0]` rather than failing the whole reconcile over it.
+    let image = if chunks.len() == 1 {
+        match bracket_image(&rounds).await {
+            Ok(png) => Some(png),
+            Err(err) => {
+                tracing::error!(
+                    "failed to render the bracket image for tournament {}, falling back to text: {err:?}",
+                    tournament.id
+                );
+                None
+            },
+        }
+    } else {
+        None
+    };
+    // The heading and the champion line, not the fenced grid — an image has
+    // nowhere to put markdown of its own, so both stay in `content` instead.
+    let image_content = image.is_some().then(|| {
+        format!(
+            "{}{}",
+            heading(&tournament.name, drawing),
+            render::champion_line(&rounds)
+        )
+    });
+
     let (mut posted, mut edited, mut deleted) = (0, 0, 0);
     let existing = db::list_bracket_messages(pool, tournament.id).await?;
     for (index, chunk) in chunks.iter().enumerate() {
         let ordinal = i64::try_from(index).unwrap();
+        let png = image.as_deref().filter(|_| index == 0);
 
         // A stored id that no longer resolves is treated as never having been
         // posted rather than a reason to abort the whole redraw.
         let needs_post = match existing.iter().find(|m| m.ordinal == ordinal) {
             Some(message) => {
                 let message_id = to_message_id(message.message_id);
-                match channel_id
-                    .edit_message(&http, message_id, EditMessage::new().content(chunk))
-                    .await
-                {
-                    Ok(_) => {
-                        edited += 1;
-                        false
-                    },
-                    Err(err) if panel_check::is_confirmed_missing(&err) => true,
-                    Err(err) => return Err(err.into()),
+                if throttled(throttle, message_id) {
+                    false
+                } else {
+                    let edit = match png {
+                        // Explicit, not `EditMessage::new_attachment` — this
+                        // must *replace* the attachment set, not add to it.
+                        Some(bytes) => EditMessage::new()
+                            .content(image_content.as_deref().unwrap_or_default())
+                            .attachments(
+                                EditAttachments::new().add(CreateAttachment::bytes(bytes.to_vec(), "bracket.png")),
+                            ),
+                        // A previous pass may have attached an image that no
+                        // longer applies — an empty set sheds it explicitly
+                        // rather than leaving it under new text.
+                        None => EditMessage::new().content(chunk).attachments(EditAttachments::new()),
+                    };
+                    match channel_id.edit_message(&http, message_id, edit).await {
+                        Ok(_) => {
+                            edited += 1;
+                            false
+                        },
+                        Err(err) if panel_check::is_confirmed_missing(&err) => true,
+                        Err(err) => return Err(err.into()),
+                    }
                 }
             },
             None => true,
         };
 
         if needs_post {
-            let message = channel_id
-                .send_message(&http, CreateMessage::new().content(chunk))
-                .await?;
+            let create = match png {
+                Some(bytes) => CreateMessage::new()
+                    .content(image_content.as_deref().unwrap_or_default())
+                    .add_file(CreateAttachment::bytes(bytes.to_vec(), "bracket.png")),
+                None => CreateMessage::new().content(chunk),
+            };
+            let message = channel_id.send_message(&http, create).await?;
             // Only the message carrying the heading — jumping to it via the
             // pin and scrolling down reaches every chunk after it. Runs on
             // whichever message a fresh post lands on, including a repost
@@ -438,6 +535,33 @@ pub(crate) async fn reconcile(
 mod tests {
     use super::*;
     use chrono::Utc;
+    use std::time::Duration;
+
+    #[test]
+    fn the_bypass_never_throttles() {
+        let throttle = EditThrottle::new(Duration::from_secs(3));
+        let message_id = MessageId::new(1);
+        assert!(throttle.try_begin_edit(message_id, Instant::now()));
+        // The bypass ignores the same throttle a second call would be refused by.
+        assert!(!throttled(None, message_id));
+    }
+
+    #[test]
+    fn a_fresh_message_is_never_throttled() {
+        let throttle = EditThrottle::new(Duration::from_secs(3));
+        assert!(!throttled(Some(&throttle), MessageId::new(1)));
+    }
+
+    #[test]
+    fn a_second_check_inside_the_window_is_throttled() {
+        let throttle = EditThrottle::new(Duration::from_secs(3));
+        let message_id = MessageId::new(1);
+        assert!(!throttled(Some(&throttle), message_id), "the first check passes");
+        assert!(
+            throttled(Some(&throttle), message_id),
+            "the second lands inside the window"
+        );
+    }
 
     fn entry(user_id: i64, display_name: &str, elo: Option<i64>) -> TournamentEntry {
         TournamentEntry {

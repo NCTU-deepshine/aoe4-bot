@@ -2310,6 +2310,13 @@ mod tests {
         serenity::all::Http::new("faketoken")
     }
 
+    /// A wide-open throttle: these tests exercise `import::apply`/`sync` in
+    /// isolation, one call each, so there is nothing for a throttle window to
+    /// coalesce.
+    fn fake_throttle() -> crate::tournament::throttle::EditThrottle {
+        crate::tournament::throttle::EditThrottle::new(std::time::Duration::ZERO)
+    }
+
     fn draft_seat(claimed: bool) -> crate::drafttool::DraftSeat {
         crate::drafttool::DraftSeat { claimed }
     }
@@ -2371,9 +2378,17 @@ mod tests {
             (1, 0),
             vec![draft_game(1, Some("prairie"), Some(1))],
         );
-        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
-            .await
-            .unwrap();
+        let outcome = crate::tournament::import::apply(
+            fake_http(),
+            &pool,
+            &fake_throttle(),
+            &tournament,
+            &set,
+            "draft-1",
+            state,
+        )
+        .await
+        .unwrap();
 
         let games = crate::tournament::db::list_games_for_set(&pool, set.id).await.unwrap();
         assert_eq!(games.len(), 1);
@@ -2405,9 +2420,17 @@ mod tests {
             draft_game(2, Some("dry-arabia"), Some(1)),
         ];
         let state = draft_state("running", false, 3, (2, 0), games);
-        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
-            .await
-            .unwrap();
+        let outcome = crate::tournament::import::apply(
+            fake_http(),
+            &pool,
+            &fake_throttle(),
+            &tournament,
+            &set,
+            "draft-1",
+            state,
+        )
+        .await
+        .unwrap();
 
         let crate::tournament::import::SyncOutcome::Progress {
             outcome: crate::tournament::completion::CompleteOutcome::Completed { .. },
@@ -2440,9 +2463,17 @@ mod tests {
             (1, 0),
             vec![draft_game(1, Some("prairie"), Some(1))],
         );
-        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
-            .await
-            .unwrap();
+        let outcome = crate::tournament::import::apply(
+            fake_http(),
+            &pool,
+            &fake_throttle(),
+            &tournament,
+            &set,
+            "draft-1",
+            state,
+        )
+        .await
+        .unwrap();
 
         assert!(
             matches!(
@@ -2501,9 +2532,17 @@ mod tests {
             draft_game(2, Some("dry-arabia"), Some(1)),
         ];
         let state = draft_state("running", false, 3, (2, 0), games);
-        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
-            .await
-            .unwrap();
+        let outcome = crate::tournament::import::apply(
+            fake_http(),
+            &pool,
+            &fake_throttle(),
+            &tournament,
+            &set,
+            "draft-1",
+            state,
+        )
+        .await
+        .unwrap();
 
         assert!(
             matches!(
@@ -2553,9 +2592,17 @@ mod tests {
             (1, 0),
             vec![draft_game(1, Some("prairie"), Some(1))],
         );
-        crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
-            .await
-            .unwrap();
+        crate::tournament::import::apply(
+            fake_http(),
+            &pool,
+            &fake_throttle(),
+            &tournament,
+            &set,
+            "draft-1",
+            state,
+        )
+        .await
+        .unwrap();
 
         let game = crate::tournament::db::get_game(&pool, set.id, 1)
             .await
@@ -2575,7 +2622,7 @@ mod tests {
         let completed = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
 
         // No pointer, no network call — `sync` bails before either.
-        let outcome = crate::tournament::import::sync(fake_http(), &pool, &tournament, &completed)
+        let outcome = crate::tournament::import::sync(fake_http(), &pool, &fake_throttle(), &tournament, &completed)
             .await
             .unwrap();
         assert!(matches!(
@@ -2592,7 +2639,7 @@ mod tests {
         let set = crate::tournament::db::get_set(&pool, ids[0]).await.unwrap().unwrap();
         assert_eq!(set.draft_external_id, None, "a fresh set has no room yet");
 
-        let outcome = crate::tournament::import::sync(fake_http(), &pool, &tournament, &set)
+        let outcome = crate::tournament::import::sync(fake_http(), &pool, &fake_throttle(), &tournament, &set)
             .await
             .unwrap();
         assert!(matches!(outcome, crate::tournament::import::SyncOutcome::NoPointer));
@@ -2616,9 +2663,17 @@ mod tests {
             (1, 0),
             vec![draft_game(1, Some("prairie"), Some(1))],
         );
-        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
-            .await
-            .unwrap();
+        let outcome = crate::tournament::import::apply(
+            fake_http(),
+            &pool,
+            &fake_throttle(),
+            &tournament,
+            &set,
+            "draft-1",
+            state,
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(outcome, crate::tournament::import::SyncOutcome::Superseded));
         let games = crate::tournament::db::list_games_for_set(&pool, set.id).await.unwrap();
@@ -2634,9 +2689,17 @@ mod tests {
 
         let mut state = draft_state("lobby", false, 3, (0, 0), vec![draft_game(1, Some("prairie"), Some(1))]);
         state.seats = vec![draft_seat(false), draft_seat(false)];
-        let outcome = crate::tournament::import::apply(fake_http(), &pool, &tournament, &set, "draft-1", state)
-            .await
-            .unwrap();
+        let outcome = crate::tournament::import::apply(
+            fake_http(),
+            &pool,
+            &fake_throttle(),
+            &tournament,
+            &set,
+            "draft-1",
+            state,
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(outcome, crate::tournament::import::SyncOutcome::NotSeated));
         let games = crate::tournament::db::list_games_for_set(&pool, set.id).await.unwrap();

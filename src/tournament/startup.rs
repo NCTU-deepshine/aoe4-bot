@@ -46,7 +46,7 @@ pub(crate) async fn reconcile_all(http: impl CacheHttp, pool: &SqlitePool) {
         );
         report(tournament.id, "seed", seed_panel::ensure(&http, pool, tournament).await);
 
-        match bracket_view::reconcile(&http, pool, tournament).await {
+        match bracket_view::reconcile_now(&http, pool, tournament).await {
             Ok(outcome) if outcome.changed() => {
                 info!("bracket reconciled for tournament {}: {outcome:?}", tournament.id);
             },
