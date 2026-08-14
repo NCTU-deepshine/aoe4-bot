@@ -100,7 +100,7 @@ shipped as chunk 38, and boot-time panel reconciliation as chunk 23 itself, belo
 ### M3 — replace hand entry with import
 
 - **21** — the read endpoint, in **another repository**. Shipped as
-  [PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2) against a fork; not merged to `main` yet.
+  [PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2), merged to `main` 2026-08-14.
 - **22** — the sync engine: the payload type, slot mapping, and the guarded upsert into `tournament_games`,
   reusing `completion.rs` to settle a decided set. Callable but uncalled — nothing is registered until the
   chunks below expose it.
@@ -608,8 +608,8 @@ re-points the announcement.
 
 **21. [Other repository] the read endpoint — done**
 `GET /api/matches/:id/state` in `aoe4_banpick`, a thin wrapper over `deriveState()` — see §3.2 item 1 for the
-shipped field list. Not a commit in this repo. Shipped as [PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2)
-against a fork, not on `main` yet.
+shipped field list. Not a commit in this repo. Shipped as [PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2),
+merged to `main` and live on the public instance.
 Design: §3.2 item 1.
 
 **22. Result import — the sync engine**

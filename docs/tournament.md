@@ -221,14 +221,13 @@ are proposals.
 #### Item 1 — spectator draft read (required)
 
 `GET /api/matches/:id/state` — unauthenticated (the watch link is already public), read-only, supporting
-`ETag`/`If-None-Match` so the bot can poll cheaply. Shipped against a fork
-([PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2)) rather than at the path originally proposed
-here; the payload below reflects what actually landed, not the first draft of it.
+`ETag`/`If-None-Match` so the bot can poll cheaply. Shipped upstream on `main`
+([PR #2](https://github.com/MaxLiu1016/aoe4_banpick/pull/2)) at this path, and live on the public
+instance; the payload below reflects what actually landed, not the first draft of it.
 
 This is a thin wrapper over what the tool already computes: `deriveState()` plus the `Match` document is
 essentially this payload (`lib/draft/engine.ts`, `lib/socket/matchHandlers.ts` builds almost exactly
-it for the socket). **It is small enough that we can write it ourselves** rather than wait — see §12 on whether
-and when to offer it upstream.
+it for the socket).
 
 Every field below has a named consumer in this document. Nothing is included on the grounds that it might be
 useful later.
@@ -1823,10 +1822,6 @@ Tracked separately; not part of this design.
 
 ## 12. Open questions
 
-- **When, if ever, do we offer item 1 upstream?** The route is known — the tool is MIT, its `CONTRIBUTING.md` is
-  explicitly issue-first, and agreed issues get an `accepting-pr` label — and the endpoint is small enough to
-  write ourselves. Nothing is committed here; the question is only timing, and whether we run our own fork
-  meanwhile.
 - **Is a bot account acceptable to the tool's author?** Every draft we create is hosted by it and shows up in the
   tool's own history under that account. Worth disclosing rather than looking like an unusually busy player.
 - **May an admin remove a *self-registered* entrant?** `/tournament uninvite` (§8.3) deliberately does not answer
