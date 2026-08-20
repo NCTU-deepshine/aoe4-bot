@@ -9,7 +9,7 @@ pub(crate) mod bracket;
 // entrants, becoming the real thing in place once the event starts.
 pub(crate) mod bracket_view;
 // Rendering `render::grid`'s character matrix as an SVG document, for
-// `bracket_raster` to rasterize into an image (`docs/bracket-image.md`).
+// `bracket_raster` to rasterize into an image.
 pub(crate) mod bracket_svg;
 // Turning `bracket_svg`'s SVG into a PNG with the bundled fonts, so a bracket
 // posts as an image instead of a code block once it fits one message.
@@ -45,7 +45,7 @@ pub(crate) mod dispatch;
 pub(crate) mod invite;
 // Syncing a set against its draft: fetch, map onto our slots, upsert its
 // games, settle through `completion`. `/set done` and its button call it;
-// the background poll (chunk 40) will add a second caller.
+// a background poll will add a second caller.
 pub(crate) mod import;
 // The registration panel: rendering plus the Discord/DB glue
 // `commands::create` and `dispatch::Dispatcher` call into.

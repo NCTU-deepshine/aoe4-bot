@@ -370,7 +370,7 @@ fn throttled(throttle: Option<&EditThrottle>, message_id: MessageId) -> bool {
 }
 
 /// Renders `rounds` to a PNG, off the async executor — rasterizing is
-/// CPU-bound and must not block the gateway (`docs/bracket-image.md`).
+/// CPU-bound and must not block the gateway.
 async fn bracket_image(rounds: &[render::Round]) -> Result<Vec<u8>, Error> {
     let svg = bracket_svg::svg(&render::grid(rounds, render::DEFAULT_WIDTH));
     Ok(tokio::task::spawn_blocking(move || bracket_raster::rasterize(&svg)).await??)
@@ -457,8 +457,8 @@ async fn reconcile_inner(
     }
 
     // Only a bracket that already fits one Discord message gets the image
-    // treatment (`docs/bracket-image.md` §2) — a larger one keeps the text
-    // renderer, which already knows how to split across several messages.
+    // treatment — a larger one keeps the text renderer, which already knows
+    // how to split across several messages.
     // A render failure falls back to the text chunk already sitting in
     // `chunks[0]` rather than failing the whole reconcile over it.
     let image = if chunks.len() == 1 {

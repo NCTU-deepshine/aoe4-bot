@@ -1,5 +1,5 @@
 //! Rendering a bracket's character grid as an SVG document, for rasterizing
-//! into an image instead of a Discord code block (`docs/bracket-image.md`).
+//! into an image instead of a Discord code block.
 //!
 //! Consumes `render::grid`'s character matrix rather than re-deriving the
 //! layout: a name or a connector lands at the same display cell either way,

@@ -392,9 +392,9 @@ async fn field_full(pool: &SqlitePool, tournament: &Tournament) -> Result<Option
 
 /// Signing up when the field already holds you: an ordinary entrant pressing
 /// Register twice, or one coming back from a withdrawal. An entry can no
-/// longer be unbound (chunk 32's own follow-on made `aoe4_id` required), so
-/// there is nothing left to catch up on here — a real snapshot is immutable,
-/// and `rebind` is the only way to change a binding.
+/// longer be unbound (`aoe4_id` is required now), so there is nothing left
+/// to catch up on here — a real snapshot is immutable, and `rebind` is the
+/// only way to change a binding.
 async fn register_existing_entry(
     pool: &SqlitePool,
     tournament: &Tournament,

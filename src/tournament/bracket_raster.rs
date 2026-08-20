@@ -1,8 +1,7 @@
 //! Rasterizing a bracket SVG (`bracket_svg::svg`) into a PNG, with a bundled
-//! font rather than whatever the host happens to have installed —
-//! `docs/bracket-image.md`'s whole reason for existing: Discord clients don't
-//! agree on how wide a CJK character renders relative to a Latin one, and the
-//! only portable fix is to stop asking them.
+//! font rather than whatever the host happens to have installed: Discord
+//! clients don't agree on how wide a CJK character renders relative to a
+//! Latin one, and the only portable fix is to stop asking them.
 //!
 //! Two faces, because a player's display name can be in any script a
 //! competitor picked — Noto Sans covers Latin/Greek/Cyrillic, Noto Sans CJK TC

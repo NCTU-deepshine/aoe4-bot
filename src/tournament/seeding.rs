@@ -27,8 +27,8 @@ pub(crate) fn seedable(entries: &[TournamentEntry]) -> Vec<&TournamentEntry> {
 }
 
 /// The profiles in a field there is anything to look up for — every one of
-/// them, since chunk 32's own follow-on: an entrant with no profile is no
-/// longer a state the schema can hold.
+/// them, since an entrant with no profile is no longer a state the schema
+/// can hold.
 pub(crate) fn rated_ids(field: &[&TournamentEntry]) -> Vec<i64> {
     field.iter().map(|e| e.aoe4_id).collect()
 }
@@ -340,8 +340,8 @@ mod tests {
 
     #[test]
     fn every_entrant_in_the_field_is_a_profile_to_look_up() {
-        // Chunk 32's own follow-on made an unbound entrant unreachable, so the
-        // batched request now covers the whole field, in order.
+        // An unbound entrant is unreachable now, so the batched request
+        // covers the whole field, in order.
         let entries = vec![entry(1, "Bound", None, Some(1000)), entry(2, "Also", None, Some(900))];
         let field = seedable(&entries);
         assert_eq!(rated_ids(&field), vec![100, 200]);

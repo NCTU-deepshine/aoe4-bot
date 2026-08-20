@@ -371,7 +371,7 @@ pub(crate) async fn invite(
         // whether more entrants arrive to fill the gap in front of it.
         let displaced_by = db::set_manual_seed(pool, tournament.id, user_id, seed).await?;
         // Without this the placement is destroyed by the seeding pass at
-        // close-checkin, silently — the bug chunk 30 exists to have fixed.
+        // close-checkin, silently.
         db::set_seed_source(pool, tournament.id, seeding::SeedPolicy::KeepManual.as_source()).await?;
         if let Some(uid) = displaced_by {
             db::get_entry(pool, tournament.id, uid).await?.map(|e| e.display_name)

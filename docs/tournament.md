@@ -1,7 +1,7 @@
 # Tournament orchestration — design
 
-Status: **design only.** Nothing in this document is implemented yet. It exists so that implementation is
-mechanical.
+Status: **live.** Everything this document describes is implemented and running; it remains the design
+reference for why the feature works the way it does.
 
 [§3](#3-the-external-draft-tool) is written against the draft tool's **source**, which is public and MIT:
 `https://github.com/MaxLiu1016/aoe4_banpick`, cloned at `~/workspace/aoe4_banpick`. Claims there name the file
@@ -468,12 +468,12 @@ create table if not exists tournaments (
   status text not null default 'registration'
     check (status in ('registration','checkin','seeding','running','completed','canceled')),
   draft_base_url text,                      -- per-tournament override; normally null, the
-                                            -- instance comes from env (§3, chunk 14)
+                                            -- instance comes from env (§3)
   entrant_cap integer not null default 32,  -- registration refuses a sign-up past this (§8.3)
   registration_mode text not null default 'open'
-    check (registration_mode in ('open','invite_only')),  -- invite_only closes public sign-ups (§8.3, chunk 33)
+    check (registration_mode in ('open','invite_only')),  -- invite_only closes public sign-ups (§8.3)
   seed_source text not null default 'suggested'
-    check (seed_source in ('suggested','manual')),        -- 'manual' survives the rating pass (§6, chunk 30)
+    check (seed_source in ('suggested','manual')),        -- 'manual' survives the rating pass (§6)
   scheduled_start_at timestamp,             -- when the event is meant to begin; stored utc.
                                             -- defaults to a week out, set by insert_tournament in the
                                             -- same statement as created_at so the two share a clock and
@@ -689,24 +689,16 @@ create table if not exists tournament_games (
 - **Foreign keys.** sqlx enables `pragma foreign_keys` by default on `SqliteConnectOptions`. Assert this in a
   test — every `references` above is inert if it ever changes.
 - **Both `aoe4_id` columns are `not null`.** An unbound entrant, and a player row with nothing bound, were
-  originally what an admin's invite produced (§8.3), before `/tournament invite` made the profile mandatory —
-  nothing writes either without one any more, so both constraints now say so at the schema level rather than
-  only in the application (`0010_required_aoe4_id.sql`, `0011_required_player_aoe4_id.sql`). `unique` on
-  `tournament_players.aoe4_id` predates and survives this unchanged: SQLite treats NULLs as distinct, so
-  nullable-and-unique was always about letting many unbound rows coexist while still enforcing one Discord
-  user per real profile — `not null` just removes the "many unbound rows" half of that, since there is no
-  longer a way to create one. The two rows that predated the tightening (both from before `/tournament invite`
-  resolved a profile) were deleted by hand ahead of `0011`, which is what let it run at all — the migration
-  itself does not touch data, only the constraint.
-- **The `tournament_players` rebuild needed `pragma foreign_keys = off`; `tournament_entries`' did not.**
-  SQLite has no `ALTER COLUMN`, so both are table rebuilds, but `tournament_players(user_id)` is referenced by
-  `tournament_entries`, `tournament_sets` (twice) and `tournament_games`, while nothing holds a foreign key into
-  `tournament_entries` itself. Disabling the check is a **no-op inside a transaction**, so `0011` is sqlx's
-  `-- no-transaction` kind and `0010` is not. Both create-copy-drop-rename rather than renaming the old table
-  first, which with `legacy_alter_table` off would rewrite the `references` clauses in every dependant to point
-  at the renamed-away table, which then gets dropped out from under them. Those same keys are why an invitee
-  could never have lived in a table of their own even while unbound: one reaching a set would fail
-  `tournament_sets`' key.
+  possible before `/tournament invite` made the profile mandatory; nothing writes either without one any more,
+  so both constraints say so at the schema level (`0010_required_aoe4_id.sql`, `0011_required_player_aoe4_id.sql`).
+  `unique` on `tournament_players.aoe4_id` predates and survives this unchanged — SQLite treats NULLs as
+  distinct, so nullable-and-unique was always about one Discord user per real profile, and `not null` just
+  removes the "many unbound rows" half now that nothing creates one.
+- **`tournament_players`'s rebuild needed `pragma foreign_keys = off`; `tournament_entries`'s did not.** SQLite
+  has no `ALTER COLUMN`, so both are table rebuilds, but `tournament_players(user_id)` is referenced by three
+  other tables while nothing references `tournament_entries` itself. Both create-copy-drop-rename rather than
+  renaming the old table first, which with `legacy_alter_table` off would rewrite every dependant's
+  `references` clause to point at the renamed-away table right before it is dropped.
 - **`invited_by` is on the entry, not the player.** Being invited is a fact about one tournament — the same
   person may be invited to one and sign up for the next — and §8.3's no-show sweep needs it per entry.
 
@@ -784,52 +776,37 @@ seeding must never drop an unrated player.
 
 ### A manual seed is a pin; resolving it into `seed` is a close-time computation
 
-A manual seed (`/tournament invite user profile seed`, `/tournament seed set`) does not move people
-around a list — it **pins an entrant to a seat**, up to `entrant_cap`, for the rest of the event. The pin
-itself (`manual_seed`) is written immediately; the field's actual `seed` column is not — that only ever
-happens once, at close (`refresh_ratings`, run by `close-checkin` and by `/tournament seed refresh`), which
-is what `seeding::resolved_order` computes: every pinned entrant on its seat, everyone else filling what is
-left in the default tiering (`suggested_order`).
+A manual seed (`/tournament invite user profile seed`, `/tournament seed set`) pins an entrant to a seat, up to
+`entrant_cap`, rather than moving people around a list. The pin (`manual_seed`) is written immediately; the
+field's real `seed` column only resolves once, at close (`refresh_ratings`, run by `close-checkin` and by
+`/tournament seed refresh`), via `seeding::resolved_order` — every pinned entrant on its seat, everyone else
+filling what's left in the default tiering (`suggested_order`).
 
-**Resolving on every pin, rather than only at close, was tried and was wrong.** An admin pinning seat 8 with
-two entrants so far does not yet know whether six more will arrive to fill the seats in front of it — writing
-a compacted `seed` at that moment can silently place the wrong two people against each other in the preview,
-long before anyone intended a final answer. So before close, `seed` simply stays null; `manual_seed` is the
-only live signal a pin exists, and every reader that shows a number
-(`seeding::effective_seed`, `seed_panel::render`, `bracket_view`'s preview) falls back to it. Two things follow:
+**Resolving on every pin, rather than only at close, was tried and rejected**: an admin pinning seat 8 with two
+entrants signed up so far can't yet know whether six more will fill the seats in front of it, and a compacted
+`seed` written at that moment can silently place the wrong two people against each other in the preview. So
+before close, `seed` stays null and `manual_seed` is the only live signal a pin exists — every reader that
+shows a number (`seeding::effective_seed`, `seed_panel::render`, `bracket_view`'s preview) falls back to it. A
+pin is shown at its own number rather than compacted, with everyone else filling in underneath it; pinning a
+seat someone else holds displaces them immediately, and the reply names who just lost their seat.
 
-- **A pin is visible immediately, at its own number**, not compacted down to fit the field composed so far.
-  The bracket preview and seeding panel draw it there, and correctly stop offering that seat as still open.
-  Everyone else fills the lowest number nobody has claimed, in tiering order — filling in *underneath* an
-  unreached pin rather than being pushed past it.
-- **Pinning a seat someone else is pinned to displaces them immediately**, independent of the close-time
-  computation — the newer pin always wins outright, the previous holder's pin is cleared rather than shifted
-  elsewhere, and the reply names them so the organizer knows who just lost their seat.
+**At close**, `resolved_order` runs once for the whole field: a pin past the field's actual size compacts (seat
+12 with only 10 signed up moves to seat 10), and a no-show's or withdrawal's gap closes with no separate
+pass — their own pin, if any, simply drops out, ready to reclaim its seat if they're reinvited before close.
 
-**At close**, `resolved_order` runs once for the whole field, and this is where a pin past the field's actual
-size compacts — seat 12 with only 10 signed up moves to seat 10 — and where a no-show's or a withdrawal's gap
-closes, with no separate compaction pass: the departed entrant's own pin, if any, simply drops out of the
-resolution, ready to reclaim its seat if they are reinvited before close.
+**`/tournament seed set` has no lifecycle gate**: pinning always happens, and a full re-resolve additionally
+happens once a real `seed` already exists on the field (the same guard `uninvite`'s own compaction uses) — this
+is what lets an organizer keep adjusting seats live between close and `/tournament start`.
 
-**`/tournament seed set` has no lifecycle gate**, so it can run both before and after close — pinning always
-happens; the full re-resolve additionally happens if a real `seed` already exists on the field (i.e. close
-already ran once), the same guard `uninvite`'s own compaction uses. This is what lets an organizer keep
-adjusting seats live in the window between close and `/tournament start`.
+`tournaments.seed_source` records whether the resolution has any pins in it — `'suggested'` (default, no pins)
+or `'manual'` (set the moment a pin lands); refreshing ratings keeps every pin, and `/tournament seed refresh`
+is the way to clear them back to `'suggested'`.
 
-`tournaments.seed_source` still says whether the (eventual) resolution has any pins in it:
-
-- **`'suggested'`** — the default; no pins exist, so every seat is exactly the tiering's.
-- **`'manual'`** — set the moment a pin is written by `/tournament seed set` or a seeded `/tournament invite`.
-  Refreshing ratings still updates every ELO and ATR snapshot, but **keeps every pin**; the reply says so and
-  names `/tournament seed refresh` as the way to take them back, which clears every pin and returns the field
-  to `'suggested'`.
-
-Without any of this, a pin set before check-in closes is destroyed by the seeding pass that closing runs, and
-by `/tournament reopen-registration`, which nulls every seed. Both would be silent. A curated field (§8.3)
-exists precisely to be arranged by hand, so the arrangement has to survive the rest of the lifecycle.
-
-The close-time resolution is still written as a whole 1..n order rather than per row (§4 notes), so a
-post-close `seed set` still takes the *entire* field's resolution, not just the one entrant being pinned.
+Without any of this, a pin set before check-in closes would be silently destroyed by the seeding pass closing
+runs, and by `/tournament reopen-registration`, which nulls every seed — and a curated field (§8.3) exists
+precisely to be arranged by hand, so the arrangement has to survive the rest of the lifecycle. The close-time
+resolution is still written as a whole 1..n order rather than per row (§4 notes), so a post-close `seed set`
+still takes the entire field's resolution, not just the one entrant being pinned.
 
 ### Reuse
 
@@ -856,20 +833,19 @@ higher seed, by instruction — §8.7, §4 notes), and upsert `games` into `tour
 > `finished` is derived from the tool's own *head-start-inclusive* total against `target`, so a nonzero
 > `headStart` can in principle make `finished: true` while the wins-only `score` is nowhere near a majority of
 > `games` — `completion::finish`'s majority-of-games check would not see this and the set stays `StillPlaying`,
-> recoverable by hand with `/set award`. Discovered building this chunk, against a real fixture with a head start
-> configured; deliberately deferred rather than built, since nothing in `drafttool::PresetOptions` checks for one
-> at assignment either (§11) — modeling the read side without the write side just moves the gap.
+> recoverable by hand with `/set award`. Deliberately deferred rather than built, since nothing in
+> `drafttool::PresetOptions` checks for a head start at assignment either (§11) — modeling the read side without
+> the write side just moves the gap.
 
 **Two triggers, one code path:**
 
 1. **On demand** — `/set done`, or the `✅ Set complete` button on the set's thread panel (§8.7). Syncs, imports,
    posts the result in the thread and the bracket channel, advances the winner, then archives and locks the
    thread and creates the next set's thread if it has become `ready`.
-2. **Background poll** — on the existing `tokio-cron-scheduler` job (`src/main.rs`), over sets in
-   `drafting`/`in_progress` that have a `draft_external_id`, so a forgotten report never stalls the bracket.
-   The cron closure builds its own `Http` and `Data` (`src/main.rs`); the same shape works here, though
-   the `.unwrap()` at `src/main.rs` panics the job on failure and should be handled instead. Note the job
-   runs twice a day (`0 0 0,12 * * *`) — far too coarse for draft polling, so this needs its own schedule.
+2. **Background poll** — not yet built. Over sets in `drafting`/`in_progress` that have a `draft_external_id`,
+   so a forgotten report never stalls the bracket. The existing `tokio-cron-scheduler` job (`src/main.rs`) is
+   the wrong shape to reuse as-is: it runs twice a day, far too coarse for draft polling, so this needs its own
+   schedule.
 
 Because the draft tool is authoritative, an on-demand sync of an unfinished draft is a no-op that reports
 "still in progress" — which is why the button needs no confirmation step and no winner-only restriction.
@@ -1053,8 +1029,7 @@ checkin ──/tournament close-checkin──▶ seeding
 seeding ──/tournament start──▶ running
     │  requires a draft preset, seeds 1..n contiguous, and
     │  scheduled_start_at reached; generates the bracket in one
-    │  transaction; resolves byes; opens every playable set
-    │  (threads follow in chunk 16)
+    │  transaction; resolves byes; opens every playable set's thread
 running ──(final set completes)──▶ completed
 checkin | seeding ──/tournament reopen-registration──▶ registration
     │  no_show entries → status 'active'; every checked_in_at cleared
@@ -1243,8 +1218,7 @@ lifecycle event with no panel of its own, so their replies stay public.
 | `/tournament seed list\|set\|refresh` | admin | Repost the seeding panel; override a seed (which makes the order manual); re-fetch ratings and take the suggestion back |
 | `/tournament start` | admin | Generates the bracket, resolves byes, opens every playable set |
 | `/tournament delete confirm:<slug>` | creator | Deletes the tournament and the four channels it created |
-| `/set draft` | admin | Creates the draft if a set somehow has none, and reposts the links |
-| `/set redraft` | either player, or admin | Abandons the current draft and creates a fresh one · also a button |
+| `/set redraft` | either player, or admin | Creates the set's first draft, or abandons the current one for a fresh one · also a button |
 | `/set done` | either player, or admin | Syncs the draft, imports, advances · also a button |
 | `/set report` | admin | Manual override of one game (`source='manual'`) |
 | `/set award` | admin | Hands the whole set to one player as a `walkover`, for a no-show |
@@ -1469,6 +1443,17 @@ Four constraints, all easy to miss and all visible in production if missed:
 Names truncate to a fixed display width (default 12) with a single-cell ellipsis, and a wide character is never
 split in half — the cell is padded back up instead.
 
+**The width math is provably correct but not portable, which is why a bracket that fits one message renders as
+an image instead.** Padding every name to the same display width keeps the connectors in shared columns
+whatever `unicode-width` says a name costs, but Discord clients disagree on how wide a CJK character actually
+renders relative to a Latin one — confirmed empirically (a calibrated ruler pasted into Discord) at ~1.95× on
+one client, not exactly 2×, with no reason for others to agree. Dropping names from the shared grid (numbers in
+the tree, names in a legend, the way the seeding panel already does) was prototyped and rejected as too much of
+a downgrade. `bracket_svg` renders `render::grid`'s matrix as an SVG with bundled, OFL-licensed Noto fonts
+(Latin/Greek/Cyrillic and CJK kept separate, since either script can appear in a display name), and
+`bracket_raster` turns that into a PNG — sidestepping client font-rendering differences entirely. Only a
+bracket that already fits one Discord message gets this treatment; a larger one keeps the text renderer above.
+
 Mobile is this format's known weakness — a 16-player bracket is already wider than a phone's code block. So
 there is also a plain per-round list, `render::render_round_list`:
 
@@ -1478,9 +1463,9 @@ there is also a plain per-round list, `render::render_round_list`:
 `5` VortiX      0 – 2  Anotand `4`
 ```
 
-It **belongs in the round-opening announcement** (chunks 16–18), not behind a command. A command nobody knows
-to type is no answer to a readability problem; a message posted when the round opens reaches every player
-without being asked for. So the function is written and tested but has no caller until then.
+It **belongs in a round-opening announcement**, not behind a command — a command nobody knows to type is no
+answer to a readability problem, and a message posted when the round opens would reach every player without
+being asked for. That caller is not built; the 3rd place line above (§5) is its only production use so far.
 
 The renderer is a **pure function** — `fn render(sets: &[Set], width: usize) -> Vec<String>` — so it is testable
 with golden strings and no Discord involved.
@@ -1492,11 +1477,13 @@ When a set reaches `ready`:
 1. Create a private thread on the matches channel named `R1M1 · MarineLorD vs Beasty`, truncated to Discord's 100-char
    limit (budget ~30 display-width chars per name, using the same width helper as the bracket).
 2. Add both players and every current admin (`Http::add_thread_channel_member`).
-3. Create the draft from the round's public preset, as the bot's own account (§3.3); store
-   `draft_external_id`, `thread_id`. The bot is the draft's host.
-4. Post a pinned control panel **in the thread**, carrying the room link and the seat instruction, with both
-   players @-mentioned so it pings them.
-5. Post the spectator announcement in `#…-draft` (below), best-effort — the private panel goes first.
+3. Post a pinned control panel **in the thread**, with both players @-mentioned so it pings them. **The draft is
+   not minted here.** Creation is deferred to the first press of the panel's `➕ Create draft` button (or
+   `/set redraft`) — a set that never gets played never spends a room on the draft tool. Until then the panel
+   says so and offers only Create draft and Call an organizer.
+4. Once created (as the bot's own account, §3.3, from the round's public preset — `draft_external_id` is stored,
+   the bot is the draft's host), the panel is edited in place to the working state, carrying the room link and
+   the seat instruction, and the spectator announcement is posted in `#…-draft` (below).
 
 > **There is one room URL, not two seats.** `/match/<id>` is the same link for both players, and a seat is
 > claimed by whoever clicks an empty one first (§3.2 item 3). So the panel must say which seat to take:
@@ -1520,6 +1507,9 @@ When a set reaches `ready`:
 > is **not** otherwise public before that: the tool's own feed lists only drafts with both seats filled, so our
 > post genuinely is the first public exposure.
 
+Before creation, the panel reads `No draft room yet — press the button below to create one.` with just
+`[ ➕ Create draft ]  [ 呼叫管理員 / Call an organizer ]`. Once created, it becomes:
+
 ```
 **Round 1 · Match 1 — Bo3**   @MarineLorD  @Beasty
 `1` MarineLorD  vs  `8` Beasty
@@ -1530,16 +1520,18 @@ Draft room: <link>
 **MarineLorD takes seat Player 1** and hosts the lobby in game
 **Beasty takes seat Player 2**
 
-[ 🔗 Watch draft ]  [ 🔄 Regenerate draft ]  [ ✅ Set complete ]
+[ 🔗 Watch draft ]  [ 🔄 Regenerate draft ]  [ 呼叫管理員 / Call an organizer ]  [ ✅ Set complete ]
 ```
 
 - **Each player is mentioned once, in the header.** The seat lines address them by their aoe4world
   in-game name instead of mentioning them again — that is the name the draft tool and the game's
   own lobby browser show, where a Discord mention means nothing.
 - `🔗 Watch draft` is a **link button** (`CreateButton::new_link(url)`) — no `custom_id`, no interaction, and it
-  renders as a real button rather than a bare URL. **It is the only one of the three chunk 16 ships**: the other
-  two need chunks 20 and 22, their `custom_id`s would route to nothing, and a button that silently does nothing
-  is worse than one that is not there yet. Until then the panel tells players to ask an admin instead.
+  renders as a real button rather than a bare URL.
+- `🔄 Regenerate draft` is the same button as `➕ Create draft` above — one `custom_id`, relabeled by whether
+  the set already has a draft (§8.7 `/set redraft`, below).
+- `呼叫管理員 / Call an organizer` pings every admin, throttled to one ping per set per window — a player's
+  route to a human when nothing else on the panel names one.
 - `✅ Set complete` carries `custom_id = "setdone:<set_id>"` and runs exactly what `/set done` runs: one code
   path, two entry points. It must `Defer` first.
 - **Safe to press early.** It triggers a *sync*, and the draft tool is authoritative — an unfinished draft
@@ -1550,8 +1542,9 @@ Draft room: <link>
 
 #### Announcing the draft
 
-`set_thread::open` posts one message in `#…-draft` **in the same call that creates the room** — step 5 of the
-list above — and stores its id in `draft_announce_message_id`:
+`set_thread::announce`, called from `redraft::run` in the same pass that mints the room — whether that is the
+first creation or a later regenerate — posts one message in `#…-draft` and stores its id in
+`draft_announce_message_id`:
 
 ```
 **準決賽 / Semifinal · Match 2 — Bo5**
@@ -1561,18 +1554,20 @@ list above — and stores its id in `draft_announce_message_id`:
 
 The same message is edited with the final score when the set completes, so the channel reads as a match log.
 
-- **Posted at creation, not on a seat claim.** The alternative was polling `hasPlayer1`/`hasPlayer2` on
-  `GET /api/matches/<id>`, which bought a delay on a link nobody is harmed by seeing early, and cost a second
+- **Posted when the room is minted, not on a seat claim.** The alternative was polling `hasPlayer1`/`hasPlayer2`
+  on `GET /api/matches/<id>`, which bought a delay on a link nobody is harmed by seeing early, and cost a second
   scheduler (the existing cron runs twice a day, §7), a per-tick guard, and a dependency on an endpoint §3.1
   says not to build against. All three are gone.
-- **Posted once because the room is created once.** `open` is a no-op for a set that already has a thread, so
-  a room is minted once per set and therefore announced once — by construction, not by a check.
-  `draft_announce_message_id` is the **handle** chunks 20 and 22 need, *not* a guard: an `is_none()` test would
-  be wrong here, because the row was read before `open` ran and `set_draft_pointer` nulls that column mid-call.
+- **Posted once per room.** The button/`/set redraft` only takes the create path while `draft_external_id` is
+  still null; every later press takes the regenerate path instead, so a room is minted once and announced once
+  per instance of it — by construction, not by a check. `draft_announce_message_id` is the **handle**
+  `redraft::run`'s superseding logic and `set_thread::close`'s score-edit need, *not* a guard: an `is_none()`
+  test would be wrong here, because the row was read before the mint and `set_draft_pointer` nulls that column
+  mid-call.
 - **Best-effort, with no retry.** A set can have a room and no post; the failure log carries the watch url,
   because that line is the only manual-recovery path. It is sent last, after the thread panel, so a set whose
-  players were never told is never advertised either. The remedy is `/set redraft`; reconciliation belongs to
-  chunk 23.
+  players were never told is never advertised either. The remedy is `/set redraft`; nothing yet reconciles a
+  missed post automatically.
 - **The url is a button, never body text.** A link button needs no permission beyond sending the message, where
   a url in the body renders as a link only with `EMBED_LINKS` — which the bot's own overwrite on this channel
   does not grant (§8.1). It also keeps the channel a one-match-per-line log with no unfurled previews.
@@ -1592,23 +1587,28 @@ The same message is edited with the final score when the set completes, so the c
   public feed outright rather than redacting them (`app/api/matches/route.ts`), with the comment that a public
   row saying when and which preset is usually enough to work out who. Refusing the preset at assignment is the
   only coherent position; recorded as a §11 follow-up, since nothing reads `options.anonymous` today.
-- **Redraft ordering, for chunk 20.** `set_draft_pointer` clears the handle, so the old post is unreachable
+- **Redraft ordering.** `set_draft_pointer` clears the handle, so the old post is unreachable
   afterwards. The order has to be: read the old handle → edit that post to strike the dead link → repoint →
   announce the new room. Otherwise `#…-draft` accumulates a live-looking link to an orphaned room per redraft,
   which is precisely that channel's failure mode. **The same ordering applies to the pinned set panel** — it
   carries the live `/match/` link, which claims a seat, so it is struck the same way and for the same reason,
-  via `panel_message_id` (§8.8).
-- **Chunk 22's edit touches the header line only**, so the message keeps its shape when the score lands.
+  via `panel_message_id` (§8.8). A first creation has no old room to strike, so it skips straight to minting and
+  announcing.
+- **A completed set's announcement edit touches the header line only**, so the message keeps its shape when the
+  score lands.
 
 #### `/set redraft`
 
-Either player or an admin, in the set thread — also the `🔄 Regenerate draft` button
-(`custom_id = "redraft:<set_id>"`). It creates a fresh draft from the same preset, **overwrites**
-`draft_external_id`, increments `redraft_count`, clears `draft_synced_at` and
+Either player or an admin, in the set thread — also the same button, labelled `➕ Create draft` before the set
+has one and `🔄 Regenerate draft` after (`custom_id = "redraft:<set_id>"` either way). Before a draft exists it
+mints one from the round's preset and edits the pinned panel in place; after, it creates a fresh draft from the
+same preset, **overwrites** `draft_external_id`, increments `redraft_count`, clears `draft_synced_at` and
 `draft_announce_message_id`, re-posts the panel with the seat instruction, and leaves a visible notice in the
-thread naming who triggered it. The old room is orphaned on the tool's side; it cannot be deleted (§4).
+thread naming who triggered it. Either way the room is announced in `#…-draft`; a regenerate additionally
+orphans the old room on the tool's side, which cannot be deleted (§4).
 
-Guards, in order of how likely each is to matter:
+Guards, in order of how likely each is to matter (the create path is subject to the same three — none of them
+can fire before a set has ever had a draft):
 
 1. **Refused once the set is `completed`.** A finished set is not redraftable; corrections go through
    `/set report`.
@@ -1732,11 +1732,10 @@ in both. Leaving them would mean an English-speaking entrant getting a Chinese e
 
 **Mechanism.** A `Locale` enum (`ZhTw`, `En`) and a pure `from_discord_locale(code: &str) -> Locale` — anything
 other than the exact string `"zh-TW"` maps to `En`. Every message-producing function this applies to gains a
-`locale: Locale` parameter and picks its template accordingly. This is retroactive: chunks 7–10 already shipped
-without it, so their outcome/panel/refusal messages are retrofitted rather than written fresh — and every chunk
-from here on writing new user-facing text follows the same shape from the start rather than adding it later.
-`Locale::pick(zh, en)` is the house form for a two-language message: it keeps a message's two renderings adjacent,
-which is what makes them stay in sync.
+`locale: Locale` parameter and picks its template accordingly. This was retrofitted onto the earliest
+outcome/panel/refusal messages, which shipped before it existed; every message written since carries it from
+the start. `Locale::pick(zh, en)` is the house form for a two-language message: it keeps a message's two
+renderings adjacent, which is what makes them stay in sync.
 
 ## 9. Delivery notes
 
@@ -1755,78 +1754,20 @@ same two-step setup, so add a shared `test_pool()` helper there rather than repe
 
 ## 10. Test plan
 
-No network in tests. `src/ranked.rs` does have tests that call aoe4world, but they carry
-`#[ignore = "hits the live aoe4world API"]`, so a default `cargo test` never runs them and CI does not depend on
-that service being up. Follow that pattern if a live check is ever genuinely wanted; otherwise draft-API and
-esports-leaderboard deserialization are tested against saved sample payloads.
+Coverage lives in the test modules themselves (`src/tournament/*.rs`, `src/integration_tests.rs`) —
+`cargo test` is the source of truth, not a list here, and unlike prose it cannot drift from what the code
+actually does.
 
-**Bracket math (no database):** pairings for n = 2, 3, 4, 6, 8, 16; byes placed on top seeds; no two top-4 seeds
-meeting before the semi-finals; advancement links forming a single-rooted tree; `best_of` varying per round
-within one bracket.
+Two testing choices worth calling out because they are not obvious from a test's name:
 
-**Bracket rendering (no database, golden strings):** n = 4, 8, 16, 32 with ASCII names; **CJK names keep their
-columns aligned**; over-long names truncate to the configured display width; n = 32 splits into multiple chunks,
-each under 2000 characters; a name containing backticks or a fence sequence cannot escape the code block; the
-per-round list view renders for any round.
-
-Assert the **box-drawing joins share a column** — that each `┐`, `├`, `│` and `┘` belonging to one connector is
-at the same index — rather than only comparing against a golden string. An off-by-one here is invisible when
-reading the code and obvious to everyone looking at the output; the example in §8.6 shipped wrong at first for
-exactly this reason.
-
-**Discord helpers (no network):** thread names stay within 100 characters for worst-case player names; every
-`custom_id` round-trips to the right action and entity id, and an unknown or malformed one is ignored rather
-than panicking (buttons from an older deploy will be pressed).
-
-**Database, on `sqlite::memory:` following `src/integration_tests.rs`:**
-
-- the migrator runs clean on an empty database and on one that already has `accounts`;
-- `pragma foreign_keys` is on, and an entry for a user with no `tournament_players` row is rejected;
-- **player binding**: a second profile for the same Discord user replaces the main rather than adding one; the
-  same profile claimed by a second user is rejected; a rebind is refused while the user has an entry in a
-  `running` tournament, and an entry keeps its snapshotted `aoe4_id` across a permitted rebind;
-- **`accounts` is untouched** by every tournament code path — a user bound there is not implicitly a tournament
-  player, and vice versa;
-- seeding tiers correctly when only some entrants have an `atr` — an ATR-rated entrant outranks an ELO-only one
-  whatever the raw numbers say — ties break on `display_name`, and no-shows never take a seat;
-- an organizer's `seed` override leaves `suggested_seed` untouched, and re-ordering an already-seeded field does
-  not trip `unique (tournament_id, seed)`;
-- the esports leaderboard's nullable `profile_id`/`rating` rows are dropped rather than failing the batch;
-- draft import maps slots correctly (slot 1 is the higher seed);
-- re-import overwrites `draft_import` rows and preserves `manual` ones;
-- **completion is derived, not read**: a payload with `status = "running"` and a Bo3 score of 2–0 completes the
-  set, and one with `status = "running"` at 1–0 does not;
-- **the draft-channel post** carries the `/watch/` link and never the `/match/` one; contains no mention syntax;
-  escapes both entrant names; doubles a round name only where a translation exists; keeps its one url in a link
-  button rather than in body text; and offers no button carrying a `custom_id`. It fires once
-  per draft **by construction** rather than by test — a room is minted once per set — and what is asserted in
-  the database is the handle: `draft_announce_message_id` round-trips, and a redraft clears it;
-- **redraft** overwrites the pointer, increments `redraft_count`, voids that set's `draft_import` games while
-  preserving `manual` ones, clears the announcement handle, strikes the old announcement and panel before
-  repointing, is refused on a `completed` set, and — past `FREE_REDRAFTS` — refuses a player while still
-  allowing an admin;
-- a set reaching a majority of its games completes, eliminates the loser, and places the winner in the correct
-  slot of the next set;
-- a draft's reported `score` disagreeing with the imported games is flagged rather than silently resolved;
-- **lifecycle transitions**: every illegal move is rejected — starting before check-in closes, checking in on a
-  `running` tournament, registering after start, starting with non-contiguous seeds;
-- **check-in**: a second check-in is idempotent; an unregistered user is rejected; closing marks exactly the
-  non-checked-in entrants `no_show` and seeds only the rest;
-- **reopening registration**: refused from `running`/`completed`/`canceled` and a no-op from `registration`,
-  with the database untouched in both; from `checkin`, the status and both check-in columns reset and every
-  `checked_in_at` cleared; from `seeding`, `no_show` entries return to `active` while a `withdrawn` entry stays
-  withdrawn;
-- **deletion cascades and stops**: deleting a tournament removes its entries, admins, stages, rounds, sets,
-  games and bracket messages, leaves `tournament_players` intact, and leaves a second tournament's rows
-  untouched; a `confirm` argument that doesn't match the slug deletes nothing;
-- **registration**: a first sign-up writes the player row and the entry in one transaction, and neither survives
-  if the other fails; a second registration is idempotent; a later tournament needs no profile argument;
-  withdrawal works only before start;
-- **`setdone` on an unfinished draft** imports nothing and leaves the set untouched;
-- **localization**: `from_discord_locale` maps `"zh-TW"` and only `"zh-TW"` to `Locale::ZhTw` — near-misses
-  differing by case, separator or prefix, an empty string, and an unrecognized future code all fall back to
-  `Locale::En`; one representative message per module renders differently in the two locales while preserving
-  the data interpolated into it; both panels render both languages.
+- **No live network.** `src/ranked.rs` has tests that call aoe4world, but they carry
+  `#[ignore = "hits the live aoe4world API"]`, so a default `cargo test` never runs them and CI does not depend
+  on that service being up. Follow that pattern if a live check is ever genuinely wanted; otherwise draft-API
+  and esports-leaderboard deserialization are tested against saved sample payloads.
+- **Bracket rendering asserts column alignment, not just a golden string.** Each `┐`, `├`, `│` and `┘` belonging
+  to one connector is checked at the same index — an off-by-one here is invisible when reading the code and
+  obvious to everyone looking at the output; the example in §8.6 shipped wrong at first for exactly this
+  reason.
 
 ## 11. Follow-ups
 
@@ -1894,16 +1835,6 @@ Tracked separately; not part of this design.
   a per-tournament `/tournament setup` toggle, defaulting to **must confirm** — a deliberate default change from
   today's fixed-seat-only behavior, made explicitly rather than by drifting the meaning of `invited_by` under
   existing tournaments.
-- **Bracket rendering breaks down for CJK names.** The ASCII-art connector grid needs every name padded to the
-  same display width to keep `┐`/`├`/`┘`/`│` in shared columns across rows (§8.6), and the width math is
-  provably correct against the Unicode East Asian Width standard (`unicode-width`, tested). It just isn't
-  portable: confirmed empirically (a calibrated ruler pasted into Discord) that one client renders CJK at ~1.95×
-  a Latin character's width rather than exactly 2×, and different clients/fonts have no reason to agree on a
-  ratio at all. A structural fix that keeps the width math but drops names from the shared grid (numbers in the
-  tree, names in a legend — the seeding panel already is one) was prototyped and rejected as too much of a
-  downgrade. The only fix that's actually portable is rendering the bracket as an image with a bundled,
-  fully-controlled font instead of a text code block — real scope (a rendering pipeline, a bundled CJK-capable
-  font, switching from a text message to a file attachment) and not started.
 - **Scheduling** — `tournament_sets.scheduled_at` exists and nothing writes or reads it. `/set schedule` was
   designed and then not built, because a stored time nobody acts on is not a schedule: it needs reminders and
   timezone handling to be worth the column.

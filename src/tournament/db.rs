@@ -1,9 +1,9 @@
 //! Row types and queries for the tournament schema.
 //!
 //! One section per table, in the same order as `migrations/0002_tournament_schema.sql`.
-//! Scope is deliberately general-purpose reads/writes, not the business logic later
-//! chunks build on top (bracket persistence, permission decisions, draft-preset
-//! validation, the re-import upsert) — those stay in the chunk that needs them.
+//! Scope is deliberately general-purpose reads/writes, not the business logic built
+//! on top (bracket persistence, permission decisions, draft-preset validation, the
+//! re-import upsert) — those stay in the module that needs them.
 
 use crate::tournament::bracket::Slot;
 use chrono::{DateTime, Utc};
@@ -896,9 +896,9 @@ pub(crate) async fn has_running_tournament_entry(pool: &SqlitePool, user_id: i64
 pub(crate) struct TournamentEntry {
     pub tournament_id: i64,
     pub user_id: i64,
-    /// Snapshotted from the player row at sign-up. `not null` since chunk
-    /// 32's own follow-on: every entry is bound the moment it is written,
-    /// whether by `register` or by `invite` resolving one immediately.
+    /// Snapshotted from the player row at sign-up. `not null` because every
+    /// entry is bound the moment it is written, whether by `register` or by
+    /// `invite` resolving one immediately.
     pub aoe4_id: i64,
     /// The admin who put them in the field, or `None` for a self-registered
     /// entrant. Being invited is a fact about one tournament, not about a player.

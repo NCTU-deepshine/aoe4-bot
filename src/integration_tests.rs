@@ -784,9 +784,9 @@ mod tests {
 
     #[tokio::test]
     async fn listing_live_tournaments_excludes_completed_and_canceled_ones() {
-        // Chunk 23's boot reconciliation must not repost panels for an event
-        // that has already finished — `list_live_tournaments` is the filter
-        // that keeps it from trying.
+        // Boot reconciliation must not repost panels for an event that has
+        // already finished — `list_live_tournaments` is the filter that
+        // keeps it from trying.
         let pool = test_pool().await;
         let registration_id = crate::tournament::db::insert_tournament(&pool, "registration-slug", "Registration", 1)
             .await
