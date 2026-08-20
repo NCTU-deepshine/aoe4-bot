@@ -1417,7 +1417,11 @@ pub(crate) async fn insert_set(
 ///
 /// `per_round` holds the resolved preset for each round in `bracket.rounds` order, so
 /// each round records the preset its drafts are created from — without it
-/// `set_thread::create_room` has no preset and no set ever gets a room.
+/// `set_thread::create_room` has no preset and no set ever gets a room. **Must be
+/// exactly `bracket.rounds.len()` long** — when a 3rd place round exists, the
+/// caller (`start::start`) is responsible for giving it one more entry (the
+/// semifinal's own preset) before calling this, since the 3rd place round itself
+/// resolves no preset of its own.
 pub(crate) async fn insert_bracket(
     pool: &SqlitePool,
     tournament_id: i64,
@@ -1447,7 +1451,13 @@ pub(crate) async fn insert_bracket(
     // (round ordinal, position) -> set id, for the linking pass below.
     let mut set_ids: std::collections::HashMap<(usize, usize), i64> = std::collections::HashMap::new();
 
-    for round in &bracket.rounds {
+    // Zipped rather than indexed by `round.ordinal - 1`: a 3rd place round's
+    // ordinal is `round_count + 1`, one past `per_round`'s own rounds, and the
+    // caller is the one responsible for extending `per_round` to match (with the
+    // semifinal's own preset) before calling this. Zipping means a caller that
+    // forgets loses the round entirely to the `debug_assert_eq!` above rather than
+    // silently indexing past the real presets into a NULL draft_preset_id.
+    for (round, preset) in bracket.rounds.iter().zip(per_round.iter()) {
         let round_id = sqlx::query(
             r"
             insert into tournament_rounds (stage_id, ordinal, name, best_of, draft_preset_id)
@@ -1458,7 +1468,7 @@ pub(crate) async fn insert_bracket(
         .bind(i64::try_from(round.ordinal).unwrap())
         .bind(&round.name)
         .bind(i64::from(round.best_of))
-        .bind(per_round.get(round.ordinal - 1).map(|p| p.draft_preset_id.as_str()))
+        .bind(preset.draft_preset_id.as_str())
         .execute(&mut *tx)
         .await
         .inspect_err(log_db_error)?
@@ -1486,33 +1496,61 @@ pub(crate) async fn insert_bracket(
         }
     }
 
+    // Winner and loser links are written independently — never behind a shared
+    // `continue` — so a set with one but not the other (every set has a winner
+    // link except the final and the 3rd place match; only the two semifinal sets
+    // have a loser link) never has the other silently skipped alongside it.
     for round in &bracket.rounds {
         for set in &round.sets {
-            let Some(advancement) = set.winner_advances_to else {
-                continue; // the final
-            };
-            let Some(target) = set_ids.get(&(advancement.round, advancement.position)) else {
-                continue;
-            };
-            let slot = match advancement.slot {
-                Slot::One => 1,
-                Slot::Two => 2,
-            };
-            sqlx::query(
-                r"
-                update tournament_sets
-                set
-                    winner_advances_to_set_id = ?1,
-                    winner_advances_to_slot = ?2
-                where id = ?3
-                ",
-            )
-            .bind(target)
-            .bind(slot)
-            .bind(set_ids[&(round.ordinal, set.position)])
-            .execute(&mut *tx)
-            .await
-            .inspect_err(log_db_error)?;
+            let set_id = set_ids[&(round.ordinal, set.position)];
+
+            if let Some(advancement) = set.winner_advances_to
+                && let Some(&target) = set_ids.get(&(advancement.round, advancement.position))
+            {
+                let slot = match advancement.slot {
+                    Slot::One => 1,
+                    Slot::Two => 2,
+                };
+                sqlx::query(
+                    r"
+                    update tournament_sets
+                    set
+                        winner_advances_to_set_id = ?1,
+                        winner_advances_to_slot = ?2
+                    where id = ?3
+                    ",
+                )
+                .bind(target)
+                .bind(slot)
+                .bind(set_id)
+                .execute(&mut *tx)
+                .await
+                .inspect_err(log_db_error)?;
+            }
+
+            if let Some(advancement) = set.loser_advances_to
+                && let Some(&target) = set_ids.get(&(advancement.round, advancement.position))
+            {
+                let slot = match advancement.slot {
+                    Slot::One => 1,
+                    Slot::Two => 2,
+                };
+                sqlx::query(
+                    r"
+                    update tournament_sets
+                    set
+                        loser_advances_to_set_id = ?1,
+                        loser_advances_to_slot = ?2
+                    where id = ?3
+                    ",
+                )
+                .bind(target)
+                .bind(slot)
+                .bind(set_id)
+                .execute(&mut *tx)
+                .await
+                .inspect_err(log_db_error)?;
+            }
         }
     }
 
@@ -1809,13 +1847,22 @@ pub(crate) struct SetResult {
 pub(crate) struct Advanced {
     /// False when the set was already decided — nothing was written at all.
     pub completed: bool,
+    /// Whether the *winner's* target became ready — never the loser's target
+    /// (the 3rd place match), so this keeps meaning "the next set in the main
+    /// bracket is now open" and completing a semifinal never claims to have
+    /// opened a set it only half-fed.
     pub target_became_ready: bool,
     pub tournament_completed: bool,
+    /// True when the set just settled was the 3rd place match — the other set
+    /// with no winner target, distinguished from the final by whether some other
+    /// set names it as a *loser* target.
+    pub is_third_place: bool,
 }
 
 /// Completing a set, **in one transaction**: the set is decided, the loser is
-/// eliminated, the winner is written into the next set, and that set opens if it
-/// now has both players.
+/// eliminated, the winner is written into the next set (and the loser into the
+/// 3rd place match, when this was a semifinal), and either target opens once it
+/// has both players.
 ///
 /// Assembled inline for the same reason `insert_bracket` is — `record_set_result`,
 /// `update_entry_status`, `set_slot` and `update_set_status` each take a
@@ -1860,6 +1907,7 @@ pub(crate) async fn complete_set_and_advance(pool: &SqlitePool, result: SetResul
             completed: false,
             target_became_ready: false,
             tournament_completed: false,
+            is_third_place: false,
         });
     }
 
@@ -1891,7 +1939,7 @@ pub(crate) async fn complete_set_and_advance(pool: &SqlitePool, result: SetResul
     .await
     .inspect_err(log_db_error)?;
 
-    let (mut target_became_ready, mut tournament_completed) = (false, false);
+    let (mut target_became_ready, mut tournament_completed, mut is_third_place) = (false, false, false);
     match advancement {
         Some((target, slot)) => {
             // The column name is chosen here, never bound — two static queries
@@ -1927,25 +1975,86 @@ pub(crate) async fn complete_set_and_advance(pool: &SqlitePool, result: SetResul
             .rows_affected()
                 > 0;
         },
-        // The advancement links form a single-rooted tree, so exactly one set has
-        // nowhere to send a winner: the final. The event ends with it.
+        // No winner target means either the final or the 3rd place match — the
+        // only two rootless sets. Distinguished structurally: a set that some
+        // *other* set names as a loser target is the 3rd place match; if nothing
+        // does, it's the final, and the event ends with it. Order-independent —
+        // whichever of the two is decided first, only the final flips the
+        // tournament's status.
         None => {
-            sqlx::query(
-                r"
-                update tournaments
-                set
-                    status = 'completed',
-                    completed_at = ?1
-                where id = ?2
-                ",
-            )
-            .bind(Utc::now())
-            .bind(result.tournament_id)
+            let is_loser_target: bool =
+                sqlx::query_scalar(r"select exists(select 1 from tournament_sets where loser_advances_to_set_id = ?1)")
+                    .bind(result.set_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .inspect_err(log_db_error)?;
+
+            if is_loser_target {
+                is_third_place = true;
+            } else {
+                sqlx::query(
+                    r"
+                    update tournaments
+                    set
+                        status = 'completed',
+                        completed_at = ?1
+                    where id = ?2
+                    ",
+                )
+                .bind(Utc::now())
+                .bind(result.tournament_id)
+                .execute(&mut *tx)
+                .await
+                .inspect_err(log_db_error)?;
+                tournament_completed = true;
+            }
+        },
+    }
+
+    // The loser's own advancement, symmetric to the winner's above but never
+    // touching `target_became_ready` — its target is the 3rd place match, not the
+    // next set in the main bracket.
+    let loser_advancement: Option<(i64, i64)> = sqlx::query_as(
+        r"
+        select loser_advances_to_set_id, loser_advances_to_slot
+        from tournament_sets
+        where id = ?1
+          and loser_advances_to_set_id is not null
+          and loser_advances_to_slot is not null
+        ",
+    )
+    .bind(result.set_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .inspect_err(log_db_error)?;
+
+    if let Some((target, slot)) = loser_advancement {
+        let sql = if slot == 1 {
+            r"update tournament_sets set slot1_user_id = ?1 where id = ?2"
+        } else {
+            r"update tournament_sets set slot2_user_id = ?1 where id = ?2"
+        };
+        sqlx::query(sql)
+            .bind(result.loser_user_id)
+            .bind(target)
             .execute(&mut *tx)
             .await
             .inspect_err(log_db_error)?;
-            tournament_completed = true;
-        },
+
+        sqlx::query(
+            r"
+            update tournament_sets
+            set status = 'ready'
+            where id = ?1
+              and status = 'pending'
+              and slot1_user_id is not null
+              and slot2_user_id is not null
+            ",
+        )
+        .bind(target)
+        .execute(&mut *tx)
+        .await
+        .inspect_err(log_db_error)?;
     }
 
     tx.commit().await.inspect_err(log_db_error)?;
@@ -1953,6 +2062,7 @@ pub(crate) async fn complete_set_and_advance(pool: &SqlitePool, result: SetResul
         completed: true,
         target_became_ready,
         tournament_completed,
+        is_third_place,
     })
 }
 

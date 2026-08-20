@@ -36,8 +36,20 @@ const NAME_WIDTH: usize = 30;
 
 /// `R1M1 · MarineLorD vs Beasty`, inside Discord's 100-character limit.
 pub(crate) fn thread_name(round_ordinal: i64, position: i64, one: &str, two: &str) -> String {
+    prefixed_thread_name(&format!("R{round_ordinal}M{position}"), one, two)
+}
+
+/// `3rd Place · MarineLorD vs Beasty` — its own label rather than a fabricated
+/// round number: the match plays alongside the round before it, not as a round
+/// of its own, so `R{ordinal}M{position}` would misname it.
+pub(crate) fn third_place_thread_name(position: i64, one: &str, two: &str) -> String {
+    prefixed_thread_name(&format!("3rd Place M{position}"), one, two)
+}
+
+/// The width-fitting and length-limiting both thread-name functions share.
+fn prefixed_thread_name(prefix: &str, one: &str, two: &str) -> String {
     let name = format!(
-        "R{round_ordinal}M{position} · {} vs {}",
+        "{prefix} · {} vs {}",
         render::fit(one, NAME_WIDTH).trim_end(),
         render::fit(two, NAME_WIDTH).trim_end()
     );
@@ -257,8 +269,10 @@ pub(crate) fn render_completed_panel(
         escape(&loser.name)
     );
     let score = format!("{}-{}", tally.slot1_wins, tally.slot2_wins);
-    let result = match settlement {
-        Settlement::Played => format!(
+    // Same reasoning as `render_result`: a 3rd place win is a podium finish, not
+    // an advance.
+    let result = match (settlement, set.is_third_place) {
+        (Settlement::Played, false) => format!(
             "🏁 **{}** 以 {score} 擊敗 **{}**，已晉級。\n\
              🏁 **{}** beat **{}** {score} and advances.",
             escape(&winner.name),
@@ -266,9 +280,25 @@ pub(crate) fn render_completed_panel(
             escape(&winner.name),
             escape(&loser.name)
         ),
-        Settlement::Walkover => format!(
+        (Settlement::Played, true) => format!(
+            "🏁 **{}** 以 {score} 擊敗 **{}**，獲得季軍。\n\
+             🏁 **{}** beat **{}** {score} and takes 3rd place.",
+            escape(&winner.name),
+            escape(&loser.name),
+            escape(&winner.name),
+            escape(&loser.name)
+        ),
+        (Settlement::Walkover, false) => format!(
             "🏁 已將此對戰判給 **{}**（{score}）——**{}** 未完賽。\n\
              🏁 Awarded to **{}** ({score}) — **{}** didn't play it out.",
+            escape(&winner.name),
+            escape(&loser.name),
+            escape(&winner.name),
+            escape(&loser.name)
+        ),
+        (Settlement::Walkover, true) => format!(
+            "🏁 已將季軍判給 **{}**（{score}）——**{}** 未完賽。\n\
+             🏁 Awarded 3rd place to **{}** ({score}) — **{}** didn't play it out.",
             escape(&winner.name),
             escape(&loser.name),
             escape(&winner.name),
@@ -322,6 +352,11 @@ pub(crate) struct SetHeading {
     pub round_name: String,
     pub position: i64,
     pub best_of: i64,
+    /// Whether this is the 3rd place match rather than a set on the path to the
+    /// final — presentation-only (unlike `redraft`/`completion`'s termination
+    /// logic, which stays structural): it decides whether the result reads as an
+    /// "advance" or a podium finish.
+    pub is_third_place: bool,
 }
 
 /// A set's occupant, as the panel needs them.
@@ -380,14 +415,16 @@ pub(crate) async fn open(
     // names it needs, and a 32-entrant list to find two of them is waste.
     let one = player(pool, tournament.id, slot1).await?;
     let two = player(pool, tournament.id, slot2).await?;
+    let is_third_place = round.name == bracket::THIRD_PLACE;
 
     let channel_id = to_channel_id(matches_channel_id);
+    let name = if is_third_place {
+        third_place_thread_name(set.position, &one.name, &two.name)
+    } else {
+        thread_name(round.ordinal, set.position, &one.name, &two.name)
+    };
     let thread = channel_id
-        .create_thread(
-            &http,
-            CreateThread::new(thread_name(round.ordinal, set.position, &one.name, &two.name))
-                .kind(ChannelType::PrivateThread),
-        )
+        .create_thread(&http, CreateThread::new(name).kind(ChannelType::PrivateThread))
         .await?;
     db::set_thread(pool, set.id, crate::db::to_db_id(thread.id)).await?;
 
@@ -404,6 +441,7 @@ pub(crate) async fn open(
         round_name: round.name.clone(),
         position: set.position,
         best_of: round.best_of,
+        is_third_place,
     };
     let (content, components) = render_panel(&heading, &one, &two, None);
     let message = thread
@@ -468,15 +506,27 @@ pub(crate) fn render_result(
     let round = bracket::round_name_bilingual(&set.round_name);
     // A walkover says so rather than reading as a win nobody watched: the two
     // players know it was not played out, and the record should agree with them.
-    let verdict = match settlement {
-        Settlement::Played => format!(
+    // A 3rd place win reads as a podium finish, never as "advancing" — there is
+    // nothing after it to advance into.
+    let verdict = match (settlement, set.is_third_place) {
+        (Settlement::Played, false) => format!(
             "**{winner_name}** (#{}) 獲勝，晉級下一輪。 / **{winner_name}** (#{}) wins and advances.\n\
              感謝 **{loser_name}** (#{}) 的參賽。 / Thanks for playing, **{loser_name}** (#{}).",
             winner.seed, winner.seed, loser.seed, loser.seed
         ),
-        Settlement::Walkover => format!(
+        (Settlement::Played, true) => format!(
+            "**{winner_name}** (#{}) 獲得季軍。 / **{winner_name}** (#{}) takes 3rd place.\n\
+             感謝 **{loser_name}** (#{}) 的參賽。 / Thanks for playing, **{loser_name}** (#{}).",
+            winner.seed, winner.seed, loser.seed, loser.seed
+        ),
+        (Settlement::Walkover, false) => format!(
             "由管理員判給 **{winner_name}** (#{}) 晉級，**{loser_name}** 未完賽。 / \
              Awarded to **{winner_name}** (#{}) — **{loser_name}** didn't play it out.",
+            winner.seed, winner.seed
+        ),
+        (Settlement::Walkover, true) => format!(
+            "由管理員判給 **{winner_name}** (#{}) 季軍，**{loser_name}** 未完賽。 / \
+             Awarded 3rd place to **{winner_name}** (#{}) — **{loser_name}** didn't play it out.",
             winner.seed, winner.seed
         ),
     };
@@ -518,6 +568,7 @@ pub(crate) async fn close(
         round_name: round.name.clone(),
         position: set.position,
         best_of: round.best_of,
+        is_third_place: round.name == bracket::THIRD_PLACE,
     };
 
     // Posted before the lock, not after: a locked thread is a bad place to try to
@@ -740,6 +791,7 @@ mod tests {
             round_name: round_name.to_string(),
             position,
             best_of,
+            is_third_place: round_name == bracket::THIRD_PLACE,
         }
     }
 
@@ -753,6 +805,32 @@ mod tests {
     #[test]
     fn a_thread_name_reads_as_round_and_match() {
         assert_eq!(thread_name(1, 1, "MarineLorD", "Beasty"), "R1M1 · MarineLorD vs Beasty");
+    }
+
+    #[test]
+    fn a_third_place_thread_is_named_by_its_own_label_not_a_fabricated_round() {
+        // A 4-entrant bracket has no round after the final, so `R{ordinal}M{position}`
+        // would misname this match — it plays alongside the semifinal, not as a
+        // round of its own.
+        assert_eq!(
+            third_place_thread_name(1, "MarineLorD", "Beasty"),
+            "3rd Place M1 · MarineLorD vs Beasty"
+        );
+        assert!(
+            third_place_thread_name(1, "A", "B").starts_with("3rd Place"),
+            "no fabricated round number"
+        );
+    }
+
+    #[test]
+    fn a_third_place_thread_name_stays_within_the_cjk_width_limit() {
+        let name = third_place_thread_name(1, &"賽".repeat(200), &"程".repeat(200));
+        assert!(
+            name.chars().count() <= NAME_LIMIT,
+            "{} chars: {name}",
+            name.chars().count()
+        );
+        assert!(name.contains("賽"), "{name}");
     }
 
     #[test]
@@ -1102,6 +1180,39 @@ mod tests {
     }
 
     #[test]
+    fn a_3rd_place_win_reads_as_a_podium_finish_rather_than_an_advance() {
+        let content = render_result(
+            &heading(1, bracket::THIRD_PLACE, 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &tally(2, 1),
+            Settlement::Played,
+        );
+        assert!(!content.contains("advances"), "{content}");
+        assert!(!content.contains("晉級"), "{content}");
+        assert!(content.contains("3rd place"), "{content}");
+        assert!(content.contains("季軍"), "{content}");
+        assert!(
+            content.contains("MarineLorD") && content.contains("Beasty"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn an_awarded_3rd_place_match_names_it_as_such() {
+        let content = render_result(
+            &heading(1, bracket::THIRD_PLACE, 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &tally(1, 0),
+            Settlement::Walkover,
+        );
+        assert!(!content.contains("advances"), "{content}");
+        assert!(content.contains("Awarded 3rd place"), "{content}");
+        assert!(content.contains("判給") && content.contains("季軍"), "{content}");
+    }
+
+    #[test]
     fn a_name_carrying_markdown_is_escaped_in_the_result() {
         // Mention syntax is a separate defence: `escape` deliberately leaves `<`
         // and `@` alone, and `close` sends with empty `allowed_mentions`, so a
@@ -1148,6 +1259,21 @@ mod tests {
         assert!(!content.contains("beat"), "{content}");
         assert!(content.contains("Awarded to"), "{content}");
         assert!(content.contains("判給"), "{content}");
+    }
+
+    #[test]
+    fn a_completed_3rd_place_panel_says_so_rather_than_claiming_an_advance() {
+        let content = render_completed_panel(
+            &heading(1, bracket::THIRD_PLACE, 1, 3),
+            &player(7, 1, "MarineLorD"),
+            &player(9, 8, "Beasty"),
+            &tally(2, 1),
+            Settlement::Played,
+        );
+        assert!(!content.contains("advances"), "{content}");
+        assert!(!content.contains("晉級"), "{content}");
+        assert!(content.contains("3rd place"), "{content}");
+        assert!(content.contains("季軍"), "{content}");
     }
 
     #[test]

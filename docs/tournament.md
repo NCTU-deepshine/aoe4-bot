@@ -586,8 +586,9 @@ create table if not exists tournament_entries (
 );
 
 -- 6. a set = one Bo_N meeting between two entrants.
---    loser_advances_to_* is unused by single elimination but present so
---    double elimination needs no migration.
+--    loser_advances_to_* was originally scaffolding for double elimination, put
+--    to its first real use by the 3rd place match (§5): the two semifinal
+--    losers are its only writers today, and it stays unwritten everywhere else.
 create table if not exists tournament_sets (
   id integer primary key autoincrement,
   tournament_id integer not null references tournaments(id) on delete cascade,
@@ -727,6 +728,13 @@ Pure functions, no database access, so this is unit-testable in isolation.
    computes an order itself and an organizer override is respected by construction. It takes a *count*, not a
    list — seeds are required to be 1..=n and contiguous by then (§8.3) — and returns seeds for the caller to map
    back to entrants.
+7. **A 3rd place match is appended** after the last round, one set, when the semifinal has two real
+   contestants — i.e. whenever the semifinal is not itself a bye (only possible with exactly 3 entrants, since a
+   semifinal beyond round one always fills both slots). Its `best_of` is the semifinal's own value, not a
+   separate configuration surface, and both semifinal sets' losers feed it via `loser_advances_to_set_id`/
+   `loser_advances_to_slot` — the columns noted in §4 as scaffolding for double elimination, put to their first
+   real use here. It has no `winner_advances_to` of its own, same as the final, so the bracket has **two**
+   rootless sets once one exists; see §7 for how completion tells them apart.
 
 ## 6. Ratings and seeding
 
@@ -888,8 +896,16 @@ Because the draft tool is authoritative, an on-demand sync of an unfinished draf
   the round is configured — so there is no rounding to argue about and no threshold of our own to keep in step
   with the tool's.
 - Set `winner_user_id`, `completed_at`, `status = 'completed'`; mark the loser's entry `eliminated`.
-- Write the winner into `winner_advances_to_set_id` at `winner_advances_to_slot`.
-- Flip that target set from `pending` to `ready` once both its slots are filled.
+- Write the winner into `winner_advances_to_set_id` at `winner_advances_to_slot`, and — symmetrically, when the
+  set has one (only the two semifinal sets do, §5) — the loser into `loser_advances_to_set_id` at
+  `loser_advances_to_slot`.
+- Flip either target set from `pending` to `ready` once both its slots are filled. Only the *winner's* target
+  flipping is reported as "the next set is open" — the loser's target is the 3rd place match, not a step deeper
+  into the main bracket.
+- **Telling the final apart from the 3rd place match**, since both have no `winner_advances_to_set_id`: a set
+  that no other set names as a *loser* target is the final; one that some other set does is the 3rd place match.
+  Whichever settles is checked against this before deciding whether to flip `tournaments.status = 'completed'` —
+  only the final does, order-independent of whether the 3rd place match has been played yet.
 
 **Prefer the draft's `score` over recomputing from games.** If the two disagree, flag it for an organizer rather
 than silently choosing one — a mismatch means either our import or their state machine is wrong, and both are
@@ -1425,6 +1441,12 @@ distinguishable from "0-2 down".
 
 **No seeds in the graph.** A seed prefix costs two or three of a name cell's twelve columns, which is what forces
 an ordinary name into an ellipsis. Seeds stay in the per-round list view below, where there is room.
+
+**The 3rd place match (§5), when one exists, never enters the tree.** The connector grid's row and column math
+assumes a perfect binary tree — appending an off-tree round there is a bug, not a smaller drawing — so it is
+peeled out before rendering and appended afterward as its own `render_round_list`-style line, on the last
+chunk, alongside the champion line. The one production use `render_round_list` has, having otherwise sat as
+tested but uncalled code since 8.6's mobile fallback below was written.
 
 Four constraints, all easy to miss and all visible in production if missed:
 

@@ -265,6 +265,37 @@ fn played_match(set: &TournamentSet, entries: &[TournamentEntry]) -> render::Mat
     }
 }
 
+/// Pulls the 3rd place round out of a drawing's rounds, if one exists, so
+/// `render::grid`'s perfect-binary-tree layout never sees it — appending it there
+/// panics, since the row-budget and column math both assume a power-of-two leaf
+/// count. It is rendered separately instead, as a standalone line below the tree
+/// (see `third_place_line`).
+///
+/// The 3rd place round, when `bracket::build` produces one, is always last —
+/// both here (`played_rounds` preserves ordinal order, and its ordinal is the
+/// highest) and in a preview — so checking only the last round is enough.
+fn split_third_place(mut rounds: Vec<render::Round>) -> (Vec<render::Round>, Option<render::Round>) {
+    match rounds.last() {
+        Some(round) if round.name == bracket::THIRD_PLACE => {
+            let third_place = rounds.pop();
+            (rounds, third_place)
+        },
+        _ => (rounds, None),
+    }
+}
+
+/// The 3rd place match as its own line, localized. Reuses
+/// `render::render_round_list` — otherwise dead code outside its own tests — on a
+/// copy of the round with its name swapped for the bilingual form first:
+/// `render.rs` itself stays locale-blind, so this is the one place that localizes.
+fn third_place_line(round: render::Round) -> String {
+    let localized = render::Round {
+        name: bracket::round_name_bilingual(&round.name),
+        matches: round.matches,
+    };
+    format!("\n{}", render::render_round_list(&localized))
+}
+
 /// Which drawing this is, which is what the heading above it has to say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Drawing {
@@ -408,11 +439,22 @@ async fn reconcile_inner(
             None => return Ok(ReconcileOutcome::TooFewEntrants),
         },
     };
-    let chunks = decorate(
+    // Peeled out once, here — everything below this line, tree or image, must
+    // never hand the 3rd place round to `render::grid`.
+    let (rounds, third_place) = split_third_place(rounds);
+    let third_place_line = third_place.map(third_place_line);
+
+    let mut chunks = decorate(
         &tournament.name,
         render::render(&rounds, render::DEFAULT_WIDTH),
         drawing,
     );
+    // On the last chunk, alongside where the champion line lands for the image
+    // path below — not `chunks[0]`, which may not even be the chunk holding the
+    // final.
+    if let (Some(line), Some(last)) = (&third_place_line, chunks.last_mut()) {
+        last.push_str(line);
+    }
 
     // Only a bracket that already fits one Discord message gets the image
     // treatment (`docs/bracket-image.md` §2) — a larger one keeps the text
@@ -433,13 +475,15 @@ async fn reconcile_inner(
     } else {
         None
     };
-    // The heading and the champion line, not the fenced grid — an image has
-    // nowhere to put markdown of its own, so both stay in `content` instead.
+    // The heading, the champion line and the 3rd place line, not the fenced
+    // grid — an image has nowhere to put markdown of its own, so all three stay
+    // in `content` instead.
     let image_content = image.is_some().then(|| {
         format!(
-            "{}{}",
+            "{}{}{}",
             heading(&tournament.name, drawing),
-            render::champion_line(&rounds)
+            render::champion_line(&rounds),
+            third_place_line.as_deref().unwrap_or_default()
         )
     });
 
@@ -631,7 +675,7 @@ mod tests {
         // Three of eight invited. Without padding this is a 4-bracket that will
         // reshape twice more; with it the organizer sees the eight seats they
         // are actually filling.
-        let rounds = preview_rounds(&field(3), Some(8)).unwrap();
+        let (rounds, _) = split_third_place(preview_rounds(&field(3), Some(8)).unwrap());
         assert_eq!(rounds.len(), 3, "an 8-bracket is three rounds");
         assert_eq!(rounds[0].matches.len(), 4);
 
@@ -675,7 +719,7 @@ mod tests {
     fn an_invite_only_bracket_is_drawn_before_anyone_is_in_it() {
         // The whole target field, every seat open. This is what an organizer sees
         // the moment they mark an event invite-only, and it fills in from there.
-        let rounds = preview_rounds(&[], Some(8)).unwrap();
+        let (rounds, _) = split_third_place(preview_rounds(&[], Some(8)).unwrap());
         assert_eq!(rounds.len(), 3);
         let names: Vec<&str> = drawn(&rounds).into_iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names.len(), 8);
@@ -696,7 +740,7 @@ mod tests {
     fn a_field_larger_than_its_cap_grows_the_bracket_rather_than_dropping_anyone() {
         // Reachable only by lowering the cap under a field that already exists.
         // Nobody may vanish from the drawing over it.
-        let rounds = preview_rounds(&field(5), Some(4)).unwrap();
+        let (rounds, _) = split_third_place(preview_rounds(&field(5), Some(4)).unwrap());
         assert_eq!(rounds.len(), 3, "five entrants still need an 8-bracket");
         assert_eq!(drawn(&rounds).len(), 5);
     }
@@ -712,7 +756,7 @@ mod tests {
     #[test]
     fn a_field_that_is_not_a_power_of_two_gets_byes_on_the_top_seeds() {
         // 5 entrants play an 8-bracket, so seeds 1, 2 and 3 are unopposed.
-        let rounds = preview_rounds(&field(5), None).unwrap();
+        let (rounds, _) = split_third_place(preview_rounds(&field(5), None).unwrap());
         assert_eq!(rounds.len(), 3);
 
         let unopposed: Vec<u32> = rounds[0]
@@ -987,20 +1031,33 @@ mod tests {
     fn starting_does_not_visibly_redraw_the_tree() {
         // The preview and the real bracket of the same field are the same
         // shape, so `/tournament start` only changes the label and the scores.
+        // Both sides carry a 3rd place round too — added to the `played` fixture
+        // deliberately, so this test actually exercises the peel on both, rather
+        // than comparing two trees that happen to have nothing to peel.
         let entries = seeded_field(4);
-        let preview = preview_rounds(&entries, None).unwrap();
-        let played = played_rounds(
-            &[round(10, 1, "Semifinal"), round(11, 2, "Final")],
+        let (preview, preview_third) = split_third_place(preview_rounds(&entries, None).unwrap());
+        let (played, played_third) = split_third_place(played_rounds(
+            &[
+                round(10, 1, "Semifinal"),
+                round(11, 2, "Final"),
+                round(12, 3, "Third Place"),
+            ],
             &[
                 set(100, 10, 1, Some(1), Some(4)),
                 set(101, 10, 2, Some(2), Some(3)),
                 set(102, 11, 1, None, None),
+                set(103, 12, 1, None, None),
             ],
             &entries,
-        );
+        ));
 
         let shape = |rounds: &[render::Round]| rounds.iter().map(|r| r.matches.len()).collect::<Vec<_>>();
         assert_eq!(shape(&preview), shape(&played));
+        assert!(
+            preview_third.is_some(),
+            "a 4-entrant field always has a 3rd place match"
+        );
+        assert!(played_third.is_some());
     }
 
     #[test]
@@ -1044,7 +1101,7 @@ mod tests {
     fn a_large_field_splits_into_several_messages() {
         // The split starts at 16, which is what makes the message count
         // vary with the field and `reconcile` necessary.
-        let rounds = preview_rounds(&field(16), None).unwrap();
+        let (rounds, _) = split_third_place(preview_rounds(&field(16), None).unwrap());
         let chunks = render::render(&rounds, render::DEFAULT_WIDTH);
         assert!(chunks.len() > 1, "16 entrants should not fit one message");
         assert!(chunks.iter().all(|c| c.len() <= 2000));

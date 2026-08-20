@@ -15,13 +15,17 @@ pub(crate) enum Slot {
     Two,
 }
 
-/// Where a set's winner goes. `None` only on the final.
+/// Where a set's winner or loser goes next.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Advancement {
     pub(crate) round: usize,
     pub(crate) position: usize,
     pub(crate) slot: Slot,
 }
+
+/// The 3rd place round's name, shared by generation, localization and every
+/// presentational branch that needs to recognize it — one literal so they can't drift.
+pub(crate) const THIRD_PLACE: &str = "Third Place";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Set {
@@ -31,7 +35,12 @@ pub(crate) struct Set {
     /// results land, and an absent seed in round one is what leaves a bye.
     pub(crate) slot1: Option<u32>,
     pub(crate) slot2: Option<u32>,
+    /// `None` only on the final and the 3rd place match — neither sends its winner
+    /// anywhere else.
     pub(crate) winner_advances_to: Option<Advancement>,
+    /// `Some` only on the two semifinal sets, pointing at the 3rd place match: single
+    /// elimination otherwise has nothing for a loser to do.
+    pub(crate) loser_advances_to: Option<Advancement>,
 }
 
 impl Set {
@@ -112,7 +121,9 @@ pub(crate) fn seed_order(size: usize) -> Vec<u32> {
 ///
 /// `entrants` is a count, not a list, because seeds are required to be 1..=n and
 /// contiguous before generation runs — this returns seeds and the caller maps
-/// them back to entrants. `best_of` carries one value per round, outermost first.
+/// them back to entrants. `best_of` carries one value per round, outermost first —
+/// the appended 3rd place round, when one exists, reuses the semifinal's own value
+/// rather than requiring an extra entry.
 pub(crate) fn build(entrants: usize, best_of: &[u8]) -> Result<Bracket, BracketError> {
     if entrants < 2 {
         return Err(BracketError::TooFewEntrants(entrants));
@@ -132,7 +143,7 @@ pub(crate) fn build(entrants: usize, best_of: &[u8]) -> Result<Bracket, BracketE
     // opponent unopposed. Reflection puts those against the top seeds.
     let seated = |seed: u32| (seed as usize <= entrants).then_some(seed);
 
-    let rounds = (1..=round_count)
+    let mut rounds: Vec<Round> = (1..=round_count)
         .map(|ordinal| {
             let set_count = size >> ordinal;
             let last = ordinal == round_count;
@@ -157,6 +168,7 @@ pub(crate) fn build(entrants: usize, best_of: &[u8]) -> Result<Bracket, BracketE
                             position: position.div_ceil(2),
                             slot: if position % 2 == 1 { Slot::One } else { Slot::Two },
                         }),
+                        loser_advances_to: None,
                     }
                 })
                 .collect();
@@ -169,6 +181,44 @@ pub(crate) fn build(entrants: usize, best_of: &[u8]) -> Result<Bracket, BracketE
             }
         })
         .collect();
+
+    // The 3rd place match: the two semifinal losers play each other, using the
+    // semifinal's own best_of. `round_count >= 2` is checked before indexing back
+    // into `rounds` — with only one round there is no semifinal to take it from.
+    // Skipped when a semifinal set is a bye, since a bye leaves only one loser to
+    // fill the match (only possible when round_count == 2, i.e. 3 entrants — for
+    // round_count >= 3 every semifinal set always fills both slots).
+    if round_count >= 2 {
+        let semifinal_ordinal = round_count - 1;
+        let semifinal = &mut rounds[semifinal_ordinal - 1];
+        if !semifinal.sets[0].is_bye() && !semifinal.sets[1].is_bye() {
+            let third_place_ordinal = round_count + 1;
+            let semifinal_best_of = semifinal.best_of;
+            semifinal.sets[0].loser_advances_to = Some(Advancement {
+                round: third_place_ordinal,
+                position: 1,
+                slot: Slot::One,
+            });
+            semifinal.sets[1].loser_advances_to = Some(Advancement {
+                round: third_place_ordinal,
+                position: 1,
+                slot: Slot::Two,
+            });
+
+            rounds.push(Round {
+                ordinal: third_place_ordinal,
+                name: THIRD_PLACE.to_owned(),
+                best_of: semifinal_best_of,
+                sets: vec![Set {
+                    position: 1,
+                    slot1: None,
+                    slot2: None,
+                    winner_advances_to: None,
+                    loser_advances_to: None,
+                }],
+            });
+        }
+    }
 
     Ok(Bracket { rounds })
 }
@@ -198,6 +248,7 @@ pub(crate) fn localize_round_name(name: &str, locale: Locale) -> String {
         (Locale::ZhTw, "Final") => "決賽".to_owned(),
         (Locale::ZhTw, "Semifinal") => "準決賽".to_owned(),
         (Locale::ZhTw, "Quarterfinal") => "八強".to_owned(),
+        (Locale::ZhTw, THIRD_PLACE) => "季軍賽".to_owned(),
         _ => name.to_owned(),
     }
 }
@@ -214,7 +265,7 @@ pub(crate) fn round_name_bilingual(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Advancement, Bracket, BracketError, Slot, build, round_count, seed_order, size};
+    use super::{Advancement, Bracket, BracketError, Slot, THIRD_PLACE, build, round_count, seed_order, size};
 
     /// Round one as seed pairs, `None` for an absent seed.
     fn pairings(bracket: &Bracket) -> Vec<(Option<u32>, Option<u32>)> {
@@ -381,10 +432,11 @@ mod tests {
             })
         );
 
-        // Round two is the real field: eight players, then four, then the final.
-        assert_eq!(bracket.rounds.len(), 4);
+        // Round two is the real field: eight players, then four, then the final —
+        // plus the 3rd place match, since round two's semifinal has no bye.
+        assert_eq!(bracket.rounds.len(), 5);
         let set_counts: Vec<usize> = bracket.rounds.iter().map(|round| round.sets.len()).collect();
-        assert_eq!(set_counts, vec![8, 4, 2, 1]);
+        assert_eq!(set_counts, vec![8, 4, 2, 1, 1]);
     }
 
     #[test]
@@ -407,32 +459,35 @@ mod tests {
     #[test]
     fn advancement_links_form_one_rooted_tree() {
         let bracket = bracket_for(16);
-        let rounds = bracket.rounds.len();
+        // The 3rd place match sits last and is fed by losers, not winners, so it is
+        // excluded from the winner-advancement tree checked below and verified
+        // separately.
+        let tree_rounds = &bracket.rounds[..bracket.rounds.len() - 1];
+        let rounds = tree_rounds.len();
 
-        // Exactly one root: the final, which advances nowhere.
-        let rootless: Vec<&super::Set> = bracket
-            .rounds
+        // Exactly one root in the winner tree: the final, which advances nowhere.
+        let rootless: Vec<&super::Set> = tree_rounds
             .iter()
             .flat_map(|round| &round.sets)
             .filter(|set| set.winner_advances_to.is_none())
             .collect();
         assert_eq!(rootless.len(), 1);
         assert_eq!(rootless[0].position, 1);
-        assert_eq!(bracket.rounds[rounds - 1].sets.len(), 1);
+        assert_eq!(tree_rounds[rounds - 1].sets.len(), 1);
 
         // And every slot of every later set is fed exactly once.
         for round in 2..=rounds {
-            let mut fed: Vec<(usize, Slot)> = bracket.rounds[round - 2]
+            let mut fed: Vec<(usize, Slot)> = tree_rounds[round - 2]
                 .sets
                 .iter()
                 .map(|set| {
-                    let target = set.winner_advances_to.expect("only the final has no target");
+                    let target = set.winner_advances_to.expect("only the final has no winner target");
                     assert_eq!(target.round, round, "a winner may only advance one round");
                     (target.position, target.slot)
                 })
                 .collect();
 
-            let mut expected: Vec<(usize, Slot)> = (1..=bracket.rounds[round - 1].sets.len())
+            let mut expected: Vec<(usize, Slot)> = (1..=tree_rounds[round - 1].sets.len())
                 .flat_map(|position| [(position, Slot::One), (position, Slot::Two)])
                 .collect();
 
@@ -440,6 +495,31 @@ mod tests {
             expected.sort_by_key(|&(position, slot)| (position, slot == Slot::Two));
             assert_eq!(fed, expected, "round {round} is not fed exactly once per slot");
         }
+
+        // The 3rd place match is the tree's other rootless set — fed by losers
+        // rather than winners — and both semifinal losers feed it, into slots one
+        // and two respectively.
+        let third_place = bracket.rounds.last().expect("a 16-entrant field has one");
+        assert_eq!(third_place.name, super::THIRD_PLACE);
+        assert!(third_place.sets[0].winner_advances_to.is_none());
+
+        let semifinal = &tree_rounds[rounds - 2];
+        assert_eq!(
+            semifinal.sets[0].loser_advances_to,
+            Some(Advancement {
+                round: rounds + 1,
+                position: 1,
+                slot: Slot::One
+            })
+        );
+        assert_eq!(
+            semifinal.sets[1].loser_advances_to,
+            Some(Advancement {
+                round: rounds + 1,
+                position: 1,
+                slot: Slot::Two
+            })
+        );
     }
 
     #[test]
@@ -473,21 +553,30 @@ mod tests {
     }
 
     #[test]
-    fn a_single_elimination_bracket_has_one_set_fewer_than_its_size() {
-        for entrants in [2, 3, 4, 6, 8, 16] {
+    fn a_single_elimination_bracket_has_one_set_fewer_than_its_size_unless_a_third_place_match_exists() {
+        // A 3rd place match adds the set back. Absent for 2 (no semifinal to take a
+        // loser from) and 3 (the semifinal itself is a bye); present everywhere else.
+        for (entrants, has_third_place) in [(2, false), (3, false), (4, true), (6, true), (8, true), (16, true)] {
             let bracket = bracket_for(entrants);
             let sets: usize = bracket.rounds.iter().map(|round| round.sets.len()).sum();
-            assert_eq!(sets, size(entrants) - 1, "for {entrants} entrants");
+            let expected = if has_third_place {
+                size(entrants)
+            } else {
+                size(entrants) - 1
+            };
+            assert_eq!(sets, expected, "for {entrants} entrants");
         }
     }
 
     #[test]
     fn best_of_is_per_round() {
         // The case per-round `best_of` exists for: a Bo3 bracket with a Bo5 final.
+        // The 3rd place match takes the semifinal's own value (3) rather than an
+        // extra entry in the input slice.
         let bracket = build(8, &[3, 3, 5]).expect("a valid field");
 
         let lengths: Vec<u8> = bracket.rounds.iter().map(|round| round.best_of).collect();
-        assert_eq!(lengths, vec![3, 3, 5]);
+        assert_eq!(lengths, vec![3, 3, 5, 3]);
     }
 
     #[test]
@@ -500,11 +589,19 @@ mod tests {
                 .collect()
         };
 
+        // No semifinal to take a loser from.
         assert_eq!(names(2), vec!["Final"]);
+        // The semifinal itself is a bye, so there's only one loser — no match for them.
         assert_eq!(names(3), vec!["Semifinal", "Final"]);
-        assert_eq!(names(6), vec!["Quarterfinal", "Semifinal", "Final"]);
-        assert_eq!(names(16), vec!["Ro16", "Quarterfinal", "Semifinal", "Final"]);
-        assert_eq!(names(17), vec!["Ro32", "Ro16", "Quarterfinal", "Semifinal", "Final"]);
+        assert_eq!(names(6), vec!["Quarterfinal", "Semifinal", "Final", "Third Place"]);
+        assert_eq!(
+            names(16),
+            vec!["Ro16", "Quarterfinal", "Semifinal", "Final", "Third Place"]
+        );
+        assert_eq!(
+            names(17),
+            vec!["Ro32", "Ro16", "Quarterfinal", "Semifinal", "Final", "Third Place"]
+        );
     }
 
     #[test]
@@ -568,5 +665,59 @@ mod tests {
             build(8, &[]),
             Err(BracketError::RoundCountMismatch { rounds: 3, best_of: 0 })
         );
+    }
+
+    // The 3rd place match.
+
+    #[test]
+    fn a_third_place_match_is_absent_with_no_semifinal_or_a_bye_one() {
+        // 2 entrants: only a final, no semifinal to take a loser from.
+        assert!(!bracket_for(2).rounds.iter().any(|round| round.name == THIRD_PLACE));
+        // 3 entrants: the semifinal is itself a bye, leaving only one loser.
+        let three = bracket_for(3);
+        assert!(!three.rounds.iter().any(|round| round.name == THIRD_PLACE));
+        assert!(three.rounds[0].sets.iter().any(|set| set.is_bye()));
+    }
+
+    #[test]
+    fn a_third_place_match_exists_whenever_the_semifinal_has_two_real_losers() {
+        for entrants in [4, 6, 8, 16] {
+            let bracket = bracket_for(entrants);
+            let third_place = bracket
+                .rounds
+                .iter()
+                .find(|round| round.name == THIRD_PLACE)
+                .unwrap_or_else(|| panic!("expected a 3rd place match for {entrants} entrants"));
+            assert_eq!(third_place.sets.len(), 1);
+            assert_eq!(third_place.sets[0].position, 1);
+            assert!(third_place.sets[0].slot1.is_none());
+            assert!(third_place.sets[0].slot2.is_none());
+            assert!(third_place.sets[0].winner_advances_to.is_none());
+
+            // Its best_of is the semifinal's own, not a new configuration surface.
+            let semifinal = bracket.rounds[bracket.rounds.len() - 3].clone();
+            assert_eq!(third_place.best_of, semifinal.best_of, "for {entrants} entrants");
+
+            // Both semifinal losers feed it, into slots one and two respectively.
+            let third_place_ordinal = bracket.rounds.len();
+            assert_eq!(
+                semifinal.sets[0].loser_advances_to,
+                Some(Advancement {
+                    round: third_place_ordinal,
+                    position: 1,
+                    slot: Slot::One
+                }),
+                "for {entrants} entrants"
+            );
+            assert_eq!(
+                semifinal.sets[1].loser_advances_to,
+                Some(Advancement {
+                    round: third_place_ordinal,
+                    position: 1,
+                    slot: Slot::Two
+                }),
+                "for {entrants} entrants"
+            );
+        }
     }
 }

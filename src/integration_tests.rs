@@ -1978,17 +1978,50 @@ mod tests {
         let sets = crate::tournament::db::list_sets_for_tournament(&pool, tournament.id)
             .await
             .unwrap();
-        assert_eq!(sets.len(), 7, "an 8-bracket is 4 + 2 + 1 sets");
+        assert_eq!(
+            sets.len(),
+            8,
+            "an 8-bracket is 4 + 2 + 1 sets, plus the 3rd place match"
+        );
 
-        // Exactly one set has nowhere to advance to: the final.
-        let finals: Vec<_> = sets.iter().filter(|s| s.winner_advances_to_set_id.is_none()).collect();
-        assert_eq!(finals.len(), 1, "advancement should form a single-rooted tree");
+        // Two sets have nowhere to advance a winner to: the final, and the 3rd
+        // place match (whose winner is 3rd, not further advancement).
+        let rootless: Vec<_> = sets.iter().filter(|s| s.winner_advances_to_set_id.is_none()).collect();
+        assert_eq!(
+            rootless.len(),
+            2,
+            "the final and the 3rd place match are both winner-rootless"
+        );
+
+        // Both semifinal sets feed a loser to the same set — the 3rd place
+        // match — which is one of the two rootless sets above.
+        let third_place_feeders: Vec<_> = sets.iter().filter(|s| s.loser_advances_to_set_id.is_some()).collect();
+        assert_eq!(
+            third_place_feeders.len(),
+            2,
+            "both semifinal sets feed a loser somewhere"
+        );
+        let third_place_id = third_place_feeders[0].loser_advances_to_set_id.unwrap();
+        assert!(
+            third_place_feeders
+                .iter()
+                .all(|s| s.loser_advances_to_set_id == Some(third_place_id)),
+            "both semifinal losers feed the same 3rd place set"
+        );
+        assert!(
+            rootless.iter().any(|s| s.id == third_place_id),
+            "the 3rd place set is winner-rootless too"
+        );
 
         // And every link points at a set that exists, in a slot that is 1 or 2.
         let ids: Vec<i64> = sets.iter().map(|s| s.id).collect();
         for set in sets.iter().filter(|s| s.winner_advances_to_set_id.is_some()) {
             assert!(ids.contains(&set.winner_advances_to_set_id.unwrap()));
             assert!(matches!(set.winner_advances_to_slot, Some(1) | Some(2)));
+        }
+        for set in sets.iter().filter(|s| s.loser_advances_to_set_id.is_some()) {
+            assert!(ids.contains(&set.loser_advances_to_set_id.unwrap()));
+            assert!(matches!(set.loser_advances_to_slot, Some(1) | Some(2)));
         }
     }
 
@@ -2021,6 +2054,10 @@ mod tests {
         assert_eq!(sets[0].status, "ready");
         assert_eq!(sets[1].status, "ready");
         assert_eq!(sets[2].status, "pending", "the final waits on its feeders");
+        assert_eq!(
+            sets[3].status, "pending",
+            "the 3rd place match waits on both semifinal losers, neither of which exists yet"
+        );
     }
 
     #[tokio::test]
@@ -2041,7 +2078,9 @@ mod tests {
         assert_eq!(bye.winner_user_id, Some(1), "the occupant wins it");
         assert!(bye.completed_at.is_some());
 
-        // And seed 1 is already sitting in the final.
+        // And seed 1 is already sitting in the final — still the last set here,
+        // since a bye semifinal (exactly this case) means no 3rd place match
+        // exists to sit after it.
         let final_set = sets.last().unwrap();
         assert_eq!(final_set.slot1_user_id, Some(1));
         assert_eq!(final_set.status, "pending", "still waiting on the other half");
@@ -2225,6 +2264,113 @@ mod tests {
             "active",
             "the champion is not eliminated"
         );
+    }
+
+    #[tokio::test]
+    async fn both_semifinal_losers_fill_the_3rd_place_match_and_it_settles_independently_of_the_final() {
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+        assert_eq!(ids.len(), 4, "semifinal x2, final, 3rd place");
+
+        report_games(&pool, ids[0], &[1, 1]).await; // user 1 beats user 4
+        let first = decide_and_complete(&pool, tournament.id, ids[0]).await.unwrap();
+        assert!(!first.is_third_place);
+
+        let third_place = crate::tournament::db::get_set(&pool, ids[3]).await.unwrap().unwrap();
+        assert_eq!(
+            third_place.slot1_user_id,
+            Some(4),
+            "the first semifinal's loser seats slot 1"
+        );
+        assert_eq!(
+            third_place.status, "pending",
+            "still waiting on the other semifinal's loser"
+        );
+
+        report_games(&pool, ids[1], &[3, 3]).await; // user 3 beats user 2
+        let second = decide_and_complete(&pool, tournament.id, ids[1]).await.unwrap();
+        assert!(!second.is_third_place);
+
+        let third_place = crate::tournament::db::get_set(&pool, ids[3]).await.unwrap().unwrap();
+        assert_eq!(third_place.slot1_user_id, Some(4));
+        assert_eq!(
+            third_place.slot2_user_id,
+            Some(2),
+            "the second semifinal's loser seats slot 2"
+        );
+        assert_eq!(third_place.status, "ready");
+
+        // The final decides the tournament, regardless of whether the 3rd place
+        // match has been played yet.
+        report_games(&pool, ids[2], &[3, 1, 3]).await;
+        let final_advanced = decide_and_complete(&pool, tournament.id, ids[2]).await.unwrap();
+        assert!(final_advanced.tournament_completed);
+        assert!(!final_advanced.is_third_place);
+
+        // The 3rd place match settles afterward without re-completing the
+        // tournament.
+        report_games(&pool, ids[3], &[4, 4]).await; // user 4 takes 3rd
+        let third_place_advanced = decide_and_complete(&pool, tournament.id, ids[3]).await.unwrap();
+        assert!(third_place_advanced.completed);
+        assert!(third_place_advanced.is_third_place);
+        assert!(
+            !third_place_advanced.tournament_completed,
+            "the tournament was already completed by the final"
+        );
+        assert!(
+            !third_place_advanced.target_became_ready,
+            "a 3rd place match advances nowhere"
+        );
+
+        let after = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "completed", "still completed, not re-stamped");
+
+        let third_place = crate::tournament::db::get_set(&pool, ids[3]).await.unwrap().unwrap();
+        assert_eq!(third_place.status, "completed");
+        assert_eq!(third_place.winner_user_id, Some(4));
+    }
+
+    #[tokio::test]
+    async fn the_3rd_place_match_can_settle_before_the_final_without_ending_the_tournament() {
+        // Order-independence: whichever of the two rootless sets is decided
+        // first, only the final flips the tournament's status.
+        let pool = test_pool().await;
+        let tournament = setup_running_bracket(&pool).await;
+        let ids = set_ids(&pool, tournament.id).await;
+
+        report_games(&pool, ids[0], &[1, 1]).await;
+        decide_and_complete(&pool, tournament.id, ids[0]).await.unwrap();
+        report_games(&pool, ids[1], &[3, 3]).await;
+        decide_and_complete(&pool, tournament.id, ids[1]).await.unwrap();
+
+        report_games(&pool, ids[3], &[4, 4]).await;
+        let third_place_advanced = decide_and_complete(&pool, tournament.id, ids[3]).await.unwrap();
+        assert!(third_place_advanced.is_third_place);
+        assert!(
+            !third_place_advanced.tournament_completed,
+            "the final hasn't been played yet"
+        );
+
+        let before = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.status, "running");
+
+        report_games(&pool, ids[2], &[3, 1, 3]).await;
+        let final_advanced = decide_and_complete(&pool, tournament.id, ids[2]).await.unwrap();
+        assert!(final_advanced.tournament_completed);
+        assert!(!final_advanced.is_third_place);
+
+        let after = crate::tournament::db::get_tournament(&pool, tournament.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "completed");
     }
 
     #[tokio::test]
@@ -3040,7 +3186,7 @@ mod tests {
         let rounds = crate::tournament::db::list_rounds_for_stage(&pool, stage.id)
             .await
             .unwrap();
-        assert_eq!(rounds.len(), 2, "a 4-bracket is two rounds");
+        assert_eq!(rounds.len(), 3, "a 4-bracket is two rounds plus the 3rd place match");
         // Ordered by ordinal, so outermost first — the same order the presets are
         // resolved in, which is the mapping that could silently come out reversed.
         assert_eq!(rounds[0].draft_preset_id.as_deref(), Some("preset"));
@@ -3048,6 +3194,14 @@ mod tests {
             rounds[1].draft_preset_id.as_deref(),
             Some("final-preset"),
             "an assignment at depth 1 covers the final and nothing else"
+        );
+        // The 3rd place round resolves no preset of its own — it borrows the
+        // semifinal's, which is exactly the guard against a silently-NULL
+        // draft_preset_id (and therefore no draft room) on this set.
+        assert_eq!(
+            rounds[2].draft_preset_id.as_deref(),
+            Some("preset"),
+            "the 3rd place match reuses the semifinal's preset, not the final's"
         );
     }
 

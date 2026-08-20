@@ -125,7 +125,7 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
     let round_count = bracket::round_count(bracket::size(field.len()));
     // One resolution, two shapes taken off it: the series lengths the bracket is
     // built from, and the preset ids its rounds record.
-    let Some(per_round) = setup::presets_per_round(&presets, round_count) else {
+    let Some(mut per_round) = setup::presets_per_round(&presets, round_count) else {
         return Ok(StartOutcome::NotConfigured);
     };
     let Some(best_of) = per_round
@@ -138,6 +138,15 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
     let Ok(built) = bracket::build(field.len(), &best_of) else {
         return Ok(StartOutcome::TooFewEntrants);
     };
+
+    // A 3rd place round resolves no preset of its own — it borrows the
+    // semifinal's, so `per_round` needs the same entry appended a second time to
+    // stay `insert_bracket`'s one-entry-per-round length (checked by its
+    // `debug_assert_eq!`, and load-bearing: falling short there would silently
+    // leave the 3rd place set with no draft room).
+    if built.rounds.len() == round_count + 1 {
+        per_round.push(per_round[round_count - 2]);
+    }
 
     let seed_to_user: HashMap<u32, i64> = field
         .iter()
@@ -152,7 +161,10 @@ pub(crate) async fn start(pool: &sqlx::SqlitePool, tournament: &Tournament) -> R
 
     Ok(StartOutcome::Started {
         entrants: field.len(),
-        rounds: built.rounds.len(),
+        // Not `built.rounds.len()`: the 3rd place round, when present, is not a
+        // round an organizer should be told to expect — it plays out alongside
+        // the round before it, not as a new stage of the event.
+        rounds: round_count,
     })
 }
 

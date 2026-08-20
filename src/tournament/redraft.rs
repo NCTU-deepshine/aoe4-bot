@@ -19,6 +19,7 @@
 use crate::Error;
 use crate::db::{to_channel_id, to_db_id, to_message_id};
 use crate::locale::Locale;
+use crate::tournament::bracket;
 use crate::tournament::completion;
 use crate::tournament::db::{self, Tournament, TournamentSet};
 use crate::tournament::set_thread::{self, SetHeading};
@@ -163,6 +164,7 @@ pub(crate) async fn run(
         round_name: round.name.clone(),
         position: set.position,
         best_of: round.best_of,
+        is_third_place: round.name == bracket::THIRD_PLACE,
     };
 
     if set.draft_external_id.is_none() {

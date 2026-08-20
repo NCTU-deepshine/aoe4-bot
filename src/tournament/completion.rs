@@ -99,6 +99,9 @@ pub(crate) enum CompleteOutcome {
         tally: Tally,
         opened_next: bool,
         tournament_complete: bool,
+        /// Whether the set just settled was the 3rd place match — its own reply,
+        /// since it neither opens a next set nor ends the tournament by itself.
+        is_third_place: bool,
         settlement: Settlement,
     },
     /// Nobody has a majority yet, so nothing was written.
@@ -123,14 +126,18 @@ impl CompleteOutcome {
                 tally,
                 opened_next,
                 tournament_complete,
+                is_third_place,
                 settlement,
             } => {
                 let (score, next) = (
                     format!("{}-{}", tally.slot1_wins, tally.slot2_wins),
-                    match (tournament_complete, opened_next) {
-                        (true, _) => locale.pick("賽事到此結束。", "That was the final — the tournament is over."),
-                        (false, true) => locale.pick("下一場對戰已開啟。", "The next set is open."),
-                        (false, false) => locale.pick(
+                    match (tournament_complete, is_third_place, opened_next) {
+                        (true, _, _) => locale.pick("賽事到此結束。", "That was the final — the tournament is over."),
+                        // Neither opens a next set nor ends the event by itself —
+                        // "waits on the other half" would simply be false here.
+                        (false, true, _) => locale.pick("🥉 已決定季軍。", "🥉 Third place decided."),
+                        (false, false, true) => locale.pick("下一場對戰已開啟。", "The next set is open."),
+                        (false, false, false) => locale.pick(
                             "下一場要等另一半也分出勝負。",
                             "The next set waits on the other half of the bracket.",
                         ),
@@ -324,6 +331,7 @@ async fn settle(
         tally,
         opened_next: advanced.target_became_ready,
         tournament_complete: advanced.tournament_completed,
+        is_third_place: advanced.is_third_place,
         settlement,
     })
 }
@@ -452,6 +460,7 @@ mod tests {
             },
             opened_next: true,
             tournament_complete: false,
+            is_third_place: false,
             settlement: Settlement::Played,
         };
         let zh = outcome.message(Locale::ZhTw);
@@ -478,10 +487,32 @@ mod tests {
             },
             opened_next: false,
             tournament_complete: true,
+            is_third_place: false,
             settlement: Settlement::Played,
         };
         assert!(outcome.message(Locale::En).contains("tournament is over"));
         assert!(outcome.message(Locale::ZhTw).contains("賽事到此結束"));
+    }
+
+    #[test]
+    fn the_3rd_place_match_names_itself_rather_than_a_next_set() {
+        // It neither opens a next set nor ends the event by itself, so it must
+        // not fall into "waits on the other half" — which would simply be false.
+        let outcome = CompleteOutcome::Completed {
+            winner_name: "MarineLorD".to_string(),
+            loser_name: "Beasty".to_string(),
+            tally: Tally {
+                slot1_wins: 2,
+                slot2_wins: 1,
+            },
+            opened_next: false,
+            tournament_complete: false,
+            is_third_place: true,
+            settlement: Settlement::Played,
+        };
+        assert!(outcome.message(Locale::En).contains("Third place decided"));
+        assert!(outcome.message(Locale::ZhTw).contains("已決定季軍"));
+        assert!(!outcome.message(Locale::En).contains("waits on the other half"));
     }
 
     #[test]
@@ -515,6 +546,7 @@ mod tests {
             },
             opened_next: true,
             tournament_complete: false,
+            is_third_place: false,
             settlement,
         };
         let awarded = settled(Settlement::Walkover);
