@@ -185,8 +185,9 @@ impl Dispatcher {
         }
     }
 
-    /// The `🔄 Regenerate draft` button, resolved by set for the same reason
-    /// `handle_call_admin` is: the button lives on the set's own panel.
+    /// The `➕ Create draft` / `🔄 Regenerate draft` button — same button, two
+    /// labels — resolved by set for the same reason `handle_call_admin` is: the
+    /// button lives on the set's own panel.
     async fn handle_redraft(&self, ctx: &Context, component: &ComponentInteraction, set_id: i64) {
         let Ok(Some(set)) = db::get_set(&self.pool, set_id).await else {
             error!("redraft button for unknown set {set_id}");

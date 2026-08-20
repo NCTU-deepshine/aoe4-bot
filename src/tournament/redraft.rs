@@ -1,10 +1,16 @@
-//! `/set redraft`, and the `🔄 Regenerate draft` button on the set panel: the
-//! remedy for a draft that went wrong, since the panel only instructs a seat —
-//! it never checks who actually took it (§8.7).
+//! `/set redraft`, and the same button on the set panel — labelled `➕ Create
+//! draft` before a set has one, `🔄 Regenerate draft` after. Creation is
+//! deferred to that first press rather than minted when the thread opens, and
+//! this module is the one place both a set's first draft and its remedy for a
+//! draft that went wrong live, since the panel only instructs a seat — it
+//! never checks who actually took it (§8.7).
 //!
 //! `refuse` is pure, like `report::refuse`, and pins the guard order with a
 //! test rather than leaving it to be read out of `run`. `run` is the effectful
-//! half: it does the Discord and DB work in the order §8.7 requires, because
+//! half, and branches on whether the set already has a draft: a first
+//! creation has no old room to strike, so it can go straight through
+//! `set_thread::create_room` and edit the panel in place; a regenerate does
+//! the Discord and DB work in the order §8.7 requires, because
 //! `db::set_draft_pointer` nulls the announcement handle, so anything that
 //! still needs the *old* handle — striking the stale announcement and panel —
 //! has to run before it, and nothing may be destroyed before the replacement
@@ -28,6 +34,9 @@ pub(crate) const FREE_REDRAFTS: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RedraftOutcome {
+    /// The set's first draft, minted on the first press of the button that
+    /// otherwise reads `🔄 Regenerate draft`.
+    Created,
     Redrafted {
         count: i64,
     },
@@ -43,13 +52,18 @@ pub(crate) enum RedraftOutcome {
     RateLimited {
         count: i64,
     },
-    /// The draft tool refused the mint; the existing draft is untouched.
-    RoomFailed,
+    /// The draft tool refused the mint. `existing` says whether this was a
+    /// regenerate (so the prior draft is untouched) or a first creation (so
+    /// there was nothing to leave untouched) — the two need different wording.
+    RoomFailed {
+        existing: bool,
+    },
 }
 
 impl RedraftOutcome {
     pub(crate) fn message(self, locale: Locale) -> String {
         match self {
+            RedraftOutcome::Created => locale.pick("Draft 已建立。".to_string(), "Draft created.".to_string()),
             RedraftOutcome::Redrafted { count } => locale.pick(
                 format!("已重新產生 Draft（第 {count} 次）。"),
                 format!("Draft regenerated (redraft #{count})."),
@@ -79,11 +93,15 @@ impl RedraftOutcome {
                      admin can regenerate it."
                 ),
             ),
-            RedraftOutcome::RoomFailed => locale.pick(
+            RedraftOutcome::RoomFailed { existing: true } => locale.pick(
                 "無法建立新的 Draft 房間，原本的 Draft 未受影響。請稍後再試。".to_string(),
                 "Couldn't create a new draft room — the existing draft is untouched. Try again \
                  shortly."
                     .to_string(),
+            ),
+            RedraftOutcome::RoomFailed { existing: false } => locale.pick(
+                "無法建立 Draft 房間，請稍後再試。".to_string(),
+                "Couldn't create a draft room. Try again shortly.".to_string(),
             ),
         }
     }
@@ -114,7 +132,9 @@ pub(crate) fn refuse(set: &TournamentSet, has_preset: bool, is_player: bool, is_
     None
 }
 
-/// Abandons `set`'s current draft for a fresh one from the same preset.
+/// Creates `set`'s first draft, or abandons its current one for a fresh one
+/// from the same preset — whichever the button/command means by whether the
+/// set already has a draft.
 ///
 /// `actor_user_id` need not be a player — a button or command from an admin who
 /// is neither of the two names calls in with `is_admin = true` and an id that
@@ -135,15 +155,47 @@ pub(crate) async fn run(
         return Ok(refusal);
     }
 
-    // Minted first and checked before anything else moves: a failed mint must
-    // leave the existing draft exactly as it was.
-    let Some((draft_id, room)) = set_thread::mint_room(tournament, &round, set.id).await else {
-        return Ok(RedraftOutcome::RoomFailed);
-    };
-
     // Both slots are `Some` — `refuse` already returned `NotPlayable` otherwise.
     let one = set_thread::player(pool, tournament.id, set.slot1_user_id.unwrap_or_default()).await?;
     let two = set_thread::player(pool, tournament.id, set.slot2_user_id.unwrap_or_default()).await?;
+    let heading = SetHeading {
+        id: set.id,
+        round_name: round.name.clone(),
+        position: set.position,
+        best_of: round.best_of,
+    };
+
+    if set.draft_external_id.is_none() {
+        // A first draft has no old room to strike and no announcement to
+        // supersede, so it goes straight through the same path `open` used to
+        // take eagerly, and edits the existing pinned panel in place.
+        let Some(room) = set_thread::create_room(pool, tournament, &round, set.id).await else {
+            return Ok(RedraftOutcome::RoomFailed { existing: false });
+        };
+
+        if let (Some(thread_id), Some(panel_id)) = (set.thread_id.map(to_channel_id), set.panel_message_id) {
+            let (content, components) = set_thread::render_panel(&heading, &one, &two, Some(&room));
+            if let Err(err) = thread_id
+                .edit_message(
+                    &http,
+                    to_message_id(panel_id),
+                    EditMessage::new().content(content).components(components),
+                )
+                .await
+            {
+                error!("failed to update the panel for set {}: {err:?}", set.id);
+            }
+        }
+
+        set_thread::announce(&http, pool, tournament, &heading, &one, &two, &room).await;
+        return Ok(RedraftOutcome::Created);
+    }
+
+    // Minted first and checked before anything else moves: a failed mint must
+    // leave the existing draft exactly as it was.
+    let Some((draft_id, room)) = set_thread::mint_room(tournament, &round, set.id).await else {
+        return Ok(RedraftOutcome::RoomFailed { existing: true });
+    };
     // `None` for an admin who is neither player — the notice falls back to a
     // mention for them, since there is no in-game name to address them by.
     let actor = if one.user_id == actor_user_id {
@@ -152,12 +204,6 @@ pub(crate) async fn run(
         Some(&two)
     } else {
         None
-    };
-    let heading = SetHeading {
-        id: set.id,
-        round_name: round.name.clone(),
-        position: set.position,
-        best_of: round.best_of,
     };
 
     // Strike the old links before repointing: `set_draft_pointer` nulls the
@@ -212,9 +258,7 @@ pub(crate) async fn run(
             error!("failed to post the redraft notice for set {}: {err:?}", set.id);
         }
 
-        // Admins are unread by `render_panel` on the working-room branch, which
-        // this always is here — the mint above already succeeded.
-        let (content, components) = set_thread::render_panel(&heading, &one, &two, Some(&room), &[]);
+        let (content, components) = set_thread::render_panel(&heading, &one, &two, Some(&room));
         match thread_id
             .send_message(&http, CreateMessage::new().content(content).components(components))
             .await
@@ -322,13 +366,15 @@ mod tests {
     #[test]
     fn every_refusal_renders_in_both_locales() {
         let outcomes = [
+            RedraftOutcome::Created,
             RedraftOutcome::Redrafted { count: 1 },
             RedraftOutcome::AlreadyComplete,
             RedraftOutcome::NotPlayable,
             RedraftOutcome::NotYours,
             RedraftOutcome::NoPreset,
             RedraftOutcome::RateLimited { count: FREE_REDRAFTS },
-            RedraftOutcome::RoomFailed,
+            RedraftOutcome::RoomFailed { existing: true },
+            RedraftOutcome::RoomFailed { existing: false },
         ];
         for outcome in outcomes {
             assert!(!outcome.message(Locale::ZhTw).is_empty());

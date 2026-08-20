@@ -2198,13 +2198,16 @@ pub async fn set_award(
     Ok(())
 }
 
-/// 🔄 Abandons this set's current draft for a fresh one from the same preset.
+/// 🔄 Creates this set's draft, or regenerates it if it already has one.
 #[poise::command(
     slash_command,
     guild_only,
     check = "tournament_only",
     rename = "redraft",
-    description_localized("zh-TW", "🔄 放棄這場對戰目前的 Draft，並用相同的預設集重新產生一個。")
+    description_localized(
+        "zh-TW",
+        "🔄 若這場對戰還沒有 Draft 就建立一個，否則放棄目前的 Draft 並用相同的預設集重新產生。"
+    )
 )]
 pub async fn set_redraft(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;

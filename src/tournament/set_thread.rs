@@ -50,14 +50,14 @@ pub(crate) fn thread_name(round_ordinal: i64, position: i64, one: &str, two: &st
 /// The pinned control panel. Bilingual, like the other panels: one
 /// message with several readers, none of whom interacted to summon it.
 ///
-/// `room` is `None` when draft creation failed, which is a state the thread has
-/// to survive — an admin can still act on a set that has a thread and no room.
+/// `room` is `None` before a draft has been created for this set — creation is
+/// deliberately deferred to the first press of the button below, not minted
+/// eagerly when the thread opens.
 pub(crate) fn render_panel(
     set: &SetHeading,
     one: &Player,
     two: &Player,
     room: Option<&Room>,
-    admins: &[i64],
 ) -> (String, Vec<CreateActionRow>) {
     // Names are player-editable aoe4world strings, so they are escaped where they sit
     // in markdown and `sanitize`d where they sit inside a code span — a backtick
@@ -76,25 +76,20 @@ pub(crate) fn render_panel(
     );
 
     let Some(room) = room else {
-        // Ping the admins by name rather than leaving "an admin" to notice: this
-        // is the one state nobody in the thread can fix for themselves.
-        let mentions: Vec<String> = admins.iter().map(|id| format!("<@{id}>")).collect();
-        let called = if mentions.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", mentions.join(" "))
-        };
         return (
             format!(
-                "{header}\n**無法建立 Draft 房間，請管理員協助。**{called}\n\
-                 **Draft room could not be created — an admin needs to look at it.**{called}\n"
+                "{header}\nDraft 房間尚未建立，請按下方按鈕建立。\n\
+                 **No draft room yet — press the button below to create one.**\n"
             ),
-            // No call-admin button here: this panel names the admins itself, so
-            // their mentions are already in front of whoever needs them. Regenerate
-            // is the one useful button — a failed mint is exactly what it retries.
+            // Call-admin here too: nothing has failed yet, so there is nobody to
+            // name outright, but a player stuck on this state still needs a way
+            // to reach one.
             vec![CreateActionRow::Buttons(vec![
                 CreateButton::new(Action::Redraft.custom_id(set.id))
-                    .label("🔄 重新產生 Draft / Regenerate draft")
+                    .label("➕ 建立 Draft / Create draft")
+                    .style(ButtonStyle::Primary),
+                CreateButton::new(Action::CallAdmin.custom_id(set.id))
+                    .label("呼叫管理員 / Call an organizer")
                     .style(ButtonStyle::Secondary),
             ])],
         );
@@ -356,7 +351,11 @@ impl Room {
     }
 }
 
-/// Opens a set: thread, members, draft room, pinned panel.
+/// Opens a set: thread, members, pinned panel.
+///
+/// The draft room is deliberately not minted here — creation is deferred to the
+/// first press of the panel's `➕ Create draft` button, so a set that never gets
+/// played never spends a room on the draft tool.
 ///
 /// A no-op once the set has a thread, so the caller can hand it every ready set
 /// without tracking which are new — completing a set reopens the same path as
@@ -392,8 +391,6 @@ pub(crate) async fn open(
         .await?;
     db::set_thread(pool, set.id, crate::db::to_db_id(thread.id)).await?;
 
-    // Fetched once: the same people are added to the thread and pinged if the
-    // draft could not be created.
     let admins: Vec<i64> = db::list_admins(pool, tournament.id)
         .await
         .unwrap_or_default()
@@ -408,8 +405,7 @@ pub(crate) async fn open(
         position: set.position,
         best_of: round.best_of,
     };
-    let room = create_room(pool, tournament, &round, set.id).await;
-    let (content, components) = render_panel(&heading, &one, &two, room.as_ref(), &admins);
+    let (content, components) = render_panel(&heading, &one, &two, None);
     let message = thread
         .id
         .send_message(&http, CreateMessage::new().content(content).components(components))
@@ -418,15 +414,9 @@ pub(crate) async fn open(
     if let Err(err) = message.pin(&http).await {
         error!("failed to pin the set panel for set {}: {err:?}", set.id);
     }
-    // The handle a redraft needs to strike this panel before replacing it.
+    // The handle the create/redraft button needs to edit this panel in place.
     if let Err(err) = db::set_panel_message(pool, set.id, crate::db::to_db_id(message.id)).await {
         error!("failed to record the panel for set {}: {err:?}", set.id);
-    }
-
-    // Last, and best-effort: if the bot is being rate limited, the players' own
-    // instruction matters more than the spectator post.
-    if let Some(room) = room.as_ref() {
-        announce(&http, pool, tournament, &heading, &one, &two, room).await;
     }
 
     Ok(())
@@ -680,7 +670,15 @@ async fn add_members(http: &impl CacheHttp, thread_id: serenity::all::ChannelId,
 ///
 /// Deliberately does not fail the caller: a set with a thread and no room is
 /// recoverable by an admin, and a set with neither is not.
-async fn create_room(pool: &SqlitePool, tournament: &Tournament, round: &TournamentRound, set_id: i64) -> Option<Room> {
+///
+/// `pub(crate)` so `redraft::run` can reuse it for a set's first draft, where
+/// there is no old room to strike and `mint_room`'s split ordering is moot.
+pub(crate) async fn create_room(
+    pool: &SqlitePool,
+    tournament: &Tournament,
+    round: &TournamentRound,
+    set_id: i64,
+) -> Option<Room> {
     let (draft_id, room) = mint_room(tournament, round, set_id).await?;
     if let Err(err) = db::set_draft_pointer(pool, set_id, &draft_id).await {
         error!("failed to store the draft pointer for set {set_id}: {err:?}");
@@ -788,7 +786,6 @@ mod tests {
             &player(7, 1, "MarineLorD"),
             &player(9, 8, "Beasty"),
             Some(&room()),
-            &[],
         );
         // One ping each, in the header — the seat lines address them by
         // in-game name instead of mentioning them again.
@@ -805,7 +802,6 @@ mod tests {
             &player(7, 1, "MarineLorD"),
             &player(9, 8, "Beasty"),
             Some(&room()),
-            &[],
         );
         assert!(content.contains("`Beasty` takes seat Player 2"), "{content}");
         assert!(!content.to_lowercase().contains("unverified"), "{content}");
@@ -821,7 +817,6 @@ mod tests {
             &player(7, 1, "MarineLorD"),
             &invitee(9, 8, "Beasty"),
             Some(&room()),
-            &[],
         );
         assert!(
             content.contains("`Beasty` (name unverified) takes seat Player 2"),
@@ -840,7 +835,6 @@ mod tests {
             &player(7, 1, "A"),
             &player(9, 2, "B"),
             Some(&room()),
-            &[],
         );
         // `/watch/` cannot claim a seat, so the body must carry `/match/`.
         assert!(content.contains("/match/65f1"), "{content}");
@@ -858,7 +852,6 @@ mod tests {
             &player(7, 1, "A"),
             &player(9, 4, "B"),
             Some(&room()),
-            &[],
         );
         assert!(content.contains("Semifinal · Match 2 — Bo5"), "{content}");
     }
@@ -872,7 +865,6 @@ mod tests {
             &player(7, 1, "MarineLorD"),
             &player(9, 8, "Beasty"),
             Some(&room()),
-            &[],
         );
         assert!(
             content.contains("`MarineLorD` takes seat Player 1** and hosts the lobby in game"),
@@ -889,20 +881,19 @@ mod tests {
     }
 
     #[test]
-    fn only_the_working_panel_needs_a_call_admin_button() {
-        // The button exists because nothing on a working panel says who to ask.
-        // The failure panel names the admins outright, so a second route to the
-        // same people is clutter — but both panels offer regenerate, since a
-        // failed mint is exactly what it retries.
+    fn both_panel_states_offer_a_call_admin_button_but_only_the_working_one_offers_set_done() {
+        // A player stuck before creation still needs a way to reach an admin, so
+        // call-admin is on both states — set-done is the one thing that makes no
+        // sense before there is a draft to have played.
         let set = heading(77, "Round 1", 1, 3);
-        let (_, with_room) = render_panel(&set, &player(7, 1, "A"), &player(9, 8, "B"), Some(&room()), &[42]);
-        let (_, without) = render_panel(&set, &player(7, 1, "A"), &player(9, 8, "B"), None, &[42]);
+        let (_, with_room) = render_panel(&set, &player(7, 1, "A"), &player(9, 8, "B"), Some(&room()));
+        let (_, without) = render_panel(&set, &player(7, 1, "A"), &player(9, 8, "B"), None);
 
         assert!(labels(&with_room).contains("calladmin:77"), "{}", labels(&with_room));
         assert!(labels(&with_room).contains("Watch draft"), "{}", labels(&with_room));
         assert!(labels(&with_room).contains("redraft:77"), "{}", labels(&with_room));
         assert!(labels(&with_room).contains("setdone:77"), "{}", labels(&with_room));
-        assert!(!labels(&without).contains("calladmin"), "{}", labels(&without));
+        assert!(labels(&without).contains("calladmin:77"), "{}", labels(&without));
         assert!(labels(&without).contains("redraft:77"), "{}", labels(&without));
         assert!(
             !labels(&without).contains("setdone"),
@@ -912,41 +903,20 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_draft_pings_the_admins_who_can_fix_it() {
-        // The one state nobody in the thread can resolve themselves, so it calls
-        // the admins by name rather than saying "an admin" to no one.
+    fn a_set_with_no_draft_yet_invites_the_button_press_rather_than_reporting_a_failure() {
+        // Creation is deferred to the button, not attempted eagerly, so a fresh
+        // set reads as "not created yet" rather than "something went wrong".
         let (content, components) = render_panel(
             &heading(1, "Round 1", 1, 3),
             &player(7, 1, "A"),
             &player(9, 8, "B"),
             None,
-            &[42, 43],
         );
-        assert!(content.contains("could not be created"), "{content}");
-        assert!(content.contains("<@42>"), "{content}");
-        assert!(content.contains("<@43>"), "{content}");
+        assert!(content.contains("No draft room yet"), "{content}");
+        assert!(!content.contains("could not be created"), "{content}");
         assert!(content.contains("<@7>"), "the players are still named: {content}");
-        // The mentions are the route to an organizer here, so no second
-        // call-admin button — but regenerate is still offered, as the retry.
-        assert!(!labels(&components).contains("calladmin"), "{components:?}");
+        assert!(labels(&components).contains("Create draft"), "{components:?}");
         assert!(labels(&components).contains("redraft:1"), "{components:?}");
-    }
-
-    #[test]
-    fn a_failed_draft_reads_cleanly_with_no_admins_to_ping() {
-        let (content, _) = render_panel(
-            &heading(1, "Round 1", 1, 3),
-            &player(7, 1, "A"),
-            &player(9, 8, "B"),
-            None,
-            &[],
-        );
-        assert!(content.contains("could not be created"), "{content}");
-        assert!(!content.contains("<@>"), "{content}");
-        assert!(
-            !content.contains("it. \n"),
-            "no dangling space where mentions would go: {content}"
-        );
     }
 
     // The public draft-channel post.
@@ -1068,7 +1038,6 @@ mod tests {
             &player(7, 1, "a`b"),
             &player(9, 8, "B"),
             Some(&room()),
-            &[],
         );
         assert!(content.contains("`a'b` takes seat Player 1"), "{content}");
         assert!(!content.contains("a`b"), "no raw backtick survives: {content}");
@@ -1081,7 +1050,6 @@ mod tests {
             &player(7, 1, "*Bea*sty_"),
             &player(9, 8, "B"),
             Some(&room()),
-            &[],
         );
         assert!(content.contains(r"\*Bea\*sty\_"), "{content}");
     }
